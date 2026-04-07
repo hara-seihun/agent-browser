@@ -168,6 +168,46 @@ pub async fn take_screenshot(
     })
 }
 
+/// Prepare the target for a screenshot.
+///
+/// Chromium can stop producing compositor frames for an occluded or background
+/// target. Remote headed browsers hit this after restoring several tabs, which
+/// leaves `Page.captureScreenshot` waiting until the CDP command times out.
+/// Focus emulation and `Page.bringToFront` wake the target before capture. These
+/// calls stay best-effort for older browsers and providers without Emulation.
+async fn prepare_target_for_capture(client: &CdpClient, session_id: &str) {
+    let _ = client
+        .send_command(
+            "Emulation.setFocusEmulationEnabled",
+            Some(serde_json::json!({ "enabled": true })),
+            Some(session_id),
+        )
+        .await;
+
+    let _ = client
+        .send_command_no_params("Page.bringToFront", Some(session_id))
+        .await;
+
+    let expr = "(() => { \
+        try { \
+            const rs = document.readyState; \
+            if (rs === 'loading') return false; \
+            void document.documentElement.offsetHeight; \
+            return true; \
+        } catch (_) { return true; } \
+    })()";
+
+    let params = serde_json::json!({
+        "expression": expr,
+        "returnByValue": true,
+        "awaitPromise": false,
+    });
+
+    let _ = client
+        .send_command("Runtime.evaluate", Some(params), Some(session_id))
+        .await;
+}
+
 async fn capture_screenshot_base64(
     client: &CdpClient,
     session_id: &str,
@@ -175,6 +215,8 @@ async fn capture_screenshot_base64(
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
+    prepare_target_for_capture(client, session_id).await;
+
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
         quality: if options.format == "jpeg" {
