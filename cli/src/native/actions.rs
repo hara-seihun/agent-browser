@@ -5752,6 +5752,13 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
         )
         .await?;
+        let offset = super::element::session_viewport_offset(
+            &mgr.client,
+            &session_id,
+            &target_session_id,
+            &state.iframe_sessions,
+        )
+        .await?;
         move_mouse_interpolated(
             &mgr.client,
             &target_session_id,
@@ -5763,6 +5770,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             input_mode == "human",
             cmd.get("seed").and_then(Value::as_u64).unwrap_or(0),
             0,
+            offset,
             &state.recording_state.shared_cursor,
         )
         .await?;
@@ -8022,7 +8030,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
         state.mouse_state.buttons = 0;
         if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(release.x, release.y, 0);
+            cursor.record(state.mouse_state.x, state.mouse_state.y, 0);
         }
     }
     Ok(json!({ "handled": true, "accepted": accept }))
@@ -10207,6 +10215,20 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let seed = cmd.get("seed").and_then(Value::as_u64).unwrap_or(0);
 
     // Approach the source before pressing so hover and pointer path handlers fire.
+    let source_offset = super::element::session_viewport_offset(
+        &mgr.client,
+        &session_id,
+        &source_session_id,
+        &state.iframe_sessions,
+    )
+    .await?;
+    let target_offset = super::element::session_viewport_offset(
+        &mgr.client,
+        &session_id,
+        &target_session_id,
+        &state.iframe_sessions,
+    )
+    .await?;
     move_mouse_interpolated(
         &mgr.client,
         &source_session_id,
@@ -10218,6 +10240,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         human,
         seed,
         0,
+        source_offset,
         &state.recording_state.shared_cursor,
     )
     .await?;
@@ -10229,13 +10252,13 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         )
         .await?;
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(sx, sy, 1);
+        cursor.record(sx + source_offset.0, sy + source_offset.1, 1);
     }
 
     // Move in steps to target, keeping the left button held (buttons: 1) so
     // that the browser sees a drag rather than a plain pointer move.
-    state.mouse_state.x = sx;
-    state.mouse_state.y = sy;
+    state.mouse_state.x = sx + source_offset.0;
+    state.mouse_state.y = sy + source_offset.1;
     state.mouse_state.buttons = 1;
     move_mouse_interpolated(
         &mgr.client,
@@ -10248,6 +10271,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         human,
         seed.wrapping_add(1),
         1,
+        target_offset,
         &state.recording_state.shared_cursor,
     )
     .await?;
@@ -10262,7 +10286,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .await?;
     state.mouse_state.buttons = 0;
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(tx, ty, 0);
+        cursor.record(tx + target_offset.0, ty + target_offset.1, 0);
     }
 
     Ok(json!({ "dragged": true, "source": source, "target": target }))
@@ -12574,10 +12598,12 @@ async fn move_mouse_interpolated(
     human: bool,
     seed: u64,
     buttons: i32,
+    viewport_offset: (f64, f64),
     recording_cursor: &recording::SharedRecordingCursor,
 ) -> Result<(), String> {
-    let start_x = mouse_state.x;
-    let start_y = mouse_state.y;
+    // Cursor state stays in page coordinates even when dispatching to an OOPIF.
+    let start_x = mouse_state.x - viewport_offset.0;
+    let start_y = mouse_state.y - viewport_offset.1;
     let dx = target_x - start_x;
     let dy = target_y - start_y;
     let distance = dx.hypot(dy);
@@ -12628,8 +12654,10 @@ async fn move_mouse_interpolated(
         client
             .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(session_id))
             .await?;
+        mouse_state.x = x + viewport_offset.0;
+        mouse_state.y = y + viewport_offset.1;
         if let Ok(mut cursor) = recording_cursor.lock() {
-            cursor.record(x, y, buttons);
+            cursor.record(mouse_state.x, mouse_state.y, buttons);
         }
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -12708,6 +12736,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         human,
         seed,
         buttons,
+        (0.0, 0.0),
         &state.recording_state.shared_cursor,
     )
     .await?;
