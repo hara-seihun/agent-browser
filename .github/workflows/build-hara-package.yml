@@ -1,0 +1,35 @@
+name: Build Hara download repair package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package-linux-x64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Build native executable
+        run: cargo build --release --manifest-path cli/Cargo.toml
+      - name: Pack executable with the npm package
+        run: |
+          install -m 755 cli/target/release/agent-browser bin/agent-browser-linux-x64
+          npm pack --ignore-scripts
+          sha256sum agent-browser-0.37.1.tgz > agent-browser-0.37.1.tgz.sha256
+      - name: Publish immutable package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create download-browser-scope-784d655 \
+            agent-browser-0.37.1.tgz \
+            agent-browser-0.37.1.tgz.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Download browser-scope repair 784d655" \
+            --notes "Linux x64 agent-browser 0.37.1 package built from commit 784d655. Upstream pull request: https://github.com/vercel-labs/agent-browser/pull/1858"
