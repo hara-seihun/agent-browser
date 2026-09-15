@@ -8,7 +8,9 @@ permissions:
 
 jobs:
   package-linux-x64:
-    runs-on: ubuntu-latest
+    # Converge runs glibc 2.36. Keep the published executable compatible with
+    # both fleet hosts instead of inheriting ubuntu-latest's newer libc.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +29,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create download-browser-scope-784d655 \
+          gh release create download-browser-scope-784d655-glibc235 \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Download browser-scope repair 784d655" \
-            --notes "Linux x64 agent-browser 0.37.1 package built from commit 784d655. Upstream pull request: https://github.com/vercel-labs/agent-browser/pull/1858"
+            --title "Download browser-scope repair 784d655 for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for glibc 2.35 compatibility. Source repair commit: 784d655. Upstream pull request: https://github.com/vercel-labs/agent-browser/pull/1858"
