@@ -1,4 +1,4 @@
-name: Build Hara download repair package
+name: Build Hara browser repairs package
 
 on:
   workflow_dispatch:
@@ -29,9 +29,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create download-browser-scope-784d655-glibc235 \
+          gh release create browser-repairs-20260922-glibc235 \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Download browser-scope repair 784d655 for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for glibc 2.35 compatibility. Source repair commit: 784d655. Upstream pull request: https://github.com/vercel-labs/agent-browser/pull/1858"
+            --title "Browser runtime repairs for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for glibc 2.35 compatibility. Includes the download-scope repair from source commit 784d655 (upstream pull request https://github.com/vercel-labs/agent-browser/pull/1858) and the remote-target screenshot wake-up derived from upstream commit 23f9721 (pull request https://github.com/vercel-labs/agent-browser/pull/1189). Packaged source commit: $GITHUB_SHA."
