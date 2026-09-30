@@ -809,8 +809,8 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
-        if let Some(ref browser) = self.browser {
-            self.event_rx = Some(browser.client.subscribe());
+        if let Some(ref mut browser) = self.browser {
+            self.event_rx = Some(browser.take_initial_events());
         }
     }
 

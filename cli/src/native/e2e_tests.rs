@@ -11700,7 +11700,7 @@ async fn start_frame_eval_server() -> (u16, tokio::task::JoinHandle<()>) {
 console.log('same-frame-log');</script></body></html>"#
                         .to_string(),
                     "/cross" => r#"<!doctype html><html lang="en"><head><title>Cross</title></head>
-<body><main><h1>Cross</h1></main><script>window.REALM = 'cross';
+<body><main><h1>Cross</h1><label>Card probe<input id="card-probe"></label></main><script>window.REALM = 'cross';
 console.log('cross-frame-log');</script></body></html>"#
                         .to_string(),
                     _ => "<!doctype html><html lang=\"en\"><body></body></html>".to_string(),
@@ -11790,6 +11790,73 @@ async fn e2e_eval_runs_inside_the_active_frame() {
 
 /// A cross-origin frame logs on its own CDP session, which the top-session
 /// filter dropped. An embedded app then read as silent while it was logging.
+#[tokio::test]
+#[ignore]
+async fn e2e_attach_preserves_existing_cross_origin_frames() {
+    let (port, server) = start_frame_eval_server().await;
+    let mut host = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "host-launch", "action": "launch", "headless": true }),
+            &mut host,
+        )
+        .await,
+    );
+    assert_success(&execute_command(
+        &json!({ "id": "host-nav", "action": "navigate", "url": format!("http://localhost:{port}/top") }), &mut host,
+    ).await);
+    let url = execute_command(&json!({ "id": "host-cdp", "action": "cdp_url" }), &mut host).await;
+    assert_success(&url);
+    let mut attached = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "attach", "action": "launch", "cdpUrl": get_data(&url)["cdpUrl"] }),
+            &mut attached,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "frame", "action": "frame", "selector": "#cross" }),
+            &mut attached,
+        )
+        .await,
+    );
+    let frame = attached.active_frame_id.as_ref().unwrap();
+    assert!(
+        attached.iframe_sessions.contains_key(frame),
+        "existing OOPIF attachment must survive initialization"
+    );
+    let snapshot = execute_command(
+        &json!({ "id": "snapshot", "action": "snapshot", "interactive": true }),
+        &mut attached,
+    )
+    .await;
+    assert_success(&snapshot);
+    assert!(get_data(&snapshot)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Card probe"));
+    assert_success(&execute_command(
+        &json!({ "id": "fill", "action": "fill", "selector": "#card-probe", "value": "attached-frame-fill" }), &mut attached,
+    ).await);
+    let value = execute_command(
+        &json!({ "id": "eval", "action": "evaluate", "script": "window.REALM + ':' + document.querySelector('#card-probe').value" }), &mut attached,
+    ).await;
+    assert_success(&value);
+    assert_eq!(
+        get_data(&value)["result"],
+        json!("cross:attached-frame-fill")
+    );
+    let _ = execute_command(
+        &json!({ "id": "attached-close", "action": "close" }),
+        &mut attached,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "host-close", "action": "close" }), &mut host).await;
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_console_includes_cross_origin_frame_logs() {

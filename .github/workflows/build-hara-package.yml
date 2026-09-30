@@ -24,6 +24,7 @@ jobs:
         run: |
           cargo test --release --manifest-path cli/Cargo.toml e2e_eval_runs_inside_the_active_frame -- --ignored
           cargo test --release --manifest-path cli/Cargo.toml e2e_console_includes_cross_origin_frame_logs -- --ignored
+          cargo test --release --manifest-path cli/Cargo.toml e2e_attach_preserves_existing_cross_origin_frames -- --ignored
       - name: Pack executable with the npm package
         run: |
           install -m 755 cli/target/release/agent-browser bin/agent-browser-linux-x64
@@ -33,9 +34,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create browser-frames-20260930-glibc235 \
+          gh release create browser-remote-frames-20260930-glibc235 \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Cross-origin frame repairs for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Cross-origin CSS frame lookup, selected-frame eval and iframe console fixes derived from upstream PR https://github.com/vercel-labs/agent-browser/pull/1697 (85c8900, c4cabb4; upstream author retained). Retains download-scope PR 1858 and screenshot target-wake PR 1189 repairs. Packaged source commit: $GITHUB_SHA."
+            --title "Remote cross-origin frame repairs for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Cross-origin CSS frame lookup, selected-frame eval and iframe console fixes derived from upstream PR https://github.com/vercel-labs/agent-browser/pull/1697 (85c8900, c4cabb4; upstream author retained). Retains download-scope PR 1858 and screenshot target-wake PR 1189 repairs. Subscribes to CDP events before initial target discovery so existing remote OOPIF attachments survive daemon handoff. Real Chrome e2e verifies existing-target attach, snapshot, fill and evaluation. Packaged source commit: $GITHUB_SHA."

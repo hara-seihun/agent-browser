@@ -393,6 +393,8 @@ impl BrowserProcess {
 
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
+    // Attach emits child-target events before the daemon receives this manager.
+    initial_events: Option<broadcast::Receiver<CdpEvent>>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -450,6 +452,12 @@ const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILED_INITIALIZATION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl BrowserManager {
+    pub fn take_initial_events(&mut self) -> broadcast::Receiver<CdpEvent> {
+        self.initial_events
+            .take()
+            .unwrap_or_else(|| self.client.subscribe())
+    }
+
     /// True when a *default* idle timeout must not close this browser:
     /// a headed window may be in direct human use outside the daemon's socket
     /// commands and dashboard input, and a user-attached browser
@@ -523,6 +531,7 @@ impl BrowserManager {
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
+                initial_events: Some(client.subscribe()),
                 client,
                 browser_process: Some(process),
                 ws_url,
@@ -630,6 +639,7 @@ impl BrowserManager {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
+            initial_events: Some(client.subscribe()),
             client,
             browser_process: None,
             ws_url,
@@ -2411,6 +2421,7 @@ async fn initialize_lightpanda_manager(
         };
 
         let mut manager = BrowserManager {
+            initial_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: ws_url.clone(),
@@ -3118,6 +3129,7 @@ mod tests {
         });
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         BrowserManager {
+            initial_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
@@ -3163,6 +3175,7 @@ mod tests {
 
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         let manager = BrowserManager {
+            initial_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
@@ -3226,6 +3239,7 @@ mod tests {
 
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         let mut manager = BrowserManager {
+            initial_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
