@@ -1748,7 +1748,11 @@ impl DaemonState {
                             &self.active_iframe_sessions,
                         );
 
-                    if !session_matches && !iframe_network_event && !webmcp_event && !iframe_console_event {
+                    if !session_matches
+                        && !iframe_network_event
+                        && !webmcp_event
+                        && !iframe_console_event
+                    {
                         continue;
                     }
 
