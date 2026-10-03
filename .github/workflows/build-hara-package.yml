@@ -20,23 +20,28 @@ jobs:
           workspaces: cli
       - name: Build native executable
         run: cargo build --release --manifest-path cli/Cargo.toml
-      - name: Check selected-frame evaluation and console with real Chrome
+      - name: Check controlled date inputs and frame custody with real Chrome
         run: |
           cargo test --release --manifest-path cli/Cargo.toml e2e_eval_runs_inside_the_active_frame -- --ignored
           cargo test --release --manifest-path cli/Cargo.toml e2e_console_includes_cross_origin_frame_logs -- --ignored
           cargo test --release --manifest-path cli/Cargo.toml e2e_attach_preserves_existing_cross_origin_frames -- --ignored
+          cargo test --release --manifest-path cli/Cargo.toml e2e_fill_controlled_temporal_inputs -- --ignored
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
       - name: Pack executable with the npm package
         run: |
           install -m 755 cli/target/release/agent-browser bin/agent-browser-linux-x64
-          npm pack --ignore-scripts
+          pnpm pack
           sha256sum agent-browser-0.37.1.tgz > agent-browser-0.37.1.tgz.sha256
       - name: Publish immutable package
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create browser-remote-frames-20260930-glibc235 \
+          gh release create browser-controlled-dates-20261003-glibc235 \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Remote cross-origin frame repairs for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Cross-origin CSS frame lookup, selected-frame eval and iframe console fixes derived from upstream PR https://github.com/vercel-labs/agent-browser/pull/1697 (85c8900, c4cabb4; upstream author retained). Retains download-scope PR 1858 and screenshot target-wake PR 1189 repairs. Subscribes to CDP events before initial target discovery so existing remote OOPIF attachments survive daemon handoff. Real Chrome e2e verifies existing-target attach, snapshot, fill and evaluation. Packaged source commit: $GITHUB_SHA."
+            --title "Controlled date input repairs for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Temporal input fill uses the native value setter plus input/change events to update controlled state and verifies the retained value. Invalid and read-only temporal inputs fail instead of reporting false success. Real Chrome e2e covers date/datetime-local fill, clearing, value tracking and rejection. Retains all prior frame, download-scope and screenshot repairs. Packaged source commit: $GITHUB_SHA."

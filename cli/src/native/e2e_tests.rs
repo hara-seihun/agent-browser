@@ -1616,6 +1616,87 @@ async fn e2e_form_interaction() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_fill_controlled_temporal_inputs() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "2", "action": "navigate", "url": "data:text/html,<input id='date' type='date'><input id='datetime' type='datetime-local'>" }), &mut state).await;
+    assert_success(&resp);
+    // Model the own-property value tracker used by React controlled inputs.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": r#"(() => {
+        const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        window.formState = {};
+        for (const [id, value] of [['date','2026-10-02'], ['datetime','2026-10-02T23:00']]) {
+            const input = document.getElementById(id);
+            input.value = value;
+            let tracked = value;
+            window.formState[id] = value;
+            Object.defineProperty(input, 'value', {
+                get() { return native.get.call(this); },
+                set(value) { tracked = String(value); native.set.call(this, value); }
+            });
+            input.addEventListener('input', () => {
+                if (tracked !== native.get.call(input)) {
+                    tracked = native.get.call(input);
+                    window.formState[id] = tracked;
+                }
+                input.value = window.formState[id];
+            });
+        }
+    })()"# }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for (id, value) in [
+        ("date", "2026-10-28"),
+        ("datetime", "2026-10-28T19:30"),
+        ("date", ""),
+        ("datetime", ""),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "fill", "selector": format!("#{id}"), "value": value }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(&json!({ "id": "5", "action": "evaluate", "script": format!("[document.getElementById('{id}').value, window.formState['{id}']]") }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["result"], json!([value, value]));
+    }
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "fill", "selector": "#date", "value": "not-a-date" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "invalid date fills must report an error"
+    );
+    let resp = execute_command(&json!({ "id": "7", "action": "evaluate", "script": "document.getElementById('date').readOnly = true" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "fill", "selector": "#date", "value": "2026-10-28" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "read-only date fills must report an error"
+    );
+    let resp = execute_command(&json!({ "id": "9", "action": "evaluate", "script": "[document.getElementById('date').value, window.formState.date]" }), &mut state).await;
+    assert_eq!(get_data(&resp)["result"], json!(["", ""]));
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_select_option_label_override_names() {
     let mut state = DaemonState::new();
     let resp = execute_command(

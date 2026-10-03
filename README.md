@@ -149,6 +149,8 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
+`fill` accepts ISO values for date/time inputs, including controlled React fields: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`, and the browser's canonical formats for `time`, `month` and `week`. Empty text clears them. Invalid, disabled or read-only temporal inputs return an error without changing their value.
+
 ### WebMCP (experimental)
 
 WebMCP is enabled by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features and proactive context.

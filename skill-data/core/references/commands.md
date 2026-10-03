@@ -74,6 +74,8 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
+`fill` accepts ISO date/time values on controlled inputs: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`. Empty text clears them; invalid, disabled or read-only temporal inputs return an error without changing their value.
+
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action.

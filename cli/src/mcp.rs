@@ -859,7 +859,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector.",
+            "Clear and fill an input by @ref or CSS selector. Temporal inputs accept ISO values (YYYY-MM-DD or YYYY-MM-DDTHH:mm), including controlled fields; invalid or non-editable temporal inputs fail.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }

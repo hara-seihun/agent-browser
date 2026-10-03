@@ -143,6 +143,52 @@ pub async fn fill(
         )
         .await?;
 
+    // Chromium's date editors do not accept Input.insertText. Bypass framework
+    // value trackers with the native setter, then let input/change update state.
+    let temporal = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"async function(value) {
+                    if (this.tagName !== 'INPUT' || !['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type)) return { handled: false };
+                    if (this.disabled || this.readOnly) return { handled: true, error: 'Input is disabled or read-only' };
+                    const probe = this.ownerDocument.createElement('input');
+                    probe.type = this.type;
+                    probe.value = value;
+                    if (value && !probe.value) return { handled: true, error: 'Invalid value for ' + this.type + ' input' };
+                    const expected = probe.value;
+                    const view = this.ownerDocument.defaultView;
+                    const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set;
+                    setter.call(this, expected);
+                    this.dispatchEvent(new view.Event('input', { bubbles: true }));
+                    this.dispatchEvent(new view.Event('change', { bubbles: true }));
+                    await Promise.resolve();
+                    if (this.value !== expected) return { handled: true, error: 'Date input did not retain the supplied value' };
+                    return { handled: true };
+                }"#
+                .to_string(),
+                object_id: Some(object_id.clone()),
+                arguments: Some(vec![CallArgument {
+                    value: Some(serde_json::json!(value)),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+    if temporal.get("exceptionDetails").is_some() {
+        return Err("Date input fill failed in the page".to_string());
+    }
+    let temporal = &temporal["result"]["value"];
+    if let Some(error) = temporal.get("error").and_then(|v| v.as_str()) {
+        return Err(error.to_string());
+    }
+    if temporal.get("handled").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(());
+    }
+
     // Select all + delete to clear
     client
         .send_command_typed::<_, Value>(

@@ -1720,6 +1720,9 @@ Usage: agent-browser fill <selector> <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Date/time inputs accept ISO values, including controlled React fields.
+Use YYYY-MM-DD for dates, YYYY-MM-DDTHH:mm for local date-times.
+Empty text clears them. Invalid or non-editable temporal inputs fail.
 
 Global Options:
   --json               Output as JSON
