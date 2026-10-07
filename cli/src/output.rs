@@ -2228,7 +2228,17 @@ agent-browser close - Close the browser
 
 Usage: agent-browser close [options]
 
-Closes the browser instance for the current session.
+Closes the current session. Native external CDP browsers are detached,
+never sent Browser.close. Owned Browser.close attempts have a 2-second
+limit, followed by transport cleanup and owned-process reaping.
+
+Native restore saving has a 2-second limit. On timeout, cleanup continues
+and JSON reports closed:true, saveStatus:timeout, and saveError without
+replacing existing saved state.
+
+If a command or background maintenance holds native daemon state, returns
+immediate JSON success:false with code:daemon_busy. No close was performed;
+the active operation remains owned and in progress. Retry once it settles.
 
 Aliases: quit, exit
 
@@ -3043,8 +3053,14 @@ instance with separate cookies, storage, and state.
 Operations:
   (none)               Show current session name
   id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
-  info                 Show daemon, launch, and restore diagnostics
+  info                 Show recorded daemon, launch, and restore metadata
   list                 List all active sessions
+
+Native info is metadata-only: no browser liveness check, DOM/event drain,
+restore validation, or configuration mutation. It is not a health probe.
+If a command or background maintenance holds daemon state, info, close,
+and confirm return immediate JSON success:false with code:daemon_busy. No close was
+performed; the operation remains owned and in progress. Retry when settled.
 
 Environment:
   AGENT_BROWSER_SESSION    Default session name

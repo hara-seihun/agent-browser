@@ -94,6 +94,14 @@ Use `agent-browser session info --json` for diagnostics:
 agent-browser --session "$SESSION" session info --json
 ```
 
+### Native Inspection and Close
+
+`session info` is metadata-only: it reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. Do not use it as a browser health probe.
+
+If a command or background maintenance holds daemon state, native `session info`, `close`, and `confirm` immediately return JSON with `"success": false` and `"code": "daemon_busy"`. No close was performed; the active operation remains owned and in progress. Retry once it settles rather than treating a busy response as cancellation or successful close.
+
+Native `close` allows up to two seconds for restore-state saving. If saving stalls, cleanup and detach still proceed, and the response reports `closed: true`, `saveStatus: "timeout"`, and `saveError`. The existing saved state is not replaced. An external CDP browser is detached, never sent `Browser.close`. For an owned browser, the `Browser.close` attempt is bounded to two seconds, followed by transport cleanup and owned-process reaping.
+
 ### Manual State Files
 
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.

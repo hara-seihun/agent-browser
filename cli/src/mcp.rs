@@ -957,7 +957,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLOSE,
             "Close browser",
-            "Close the current browser session.",
+            "Close the current browser session through the canonical CLI. Native daemon_busy means no close was performed and the active operation remains owned and in progress; retry when it settles. Restore saving is bounded to two seconds; on timeout cleanup continues with closed:true, saveStatus:timeout, and saveError, preserving existing saved state. External CDP browsers are detached without Browser.close. Owned Browser.close attempts are bounded to two seconds before transport cleanup and owned-process reaping.",
             json!({
                 "all": { "type": "boolean", "default": false, "description": "Close all active sessions." }
             }),
@@ -1687,7 +1687,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONFIRM,
             "Confirm action",
-            "Approve a pending action.",
+            "Approve a pending action. Native daemon_busy leaves the pending confirmation owned and unchanged; retry when the current operation settles. Confirmed session info and close retain the metadata-only and bounded-close contracts.",
             json!({ "id": { "type": "string" } }),
             &["id"],
         ),
@@ -1756,7 +1756,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show session, daemon, launch, and restore diagnostics.",
+            "Show recorded session, daemon, launch, and restore metadata through the canonical CLI. Native inspection performs no browser liveness check, DOM/event drain, restore validation, or configuration mutation. If a command or background maintenance holds daemon state, returns success:false with code:daemon_busy; the active operation remains owned and in progress. Retry when it settles.",
             json!({}),
             &[],
         ),
@@ -5249,6 +5249,40 @@ mod tests {
             result["structuredContent"]["response"]["data"]["lastUrl"],
             "https://example.com/path"
         );
+    }
+
+    #[test]
+    fn tool_result_preserves_native_lifecycle_outcomes() {
+        let cases = [
+            (
+                json!({
+                    "success": false,
+                    "code": "daemon_busy",
+                    "error": "Daemon state is busy; retry when the operation settles"
+                }),
+                true,
+            ),
+            (
+                json!({
+                    "success": true,
+                    "data": {
+                        "closed": true,
+                        "saveStatus": "timeout",
+                        "saveError": "Restore save timed out"
+                    }
+                }),
+                false,
+            ),
+        ];
+        for (response, is_error) in cases {
+            let result = tool_result_from_run(CliRun {
+                exit_code: Some(0),
+                stdout: response.to_string(),
+                stderr: String::new(),
+            });
+            assert_eq!(result["structuredContent"]["response"], response);
+            assert_eq!(result["isError"], is_error);
+        }
     }
 
     #[test]

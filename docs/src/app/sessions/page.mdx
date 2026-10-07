@@ -27,6 +27,14 @@ agent-browser session id --scope worktree --prefix next-dev-loop
 agent-browser session info --json
 ```
 
+## Native inspection and close
+
+`session info` is metadata-only in the native daemon. It reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. It is not a browser health probe.
+
+If a command or background maintenance holds daemon state, `session info`, `close`, and `confirm` immediately return JSON with `"success": false` and `"code": "daemon_busy"`. No close was performed; the active operation remains owned and in progress. Retry once it settles.
+
+Native `close` allows up to two seconds for restore-state saving. If saving stalls, cleanup and detach still proceed, and the response reports `closed: true`, `saveStatus: "timeout"`, and `saveError`. The existing saved state is not replaced. An external CDP browser is detached, never sent `Browser.close`. For an owned browser, the `Browser.close` attempt is bounded to two seconds, followed by transport cleanup and owned-process reaping.
+
 ## Session isolation
 
 Each session has its own:

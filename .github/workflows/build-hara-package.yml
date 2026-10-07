@@ -1,7 +1,12 @@
-name: Build Hara sensitive browser inputs package
+name: Build Hara native browser package
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag for this source commit
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -73,10 +78,12 @@ jobs:
       - name: Publish immutable package
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          gh release create browser-sensitive-inputs-20261007-glibc235 \
+          test -n "$RELEASE_TAG"
+          gh release create "$RELEASE_TAG" \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Native sensitive form input protection for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Native snapshots and getters redact protected payment, password and one-time-code fields without changing live values. cc-name stays public. Coverage includes shadow DOM and cross-origin out-of-process iframes. Eval, screenshot/PDF, downloads and browser-data output are guarded on current or remembered sensitive tabs. Continuous recording/trace/profiler/HAR/stream and addinitscript always fail closed with SENSITIVE_OUTPUT_UNSUPPORTED; no bypass flag. Publication requires the full unit suite and real Chrome sensitive input e2e suite, with durable test logs. Retains prior controlled temporal input and frame custody repairs. Packaged source commit: $GITHUB_SHA."
+            --title "Native sensitive form protection and bounded lifecycle for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Native snapshots and getters redact protected payment, password and one-time-code fields without changing live values. cc-name stays public. Coverage includes shadow DOM and cross-origin out-of-process iframes. Eval, screenshot/PDF, downloads and browser-data output are guarded on current or remembered sensitive tabs. Continuous recording/trace/profiler/HAR/stream and addinitscript always fail closed with SENSITIVE_OUTPUT_UNSUPPORTED; no bypass flag. Session metadata never probes CDP; in-flight lifecycle requests return daemon_busy without cancelling the owning operation. Restore save and owned browser close requests are bounded, and external CDP browsers are detached without Browser.close. Publication requires the full unit suite and real Chrome sensitive input e2e suite, with durable test logs. Retains prior controlled temporal input and frame custody repairs. Packaged source commit: $GITHUB_SHA."

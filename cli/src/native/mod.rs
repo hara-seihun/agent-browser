@@ -54,4 +54,6 @@ pub mod webmcp;
 #[cfg(test)]
 mod e2e_tests;
 #[cfg(test)]
+mod lifecycle_fixture;
+#[cfg(test)]
 mod parity_tests;

@@ -550,7 +550,7 @@ impl BrowserManager {
             };
             if let Err(error) = manager.discover_and_attach_targets().await {
                 let _ = manager
-                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .close_with_timeout(FAILED_INITIALIZATION_CLOSE_TIMEOUT)
                     .await;
                 return Err(error);
             }
@@ -561,7 +561,7 @@ impl BrowserManager {
             Ok(session_id) => session_id.to_string(),
             Err(error) => {
                 let _ = manager
-                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .close_with_timeout(FAILED_INITIALIZATION_CLOSE_TIMEOUT)
                     .await;
                 return Err(error);
             }
@@ -675,7 +675,7 @@ impl BrowserManager {
         };
         if let Err(error) = initialization {
             let _ = manager
-                .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                .close_with_timeout(FAILED_INITIALIZATION_CLOSE_TIMEOUT)
                 .await;
             return Err(error);
         }
@@ -1383,34 +1383,29 @@ impl BrowserManager {
             .await
     }
 
+    /// Detach external CDP browsers; bound the close request and reap processes we own.
     pub async fn close(&mut self) -> Result<(), String> {
-        self.close_with_timeout(None).await
+        self.close_with_timeout(Duration::from_secs(2)).await
     }
 
-    async fn close_with_timeout(
-        &mut self,
-        browser_close_timeout: Option<Duration>,
-    ) -> Result<(), String> {
+    async fn close_with_timeout(&mut self, browser_close_timeout: Duration) -> Result<(), String> {
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
             // without shutting down the user's browser.
             let close = self.client.send_command_no_params("Browser.close", None);
-            if let Some(timeout) = browser_close_timeout {
-                let _ = tokio::time::timeout(timeout, close).await;
-            } else {
-                let _ = close.await;
-            }
+            let _ = tokio::time::timeout(browser_close_timeout, close).await;
         }
 
         self.client.close().await;
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
-            let _ = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 process.wait_or_kill(timeout);
             })
-            .await;
+            .await
+            .map_err(|error| format!("Browser process cleanup failed: {}", error))?;
         }
 
         Ok(())
@@ -2446,7 +2441,7 @@ async fn initialize_lightpanda_manager(
             }
             Err(err) => {
                 let _ = manager
-                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .close_with_timeout(FAILED_INITIALIZATION_CLOSE_TIMEOUT)
                     .await;
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
@@ -3493,6 +3488,30 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_owned_close_bounds_stalled_cdp_and_reaps_process() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let (dir, options) = initialization_process(&fixture.manager.ws_url);
+        let process = tokio::task::spawn_blocking(move || launch_chrome(&options))
+            .await
+            .unwrap()
+            .unwrap();
+        fixture.manager.browser_process = Some(BrowserProcess::Chrome(process));
+        fixture.stall();
+        tokio::time::timeout(Duration::from_secs(9), fixture.manager.close())
+            .await
+            .expect("owned close must bound a stalled Browser.close before reaping")
+            .unwrap();
+        fixture.server.await.unwrap();
+        let mut close_seen = false;
+        while let Ok(command) = fixture.commands.try_recv() {
+            close_seen |= command["method"] == "Browser.close";
+        }
+        assert!(close_seen);
+        assert_initialization_process_reaped(dir.path());
     }
 
     #[cfg(unix)]

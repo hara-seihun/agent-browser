@@ -2481,7 +2481,7 @@ fn skip_launch_action(action: &str) -> bool {
 }
 
 fn should_validate_restore_after_action(action: &str) -> bool {
-    action != "launch"
+    !matches!(action, "launch" | "session_info" | "close")
 }
 
 fn policy_actions_for_command(
@@ -2539,6 +2539,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let lifecycle_confirmation = action == "confirm"
+        && state.pending_confirmation.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.cmd.get("action").and_then(Value::as_str),
+                Some("close" | "session_info")
+            )
+        });
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
     let auth_login_no_navigate = action == "auth_login"
@@ -2610,9 +2617,11 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         server.broadcast_command(action, &id, cmd_for_broadcast);
     }
 
-    // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
-    if let Err(e) = state.drain_cdp_events_background().await {
-        return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+    // Lifecycle commands must not wait for renderer or iframe setup events.
+    if !matches!(action, "session_info" | "close") && !lifecycle_confirmation {
+        if let Err(e) = state.drain_cdp_events_background().await {
+            return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+        }
     }
 
     // Keep element resolution in sync with the `frame` selection (see
@@ -2625,7 +2634,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // persisted with the binding so the setting survives daemon restarts;
     // absence of the field leaves the current state untouched.
     match cmd.get("pinTab").and_then(|v| v.as_bool()) {
-        Some(pin) if pin != state.pin_tab => {
+        Some(pin) if action != "session_info" && pin != state.pin_tab => {
             // Persist the pinned state before committing it to live state, so a
             // load/save failure leaves the daemon exactly as it was instead of
             // reporting an error while the isolation mode already flipped.
@@ -2756,6 +2765,25 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
         }
+    }
+
+    if action == "session_info" {
+        let mut response = success_response(&id, session_info(state));
+        inject_lifecycle(&mut response, state, false, false, false);
+        return response;
+    }
+    if action == "close" || lifecycle_confirmation {
+        let result = if lifecycle_confirmation {
+            handle_confirm(cmd, state).await
+        } else {
+            handle_close(state).await
+        };
+        let mut response = match result {
+            Ok(data) => success_response(&id, data),
+            Err(error) => error_response(&id, &super::browser::to_ai_friendly_error(&error)),
+        };
+        inject_lifecycle(&mut response, state, false, false, false);
+        return response;
     }
 
     let restore_transition_closed_browser = match async {
@@ -2977,7 +3005,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "offline" => handle_offline(cmd, state).await,
         "console" => handle_console(cmd, state).await,
         "errors" => handle_errors(state).await,
-        "session_info" => handle_session_info(state).await,
+        "session_info" => Ok(session_info(state)),
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
         "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
@@ -4509,15 +4537,15 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
     if !state.restore_validation_pending {
         return;
     }
-    state.restore_validation_pending = false;
-
     match validate_restored_state(state).await {
         Ok(()) => {
+            state.restore_validation_pending = false;
             state.restore_status = "loaded".to_string();
             state.restore_status_detail = None;
             state.restore_load_failed = false;
         }
         Err(err) => {
+            state.restore_validation_pending = false;
             state.restore_status = "loaded_but_invalid".to_string();
             state.restore_status_detail = Some(err);
             state.restore_load_failed = true;
@@ -5589,8 +5617,23 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     Ok(json!({ "result": result, "origin": url }))
 }
 
+const LIFECYCLE_SAVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub(crate) async fn save_restore_state_for_shutdown(
+    state: &mut DaemonState,
+) -> Result<Option<String>, String> {
+    match tokio::time::timeout(LIFECYCLE_SAVE_TIMEOUT, auto_save_restore_state(state)).await {
+        Ok(result) => result,
+        Err(_) => {
+            state.restore_save_status = "timeout".to_string();
+            state.restore_saved_path = None;
+            Err("Restore save timed out; browser cleanup will continue without replacing saved state".to_string())
+        }
+    }
+}
+
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
-    let save_result = auto_save_restore_state(state).await;
+    let save_result = save_restore_state_for_shutdown(state).await;
     close_all_browser_backends(state).await?;
 
     // Stop background Fetch handler
@@ -6744,8 +6787,9 @@ async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
     Ok(state.event_tracker.get_errors_json())
 }
 
-async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
-    Ok(json!({
+/// Recorded daemon metadata only; never probe CDP or advance restore state.
+fn session_info(state: &DaemonState) -> Value {
+    json!({
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
@@ -6771,7 +6815,7 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "restoreCheckUrl": state.restore_check_url,
         "restoreCheckText": state.restore_check_text,
         "restoreCheckFn": state.restore_check_fn,
-    }))
+    })
 }
 
 async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -12923,6 +12967,185 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn lifecycle_session_info_is_metadata_only_with_stalled_cdp() {
+        let guard = EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        guard.set("HOME", home.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_ACTION_POLICY");
+        guard.remove("AGENT_BROWSER_POLICY");
+        guard.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        state.session_name = Some("original".to_string());
+        state.restore_save = "auto".to_string();
+        state.restore_status = "loaded_pending_validation".to_string();
+        state.restore_validation_pending = true;
+        state.restore_check_url = Some("https://synthetic.invalid".to_string());
+        state.launch_hash = Some(12345);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            execute_command(
+                &json!({
+                    "id": "metadata", "action": "session_info", "restoreKey": "other",
+                    "restoreSave": "always", "pinTab": !state.pin_tab,
+                }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("metadata must not touch CDP");
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(response["data"]["restoreKey"], "original");
+        assert_eq!(response["data"]["restoreValidationPending"], true);
+        assert_eq!(response["data"]["launchHash"], 12345);
+        assert_eq!(state.restore_save, "auto");
+        assert!(state.restore_validation_pending);
+        assert!(fixture.commands.try_recv().is_err());
+        let policy_path = home.path().join("policy.json");
+        fs::write(&policy_path, r#"{"deny":["session_info","close"]}"#).unwrap();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        for action in ["session_info", "close"] {
+            let denied = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                execute_command(&json!({"id": "denied", "action": action}), &mut state),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                denied["success"], false,
+                "metadata and close must retain policy gating"
+            );
+            assert!(denied["error"]
+                .as_str()
+                .unwrap()
+                .contains("denied by policy"));
+        }
+        assert!(fixture.commands.try_recv().is_err());
+        state.policy = None;
+        state.browser.as_mut().unwrap().close().await.unwrap();
+        fixture.server.await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            execute_command(
+                &json!({
+                    "id": "dead-metadata", "action": "session_info",
+                }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("metadata must also work with a dead transport");
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(response["data"]["restoreValidationPending"], true);
+        assert_eq!(response["data"]["launchHash"], 12345);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_confirmed_close_is_bounded_with_stalled_cdp() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        state.session_name = None;
+        state.browser = Some(fixture.manager);
+        state.restore_validation_pending = true;
+        state.restore_check_url = Some("https://synthetic.invalid".to_string());
+        state.pending_confirmation = Some(PendingConfirmation {
+            action: "close".to_string(),
+            cmd: json!({"id": "close", "action": "close"}),
+            approved_actions: vec![],
+        });
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            execute_command(&json!({"id": "confirm", "action": "confirm"}), &mut state),
+        )
+        .await
+        .expect("confirmed close must not probe or drain CDP first");
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(
+            response["data"]["result"]["data"]["closed"], true,
+            "{response}"
+        );
+        assert_eq!(response["data"]["result"]["data"]["saveStatus"], "timeout");
+        assert!(state.pending_confirmation.is_none());
+        assert!(state.browser.is_none());
+        fixture.server.await.unwrap();
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["method"], "Browser.close");
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_close_stalled_save_detaches_without_replacing_saved_state() {
+        let guard = EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        guard.set("HOME", home.path().to_str().unwrap());
+        for name in [
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ] {
+            guard.remove(name);
+        }
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        state.session_id = "lifecycle-close".to_string();
+        state.session_name = Some("synthetic".to_string());
+        state.browser = Some(fixture.manager);
+        state.restore_validation_pending = true;
+        state.restore_check_url = Some("https://synthetic.invalid".to_string());
+        let saved = state::get_sessions_dir().join("synthetic-lifecycle-close.json");
+        fs::create_dir_all(saved.parent().unwrap()).unwrap();
+        fs::write(&saved, "synthetic predecessor").unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            execute_command(
+                &json!({
+                    "id": "close", "action": "close",
+                }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("close must bound failed save and detach");
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(response["data"]["closed"], true);
+        assert_eq!(response["data"]["saveStatus"], "timeout");
+        assert!(response["data"]["saveError"]
+            .as_str()
+            .unwrap()
+            .contains("timed out"));
+        assert!(state.browser.is_none());
+        assert!(state.restore_validation_pending);
+        assert_eq!(fs::read_to_string(saved).unwrap(), "synthetic predecessor");
+        assert_eq!(client.pending_len().await, 0);
+        fixture.server.await.unwrap();
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(
+                command["method"], "Browser.close",
+                "caller owns external browser"
+            );
+        }
+    }
 
     /// A binding-recovery failure must tear the connection down: the attach
     /// paths set `state.browser` before calling this, so returning the error
