@@ -560,6 +560,8 @@ pub struct DaemonState {
     /// used to enforce the minimum interval between periodic saves.
     pub last_autosave_attempt: Option<std::time::Instant>,
     pub session_id: String,
+    /// Per-target, in-memory form observations. Never included in saved state.
+    pub sensitive_observations: HashMap<String, super::sensitive::Observation>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -707,6 +709,7 @@ impl DaemonState {
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
+            sensitive_observations: HashMap::new(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -2531,6 +2534,10 @@ fn policy_actions_for_command(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    Box::pin(execute_command_inner(cmd, state)).await
+}
+
+async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -2546,6 +2553,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .to_string();
 
     let cmd_start = std::time::Instant::now();
+    if super::sensitive::always_denied(action) {
+        return error_response(
+            &id,
+            &format!(
+                "{}: continuous or unguarded browser output is unavailable",
+                super::sensitive::UNSUPPORTED
+            ),
+        );
+    }
 
     if let Err(err) = validate_restore_config_from_command(cmd) {
         return error_response(&id, &err);
@@ -2849,6 +2865,65 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // All observation/export routes share this boundary, including CLI batch
+    // and MCP. Inventory errors do not downgrade to an unprotected response.
+    let observation_session = if let Some(mgr) = state.browser.as_ref() {
+        match mgr.active_session_id() {
+            Ok(session)
+                if !matches!(
+                    action,
+                    "close"
+                        | "launch"
+                        | "tab_close"
+                        | "tab_switch"
+                        | "tab_new"
+                        | "session_info"
+                        | "session_list"
+                        | "stream_disable"
+                ) =>
+            {
+                let session = session.to_string();
+                let current =
+                    match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions)
+                        .await
+                    {
+                        Ok(observation) => observation,
+                        Err(error) => return error_response(&id, &error),
+                    };
+                let known = state
+                    .sensitive_observations
+                    .entry(session.clone())
+                    .or_default();
+                known.merge(current);
+                if known.has_sensitive() && super::sensitive::guarded(action, cmd) {
+                    return error_response(
+                        &id,
+                        &format!(
+                            "{}: operation cannot safely observe a sensitive tab",
+                            super::sensitive::UNSUPPORTED
+                        ),
+                    );
+                }
+                Some(session)
+            }
+            _ => None,
+        }
+    } else {
+        if action != "read"
+            && super::sensitive::guarded(action, cmd)
+            && state.webdriver_backend.is_some()
+        {
+            return error_response(
+                &id,
+                &format!(
+                    "{}: backend has no complete sensitive-frame inventory",
+                    super::sensitive::UNSUPPORTED
+                ),
+            );
+        }
+        None
+    };
+
     let result = match action {
         "launch" => {
             let webmcp_enabled = cmd
@@ -3111,6 +3186,33 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     )),
                 );
             }
+        }
+    }
+
+    if let Some(session) = observation_session {
+        // Refresh after effects such as typing. The old and new values are
+        // protected before returning JSON, diagnostics or persisted snapshots.
+        if let Some(mgr) = state.browser.as_ref() {
+            match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await {
+                Ok(current) => state
+                    .sensitive_observations
+                    .entry(session.clone())
+                    .or_default()
+                    .merge(current),
+                Err(error) => return error_response(&id, &error),
+            }
+        }
+        if let Some(known) = state.sensitive_observations.get(&session) {
+            if known.has_sensitive() && super::sensitive::guarded(action, cmd) {
+                return error_response(
+                    &id,
+                    &format!(
+                        "{}: sensitive controls appeared during the operation",
+                        super::sensitive::UNSUPPORTED
+                    ),
+                );
+            }
+            known.protect(&mut resp);
         }
     }
 
@@ -4525,6 +4627,30 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
 pub(crate) async fn auto_save_restore_state(
     state: &mut DaemonState,
 ) -> Result<Option<String>, String> {
+    if state.session_name.is_some() {
+        if let Some(mgr) = state.browser.as_ref() {
+            let session = mgr.active_session_id()?.to_string();
+            let current =
+                super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+            state
+                .sensitive_observations
+                .entry(session)
+                .or_default()
+                .merge(current);
+        }
+    }
+    if state
+        .sensitive_observations
+        .values()
+        .any(super::sensitive::Observation::has_sensitive)
+    {
+        state.restore_save_status = "sensitive_output_unsupported".to_string();
+        state.restore_saved_path = None;
+        return Err(format!(
+            "{}: automatic state export after sensitive form observation",
+            super::sensitive::UNSUPPORTED
+        ));
+    }
     validate_restore_if_pending(state).await;
 
     let Some(session_name) = state.session_name.clone() else {
@@ -5403,15 +5529,22 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_content(state: &DaemonState) -> Result<Value, String> {
-    if let Some(ref wb) = state.webdriver_backend {
-        if state.browser.is_none() {
-            let html = wb.get_content().await?;
-            let url = wb.get_url().await.unwrap_or_default();
-            return Ok(json!({ "html": html, "origin": url }));
-        }
+    if state.webdriver_backend.is_some() && state.browser.is_none() {
+        return Err(format!(
+            "{}: backend has no complete sensitive-frame inventory",
+            super::sensitive::UNSUPPORTED
+        ));
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let html = mgr.get_content().await?;
+    let session = mgr.active_session_id()?;
+    let html = super::element::get_element_inner_html(
+        &mgr.client,
+        session,
+        &state.ref_map,
+        "html",
+        &state.iframe_sessions,
+    )
+    .await?;
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "html": html, "origin": url }))
 }
@@ -5434,6 +5567,8 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
+    let guarded_script = super::sensitive::guarded_eval(script);
+    let script = guarded_script.as_str();
     // Honor an active `frame <sel>` selection, like element resolution and
     // `wait` already do. Without this, `frame` reported success and `eval`
     // still ran in the top document.
@@ -7511,6 +7646,8 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
         .send_command("Page.printToPDF", Some(params), Some(&session_id))
         .await?;
 
+    // Recheck before decoded PDF bytes can reach a file.
+    super::sensitive::require_public(&mgr.client, &session_id, &state.iframe_sessions).await?;
     let data = result
         .get("data")
         .and_then(|v| v.as_str())
@@ -10162,7 +10299,7 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
-                expression: script.to_string(),
+                expression: super::sensitive::guarded_eval(script),
                 return_by_value: Some(false),
                 await_promise: Some(true),
             },
@@ -14153,17 +14290,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_without_url_allows_matching_active_tab() {
-        let (port, server) = start_webdriver_response_server(vec![
-            (
-                "/session/test-session/url",
-                json!({ "value": "https://example.com/app" }),
-            ),
-            (
-                "/session/test-session/source",
-                json!({ "value": "<html><body><h1>Account</h1><p>Signed in.</p></body></html>" }),
-            ),
-        ])
+    async fn test_read_without_url_requires_sensitive_inventory_after_domain_check() {
+        let (port, server) = start_webdriver_response_server(vec![(
+            "/session/test-session/url",
+            json!({ "value": "https://example.com/app" }),
+        )])
         .await;
         let mut state = DaemonState::new();
         state.backend_type = BackendType::WebDriver;
@@ -14181,12 +14312,12 @@ mod tests {
 
         let resp = execute_command(&cmd, &mut state).await;
 
-        assert_eq!(resp["success"], true);
-        assert_eq!(resp["data"]["source"], "active-tab-html");
-        let content = resp["data"]["content"].as_str().unwrap();
-        assert!(content.contains("# Account"));
-        assert!(content.contains("Signed in."));
-        assert_eq!(server.await.unwrap(), 2);
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::super::sensitive::UNSUPPORTED));
+        assert_eq!(server.await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -16239,9 +16370,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         )
         .await;
 
-        assert_eq!(result["success"], true);
-        assert_eq!(result["data"]["requestCount"], 1);
-        let _ = fs::remove_file(path);
+        assert_eq!(result["success"], false);
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(!std::path::Path::new(&path).exists());
     }
 
     #[test]

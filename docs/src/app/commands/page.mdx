@@ -1,5 +1,7 @@
 # Commands
 
+Native `snapshot` and `get value/text/html/attr` protect sensitive form inputs with typed `[redacted: …]` markers without changing live values. `cc-name` remains public, including in shadow DOM and cross-origin out-of-process iframes. This is not general secret detection in arbitrary page text. Recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript` are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED`. Other script, screenshot/PDF, download, active-tab read, and browser-data output channels remain functional on benign tabs but refuse before execution, capture, or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including after field removal or navigation. No bypass flag exists. MCP delegates to the canonical CLI, including `extraArgs`; see [Security](/security#native-sensitive-form-inputs) for the exact marker types and scope.
+
 ## Core
 
 ```bash

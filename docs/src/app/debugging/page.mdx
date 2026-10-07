@@ -1,6 +1,6 @@
 # Debugging
 
-Use debugging commands to inspect browser logs, page errors, JavaScript dialogs, Chrome DevTools traces, highlighted elements, and the live DevTools frontend during automation.
+Trace, profiler, and DevTools inspection/exposure channels are always refused by the native backend with `SENSITIVE_OUTPUT_UNSUPPORTED`. Console, errors, and other guarded browser-data output remain functional on benign tabs but refuse before execution, capture, or file writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Console and page errors
 

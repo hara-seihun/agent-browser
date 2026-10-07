@@ -378,9 +378,9 @@ fn collect_frame_ids(tree: &Value, frame_ids: &mut Vec<String>) {
 }
 
 #[derive(Debug, Clone)]
-struct FrameTarget {
-    frame_id: String,
-    session_id: String,
+pub(super) struct FrameTarget {
+    pub(super) frame_id: String,
+    pub(super) session_id: String,
     parent_id: Option<String>,
 }
 
@@ -458,7 +458,7 @@ fn frame_reaches_top(
     }
 }
 
-async fn collect_frame_sessions(
+pub(super) async fn collect_frame_sessions(
     client: &CdpClient,
     top_session_id: &str,
     iframe_sessions: &HashMap<String, String>,

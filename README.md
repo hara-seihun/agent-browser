@@ -855,7 +855,28 @@ agent-browser --session secure --restore open example.com
 
 ## Security
 
-agent-browser includes security features for safe AI agent deployments. All features are opt-in, and existing workflows are unaffected until you explicitly enable a feature:
+Native sensitive form input protection is always active. Other security controls below are opt-in.
+
+### Native sensitive form inputs
+
+`snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]`. `cc-name` remains public. Protection covers native snapshots and getters, including shadow DOM and cross-origin out-of-process iframes. It does not change live form values, so filling and submitting still work.
+
+This is form-input protection, not a general detector for secrets in arbitrary page text. Native classification uses password input type, sensitive autocomplete tokens, and recognized `name`/`id` identifiers. Use the protected APIs for form inspection.
+
+- **Always refused:** recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript`. These return `SENSITIVE_OUTPUT_UNSUPPORTED` before execution, capture, or file writes even on benign pages.
+- **Guarded:** `eval`, `evalhandle`, `addscript`, `wait --fn`, screenshots/PDF, screenshot diffs, downloads, active-tab `read`, and browser-data output such as console/errors, network responses, React inspection, accessibility audits, WebMCP invocation/results, clipboard, storage/cookies, and saved-state output. These remain functional on benign tabs but refuse before execution, capture, or writes when current sensitive controls or remembered sensitive-tab detection exist. Incomplete observation fails closed. Detection remains sticky for the daemon/tab lifetime, including after fields are removed or the tab navigates.
+
+MCP tools delegate to the canonical CLI and enforce the same contract. There is no bypass flag; action approval, tool profiles, and `extraArgs` do not override refusals.
+
+```bash
+agent-browser snapshot -i
+agent-browser get value '#card-number'
+# [redacted: cc-number]
+agent-browser get value '#cardholder'
+# Public cardholder name (autocomplete="cc-name")
+```
+
+The command catalogue includes always-refused channels for discoverability. Guarded command examples apply only to benign tabs that have not been marked sensitive.
 
 - **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). Use `auth login <name> --no-navigate` to preserve an already prepared active page after its origin is checked against the credential URL. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Plugin System**: Extend agent-browser with external executable plugins. Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and declare capabilities such as `credential.read`, `browser.provider`, `launch.mutate`, or `command.run`.
@@ -1011,6 +1032,8 @@ agent-browser click @e2     # Click the "Home" link labeled [2]
 This is useful for multimodal AI models that can reason about visual layout, unlabeled icon buttons, canvas elements, or visual state that the text accessibility tree cannot capture.
 
 ## Options
+
+Sensitive input protection has no option, environment variable, or configuration bypass. Output and script flags below do not override `SENSITIVE_OUTPUT_UNSUPPORTED`.
 
 | Option | Description |
 |--------|-------------|

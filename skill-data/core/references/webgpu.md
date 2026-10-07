@@ -2,6 +2,8 @@
 
 Screenshots and video of WebGPU pages (three.js `WebGPURenderer`, Babylon.js, raw WebGPU) in headless Chrome. Without setup this is a silent failure: the page loads, the screenshot succeeds, and the canvas is black.
 
+Native screenshots remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Video and continuous capture are always refused. There is no bypass flag; use protected snapshots and getters on sensitive tabs. See [trust-boundaries.md](trust-boundaries.md#native-sensitive-form-input-contract).
+
 ## Quick start
 
 ```bash

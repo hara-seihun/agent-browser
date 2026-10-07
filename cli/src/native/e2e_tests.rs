@@ -81,6 +81,552 @@ fn native_test_fixture_html(name: &str) -> &'static str {
     }
 }
 
+const SENSITIVE_INPUT_CASES: &[(&str, &str, &str)] = &[
+    ("number", "autocomplete='cc-number'", "cc-number"),
+    ("expiry", "autocomplete='cc-exp'", "cc-exp"),
+    ("month", "autocomplete='cc-exp-month'", "cc-exp-month"),
+    ("year", "autocomplete='cc-exp-year'", "cc-exp-year"),
+    ("code", "autocomplete='cc-csc'", "cc-csc"),
+    ("current", "autocomplete='current-password'", "password"),
+    ("new", "autocomplete='new-password'", "password"),
+    ("otp", "autocomplete='one-time-code'", "one-time-code"),
+    ("typed", "type='password'", "password"),
+    ("cardnumber", "", "cc-number"),
+    ("exp-date", "", "cc-exp"),
+    ("cvc", "", "cc-csc"),
+    ("cvv", "", "cc-csc"),
+    ("securitycode", "", "cc-csc"),
+    ("named-number", "name='cardnumber'", "cc-number"),
+    ("named-expiry", "name='exp-date'", "cc-exp"),
+    ("named-cvc", "name='cvc'", "cc-csc"),
+    ("named-cvv", "name='cvv'", "cc-csc"),
+    ("named-security", "name='securitycode'", "cc-csc"),
+];
+
+fn sensitive_fixture_value(surface: &str, id: &str, kind: &str) -> String {
+    match kind {
+        "cc-number" => "4242424242424242".to_string(),
+        "cc-exp" => "12/2030".to_string(),
+        "cc-exp-month" => "12".to_string(),
+        "cc-exp-year" => "2030".to_string(),
+        "cc-csc" => "123".to_string(),
+        "one-time-code" => "654321".to_string(),
+        "password" => format!("fixture-secret-{surface}-{id}"),
+        _ => unreachable!(),
+    }
+}
+
+fn sensitive_fixture_root(surface: &str) -> &'static str {
+    match surface {
+        "shadow" => "document.getElementById('shadow-host')?.shadowRoot",
+        "closed-shadow" => "window.fixtureShadowRoot",
+        "root" | "same" | "cross" => "document",
+        _ => unreachable!(),
+    }
+}
+
+fn sensitive_test_command<'a>(
+    command: &'a Value,
+    state: &'a mut DaemonState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + 'a>> {
+    Box::pin(execute_command(command, state))
+}
+
+async fn assert_sensitive_test_evaluate(
+    state: &mut DaemonState,
+    id: &str,
+    script: &str,
+    expected: Value,
+) {
+    let resp = sensitive_test_command(
+        &json!({"id":id, "action":"evaluate", "script":script}),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], expected);
+}
+
+fn sensitive_input_controls(surface: &str) -> String {
+    let mut html = format!("<section id='controls'><p>ordinary-text-{surface}</p>");
+    for (id, attributes, kind) in SENSITIVE_INPUT_CASES {
+        let value = sensitive_fixture_value(surface, id, kind);
+        html.push_str(&format!(
+            "<label for='{id}'>{surface} {id}</label><input id='{id}' {attributes} value='{value}'>"
+        ));
+    }
+    html.push_str(&format!(
+        "<label for='ordinary'>{surface} ordinary</label><input id='ordinary' value='ordinary-value-{surface}'>\
+         <label for='holder'>{surface} holder</label><input id='holder' autocomplete='cc-name' value='ordinary-holder-{surface}'></section>"
+    ));
+    html
+}
+
+struct SensitiveInputServer(tokio::task::JoinHandle<()>);
+
+impl Drop for SensitiveInputServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn start_sensitive_input_server() -> (String, SensitiveInputServer) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).await.unwrap();
+                if size == 0 {
+                    return;
+                }
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let Some(path) = request.split_whitespace().nth(1) else {
+                    return;
+                };
+                let content = match path {
+                    "/root" => sensitive_input_controls("root"),
+                    "/same-fields" => sensitive_input_controls("same"),
+                    "/cross-fields" => sensitive_input_controls("cross"),
+                    "/same" => "<p>ordinary-parent</p><iframe id='child' src='/same-fields'></iframe>".to_string(),
+                    "/cross" => format!("<p>ordinary-parent</p><iframe id='child' src='http://localhost:{port}/cross-fields'></iframe>"),
+                    "/shadow" | "/closed-shadow" => {
+                        let surface = path.trim_start_matches('/');
+                        let mode = if surface == "closed-shadow" { "closed" } else { "open" };
+                        format!(
+                            "<div id='shadow-host'></div><template id='fixture-template'>{}</template>\
+                             <script>const fixture = document.getElementById('fixture-template');\
+                             window.fixtureShadowRoot = document.getElementById('shadow-host').attachShadow({{mode:'{mode}'}});\
+                             window.fixtureShadowRoot.append(fixture.content);\
+                             fixture.remove();document.currentScript.remove();</script>",
+                            sensitive_input_controls(surface)
+                        )
+                    },
+                    "/benign" => "<h1>ordinary-benign</h1><input id='ordinary' value='ordinary-benign-value'>".to_string(),
+                    _ => "<title>Empty fixture</title>".to_string(),
+                };
+                let body = format!("<!doctype html><html><body>{content}</body></html>");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    (
+        format!("http://127.0.0.1:{port}"),
+        SensitiveInputServer(server),
+    )
+}
+
+fn assert_sensitive_output_refused(resp: &Value) {
+    assert_eq!(resp["success"], false, "Output was not refused: {resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("SENSITIVE_OUTPUT_UNSUPPORTED")),
+        "Unexpected refusal: {resp}"
+    );
+    assert!(!resp.to_string().contains("fixture-secret-"));
+}
+
+async fn trusted_sensitive_fixture_evaluate(state: &DaemonState, script: &str) -> Value {
+    // Tests inspect only synthetic fixtures directly through the manager. This
+    // bypass is deliberately not an agent-facing evaluate command.
+    let mgr = state.browser.as_ref().unwrap();
+    match state.active_frame_id.as_deref() {
+        Some(frame) => match state.iframe_sessions.get(frame) {
+            Some(session) => mgr
+                .evaluate_in_session(session, script, None)
+                .await
+                .unwrap(),
+            None => mgr
+                .evaluate_in_frame(mgr.active_session_id().unwrap(), frame, script)
+                .await
+                .unwrap(),
+        },
+        None => mgr.evaluate(script, None).await.unwrap(),
+    }
+}
+
+async fn assert_sensitive_fixture_unchanged(state: &DaemonState, surface: &str) {
+    let expected = SENSITIVE_INPUT_CASES
+        .iter()
+        .map(|(id, _, kind)| (*id, sensitive_fixture_value(surface, id, kind)))
+        .chain([
+            ("ordinary", format!("ordinary-value-{surface}")),
+            ("holder", format!("ordinary-holder-{surface}")),
+        ])
+        .collect::<Vec<_>>();
+    let root = sensitive_fixture_root(surface);
+    let script = format!(
+        "(() => {{ const root = {root}; return {}.every(([id, value]) => {{ const input = root.getElementById(id); return input.value === value && input.getAttribute('value') === value; }}); }})()",
+        serde_json::to_string(&expected).unwrap()
+    );
+    assert_eq!(
+        trusted_sensitive_fixture_evaluate(state, &script).await,
+        true
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_sensitive_inputs() {
+    let execute_command = sensitive_test_command;
+    let vars = [
+        "AGENT_BROWSER_SOCKET_DIR",
+        "XDG_RUNTIME_DIR",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_PIN_TAB",
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_ARGS",
+        "AGENT_BROWSER_EXTENSIONS",
+        "AGENT_BROWSER_INIT_SCRIPTS",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+        "AGENT_BROWSER_ENABLE",
+    ];
+    let guard = EnvGuard::new(&vars);
+    for var in vars {
+        guard.remove(var);
+    }
+    let artifacts = tempfile::tempdir().unwrap();
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        artifacts.path().to_str().unwrap(),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-sensitive-inputs");
+    let (base_url, _server) = start_sensitive_input_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({"id":"launch", "action":"launch", "headless":true, "engine":"chrome", "args":["--no-sandbox", "--disable-dev-shm-usage", "--site-per-process"]}),
+        &mut state,
+    ).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id":"benign", "action":"navigate", "url":format!("{base_url}/benign")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_sensitive_test_evaluate(
+        &mut state,
+        "benign-eval",
+        "document.querySelector('h1').textContent",
+        json!("ordinary-benign"),
+    )
+    .await;
+    let benign_image = artifacts.path().join("benign.png");
+    let resp = execute_command(
+        &json!({"id":"benign-image", "action":"screenshot", "path":benign_image}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(benign_image.is_file());
+
+    // Long-lived capture can see a sensitive page after starting on a benign
+    // one, so refusal cannot depend on the current document's contents.
+    for action in [
+        "recording_start",
+        "recording_restart",
+        "trace_start",
+        "har_start",
+        "screencast_start",
+        "stream_enable",
+    ] {
+        let path = artifacts.path().join(format!("refused-{action}"));
+        let resp = execute_command(
+            &json!({"id":action, "action":action, "path":path, "port":0}),
+            &mut state,
+        )
+        .await;
+        assert_sensitive_output_refused(&resp);
+        assert!(!path.exists(), "Refused {action} created an artifact");
+    }
+
+    for surface in ["root", "same", "cross", "shadow", "closed-shadow"] {
+        let resp = execute_command(
+            &json!({"id":format!("{surface}-tab"), "action":"tab_new", "url":format!("{base_url}/{surface}")}),
+            &mut state,
+        ).await;
+        assert_success(&resp);
+        let ready = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            loop {
+                state.drain_cdp_events_background().await.unwrap();
+                if surface == "same" || surface == "cross" {
+                    let resp = execute_command(
+                        &json!({"id":"select-fixture-frame", "action":"frame", "selector":"#child"}), &mut state,
+                    ).await;
+                    if resp["success"] != true
+                        || (surface == "cross"
+                            && !state.iframe_sessions.contains_key(state.active_frame_id.as_ref().unwrap()))
+                    {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        continue;
+                    }
+                }
+                let root = sensitive_fixture_root(surface);
+                let script = format!("Boolean(({root})?.getElementById('holder'))");
+                if trusted_sensitive_fixture_evaluate(&state, &script).await == true {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+        }).await;
+        assert!(ready.is_ok(), "{surface} fixture never became ready");
+        if surface == "closed-shadow" {
+            assert_eq!(
+                trusted_sensitive_fixture_evaluate(
+                    &state,
+                    "document.getElementById('shadow-host').shadowRoot === null",
+                )
+                .await,
+                true,
+                "Fixture did not exercise a closed shadow root"
+            );
+        }
+        if surface == "same" || surface == "cross" {
+            let frame_id = state.active_frame_id.as_ref().unwrap();
+            assert_eq!(
+                state.iframe_sessions.contains_key(frame_id),
+                surface == "cross",
+                "Fixture did not exercise the intended process boundary"
+            );
+            let resp =
+                execute_command(&json!({"id":"main", "action":"mainframe"}), &mut state).await;
+            assert_success(&resp);
+        }
+
+        // The first output attempt is unsafe, before snapshot or getters have
+        // populated any sticky sensitive state. Iframes and shadow roots must
+        // be included even when the selected main document is ordinary.
+        let encoded_script = STANDARD.encode("document.querySelector('input').value");
+        let mut guarded_commands = [
+            json!({"action":"evaluate", "script":"document.querySelector('input')?.value"}),
+            json!({"action":"evaluate", "script":format!("btoa(eval(atob('{encoded_script}')))")}),
+            json!({"action":"evalhandle", "script":"document.body"}),
+            json!({"action":"screenshot", "path":artifacts.path().join(format!("{surface}.png"))}),
+            json!({"action":"screenshot", "annotate":true, "fullPage":true, "path":artifacts.path().join(format!("{surface}-annotated.png"))}),
+            json!({"action":"pdf", "path":artifacts.path().join(format!("{surface}.pdf"))}),
+        ];
+        // Each guarded output family gets a fresh-tab detection assertion,
+        // rather than all but evaluate passing solely because of sticky state.
+        guarded_commands.rotate_left(match surface {
+            "root" => 3,
+            "same" => 5,
+            "cross" => 2,
+            "shadow" => 0,
+            "closed-shadow" => 3,
+            _ => unreachable!(),
+        });
+        for command in guarded_commands {
+            let resp = execute_command(&command, &mut state).await;
+            assert_sensitive_output_refused(&resp);
+            if let Some(path) = command["path"].as_str() {
+                assert!(
+                    !std::path::Path::new(path).exists(),
+                    "Refused output created {path}"
+                );
+            }
+        }
+        if surface == "same" || surface == "cross" {
+            let resp = execute_command(
+                &json!({"id":"frame", "action":"frame", "selector":"#child"}),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+        }
+        let resp =
+            execute_command(&json!({"id":"snapshot", "action":"snapshot"}), &mut state).await;
+        assert_success(&resp);
+        let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+        assert!(
+            !snapshot.contains("fixture-secret-"),
+            "{surface} snapshot leaked an input"
+        );
+        for (id, _, kind) in SENSITIVE_INPUT_CASES {
+            let original_value = sensitive_fixture_value(surface, id, kind);
+            assert!(
+                !snapshot.contains(&format!(": {original_value}")),
+                "{surface} snapshot leaked {id}"
+            );
+            assert!(
+                snapshot.contains(&format!("[redacted: {kind}]")),
+                "Missing {kind} marker in {surface} snapshot: {snapshot}"
+            );
+        }
+        assert!(snapshot.contains(&format!("ordinary-value-{surface}")));
+        assert!(
+            snapshot.contains(&format!("ordinary-holder-{surface}")),
+            "cc-name was incorrectly treated as sensitive"
+        );
+
+        for (id, _, kind) in SENSITIVE_INPUT_CASES {
+            let selector = if surface == "shadow" || surface == "closed-shadow" {
+                let name = format!("{surface} {id}");
+                let (reference, _) = state
+                    .ref_map
+                    .entries_sorted()
+                    .into_iter()
+                    .find(|(_, entry)| entry.name == name)
+                    .expect("Shadow input missing from snapshot refs");
+                format!("@{reference}")
+            } else {
+                format!("#{id}")
+            };
+            for (action, key) in [
+                ("gettext", "text"),
+                ("innertext", "text"),
+                ("innerhtml", "html"),
+                ("inputvalue", "value"),
+                ("getattribute", "value"),
+            ] {
+                let resp = execute_command(
+                    &json!({"id":format!("{surface}-{id}-{action}"), "action":action, "selector":selector, "attribute":"value"}), &mut state,
+                ).await;
+                assert_success(&resp);
+                assert!(
+                    !resp.to_string().contains("fixture-secret-"),
+                    "{surface} {action} leaked {id}"
+                );
+                assert_eq!(
+                    get_data(&resp)[key],
+                    format!("[redacted: {kind}]"),
+                    "Wrong marker for {surface} {action} {id}"
+                );
+            }
+        }
+        for (id, expected) in [
+            ("ordinary", format!("ordinary-value-{surface}")),
+            ("holder", format!("ordinary-holder-{surface}")),
+        ] {
+            let selector = if surface == "shadow" || surface == "closed-shadow" {
+                let name = format!("{surface} {id}");
+                let (reference, _) = state
+                    .ref_map
+                    .entries_sorted()
+                    .into_iter()
+                    .find(|(_, entry)| entry.name == name)
+                    .unwrap();
+                format!("@{reference}")
+            } else {
+                format!("#{id}")
+            };
+            for (action, key, result) in [
+                ("inputvalue", "value", expected.as_str()),
+                ("getattribute", "value", expected.as_str()),
+                ("gettext", "text", ""),
+                ("innertext", "text", ""),
+                ("innerhtml", "html", ""),
+            ] {
+                let resp = execute_command(&json!({"id":"ordinary-value", "action":action, "selector":selector, "attribute":"value"}), &mut state).await;
+                assert_success(&resp);
+                assert_eq!(
+                    get_data(&resp)[key],
+                    result,
+                    "Ordinary {surface} {id} changed under {action}"
+                );
+            }
+        }
+        if surface != "shadow" && surface != "closed-shadow" {
+            for action in ["gettext", "innertext", "innerhtml"] {
+                let resp = execute_command(
+                    &json!({"id":"ancestor", "action":action, "selector":"#controls"}),
+                    &mut state,
+                )
+                .await;
+                assert_success(&resp);
+                assert!(
+                    !resp.to_string().contains("fixture-secret-"),
+                    "Ancestor {action} leaked {surface} inputs"
+                );
+                assert!(resp
+                    .to_string()
+                    .contains(&format!("ordinary-text-{surface}")));
+                if action == "innerhtml" {
+                    for (id, _, kind) in SENSITIVE_INPUT_CASES {
+                        let original_value = sensitive_fixture_value(surface, id, kind);
+                        assert!(
+                            !get_data(&resp)["html"]
+                                .as_str()
+                                .unwrap()
+                                .contains(&original_value),
+                            "Ancestor HTML leaked {surface} {id}"
+                        );
+                    }
+                    assert!(get_data(&resp)["html"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("ordinary-value-{surface}")));
+                }
+            }
+        }
+        assert_sensitive_fixture_unchanged(&state, surface).await;
+
+        let root = sensitive_fixture_root(surface);
+        let ids = SENSITIVE_INPUT_CASES
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>();
+        let remove_script = format!("(() => {{ const root = {root}; {}.forEach(id => root.getElementById(id).remove()); return !root.querySelector('input[type=password], input[autocomplete=cc-number]'); }})()", serde_json::to_string(&ids).unwrap());
+        assert_eq!(
+            trusted_sensitive_fixture_evaluate(&state, &remove_script).await,
+            true
+        );
+        let resp = execute_command(
+            &json!({"id":"main-sticky", "action":"mainframe"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        for action in ["evaluate", "evalhandle", "screenshot", "pdf"] {
+            let path = artifacts.path().join(format!("{surface}-sticky-{action}"));
+            let resp = execute_command(
+                &json!({"id":"sticky", "action":action, "script":"1 + 1", "path":path}),
+                &mut state,
+            )
+            .await;
+            assert_sensitive_output_refused(&resp);
+            assert!(!path.exists());
+        }
+        let resp = execute_command(
+            &json!({"id":"close-fixture-tab", "action":"tab_close"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+    let resp = execute_command(
+        &json!({"id":"benign-tab", "action":"tab_switch", "tabId":"t1"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_sensitive_test_evaluate(
+        &mut state,
+        "benign-after-sensitive",
+        "document.querySelector('h1').textContent",
+        json!("ordinary-benign"),
+    )
+    .await;
+    let resp = execute_command(&json!({"id":"close", "action":"close"}), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_webmcp_discovery_invocation_and_cancellation() {

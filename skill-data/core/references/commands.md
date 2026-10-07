@@ -1,5 +1,11 @@
 # Command Reference
 
+## Always-active native sensitive input protection
+
+Native `snapshot`, `get value`, `get text`, `get html`, and `get attr` return `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]` for protected form values. `cc-name` is public. Live values remain unchanged; shadow DOM and cross-origin out-of-process iframes are covered. This is not general secret detection in arbitrary page text.
+
+Recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript` are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED`. `eval`, `evalhandle`, `addscript`, `wait --fn`, screenshots/PDF, screenshot diffs, downloads, active-tab `read`, and browser-data output (console/errors, network responses, React inspection, accessibility audits, WebMCP invocation/results, clipboard, storage/cookies, saved-state output) remain available on benign tabs but refuse before execution, capture, or writes when current or remembered sensitive controls exist. Detection is sticky for the daemon/tab lifetime, including after field removal or navigation; incomplete observation fails closed. Use protected APIs on sensitive tabs. MCP uses the canonical CLI and has the same behavior. There is no bypass flag.
+
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md.
 
 ## Navigation

@@ -1,4 +1,4 @@
-name: Build Hara browser repairs package
+name: Build Hara sensitive browser inputs package
 
 on:
   workflow_dispatch:
@@ -7,7 +7,48 @@ permissions:
   contents: write
 
 jobs:
+  sensitive-input-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Build native executable
+        run: cargo build --release --manifest-path cli/Cargo.toml
+      - name: Install real Chrome and browser dependencies
+        run: cli/target/release/agent-browser install --with-deps
+      - name: Full native unit suite and sensitive form input e2e
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-receipts
+          cargo test --release --manifest-path cli/Cargo.toml -- --list | tee test-receipts/test-list.log
+          grep -Eq 'e2e_sensitive[^:]*: test' test-receipts/test-list.log
+          cargo test --release --manifest-path cli/Cargo.toml -- --test-threads=1 2>&1 | tee test-receipts/unit.log
+          cargo test --release --manifest-path cli/Cargo.toml e2e_sensitive -- --ignored --test-threads=1 2>&1 | tee test-receipts/sensitive-e2e.log
+      - name: Retained controlled temporal input and frame custody coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cargo test --release --manifest-path cli/Cargo.toml e2e_eval_runs_inside_the_active_frame -- --ignored --test-threads=1
+            cargo test --release --manifest-path cli/Cargo.toml e2e_console_includes_cross_origin_frame_logs -- --ignored --test-threads=1
+            cargo test --release --manifest-path cli/Cargo.toml e2e_attach_preserves_existing_cross_origin_frames -- --ignored --test-threads=1
+            cargo test --release --manifest-path cli/Cargo.toml e2e_fill_controlled_temporal_inputs -- --ignored --test-threads=1
+          } 2>&1 | tee test-receipts/retained-frame-date-e2e.log
+      - name: Preserve durable test receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensitive-input-test-receipts
+          path: test-receipts/
+          if-no-files-found: warn
+
   package-linux-x64:
+    needs: sensitive-input-tests
     # Converge runs glibc 2.36. Keep the published executable compatible with
     # both fleet hosts instead of inheriting ubuntu-latest's newer libc.
     runs-on: ubuntu-22.04
@@ -20,12 +61,6 @@ jobs:
           workspaces: cli
       - name: Build native executable
         run: cargo build --release --manifest-path cli/Cargo.toml
-      - name: Check controlled date inputs and frame custody with real Chrome
-        run: |
-          cargo test --release --manifest-path cli/Cargo.toml e2e_eval_runs_inside_the_active_frame -- --ignored
-          cargo test --release --manifest-path cli/Cargo.toml e2e_console_includes_cross_origin_frame_logs -- --ignored
-          cargo test --release --manifest-path cli/Cargo.toml e2e_attach_preserves_existing_cross_origin_frames -- --ignored
-          cargo test --release --manifest-path cli/Cargo.toml e2e_fill_controlled_temporal_inputs -- --ignored
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -39,9 +74,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create browser-controlled-dates-20261003-glibc235 \
+          gh release create browser-sensitive-inputs-20261007-glibc235 \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
             --target "$GITHUB_SHA" \
-            --title "Controlled date input repairs for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Temporal input fill uses the native value setter plus input/change events to update controlled state and verifies the retained value. Invalid and read-only temporal inputs fail instead of reporting false success. Real Chrome e2e covers date/datetime-local fill, clearing, value tracking and rejection. Retains all prior frame, download-scope and screenshot repairs. Packaged source commit: $GITHUB_SHA."
+            --title "Native sensitive form input protection for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Native snapshots and getters redact protected payment, password and one-time-code fields without changing live values. cc-name stays public. Coverage includes shadow DOM and cross-origin out-of-process iframes. Eval, screenshot/PDF, downloads and browser-data output are guarded on current or remembered sensitive tabs. Continuous recording/trace/profiler/HAR/stream and addinitscript always fail closed with SENSITIVE_OUTPUT_UNSUPPORTED; no bypass flag. Publication requires the full unit suite and real Chrome sensitive input e2e suite, with durable test logs. Retains prior controlled temporal input and frame custody repairs. Packaged source commit: $GITHUB_SHA."

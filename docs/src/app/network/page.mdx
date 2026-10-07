@@ -1,6 +1,6 @@
 # Network
 
-Use network commands to intercept requests, mock responses, inspect traffic, and export HAR files during browser automation.
+Native HAR commands are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or file writes. Requests and response-detail output remain functional on benign tabs but refuse on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Request routing
 

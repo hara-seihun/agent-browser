@@ -2,6 +2,8 @@ import { DiffDemo } from "@/components/diff-demo"
 
 # Diffing
 
+Native screenshot diffs remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or file writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Snapshot-based inspection uses protected native APIs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
+
 Compare page states to detect changes -- structurally via accessibility tree snapshots, visually via pixel comparison, or across two different URLs.
 
 <DiffDemo />

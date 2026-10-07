@@ -1,6 +1,6 @@
 # Files & Clipboard
 
-agent-browser can upload files, capture downloads, read local files through `file://` URLs, write PDFs and screenshots, and interact with the browser clipboard.
+Native downloads, PDF, screenshots, and clipboard commands remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or file writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Upload and form interaction leave live values unchanged by redaction. There is no bypass flag. Use protected snapshots and getters for sensitive form inspection; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Upload files
 

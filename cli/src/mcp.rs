@@ -1932,7 +1932,10 @@ fn wait_timeout_schema() -> Value {
     })
 }
 
+/// Tool discovery describes the native contract; execution still delegates to the
+/// canonical CLI, so profiles and extraArgs cannot bypass output protection.
 fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+    let description = format!("{} {}", description, sensitive_tool_description(name));
     let mut props = match properties {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
@@ -2051,6 +2054,73 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "description": description,
         "inputSchema": Value::Object(schema),
         "annotations": tool_annotations(name),
+    })
+}
+
+/// Discovery derives refusal semantics from the native action policy rather than
+/// maintaining a second MCP allow/deny implementation.
+fn sensitive_tool_description(name: &str) -> &'static str {
+    if matches!(
+        name,
+        TOOL_SNAPSHOT
+            | TOOL_GET_VALUE
+            | TOOL_GET_TEXT
+            | TOOL_GET_HTML
+            | TOOL_GET_ATTR
+            | TOOL_DIFF_SNAPSHOT
+    ) {
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+    }
+    if let Some(action) = sensitive_tool_action(name) {
+        if crate::native::sensitive::always_denied(action) {
+            return "Always refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes, even on benign tabs. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        }
+        if crate::native::sensitive::guarded(action, &json!({})) {
+            return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        }
+    }
+    "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag."
+}
+
+fn sensitive_tool_action(name: &str) -> Option<&'static str> {
+    Some(match name {
+        TOOL_READ => "read",
+        TOOL_EVAL => "evaluate",
+        TOOL_WAIT_FOR_FUNCTION => "waitforfunction",
+        TOOL_SCREENSHOT => "screenshot",
+        TOOL_PDF => "pdf",
+        TOOL_DIFF_SCREENSHOT => "diff_screenshot",
+        TOOL_DOWNLOAD => "download",
+        TOOL_WAIT_FOR_DOWNLOAD => "waitfordownload",
+        TOOL_RECORD_START => "recording_start",
+        TOOL_RECORD_RESTART => "recording_restart",
+        TOOL_RECORD_STOP => "recording_stop",
+        TOOL_TRACE_START => "trace_start",
+        TOOL_TRACE_STOP => "trace_stop",
+        TOOL_PROFILER_START => "profiler_start",
+        TOOL_PROFILER_STOP => "profiler_stop",
+        TOOL_NETWORK_HAR_START => "har_start",
+        TOOL_NETWORK_HAR_STOP => "har_stop",
+        TOOL_STREAM_ENABLE => "stream_enable",
+        TOOL_INSPECT => "inspect",
+        TOOL_CONSOLE => "console",
+        TOOL_ERRORS => "errors",
+        TOOL_NETWORK_REQUESTS => "requests",
+        TOOL_NETWORK_REQUEST => "request_detail",
+        TOOL_REACT_TREE => "react_tree",
+        TOOL_REACT_INSPECT => "react_inspect",
+        TOOL_REACT_SUSPENSE => "react_suspense",
+        TOOL_A11Y => "a11y",
+        TOOL_WEBMCP_INVOKE => "webmcp_invoke",
+        TOOL_WEBMCP_RESULT => "webmcp_result",
+        TOOL_CLIPBOARD_READ | TOOL_CLIPBOARD_WRITE | TOOL_CLIPBOARD_COPY | TOOL_CLIPBOARD_PASTE => {
+            "clipboard"
+        }
+        TOOL_STORAGE_GET => "storage_get",
+        TOOL_COOKIES_GET => "cookies_get",
+        TOOL_STATE_SAVE => "state_save",
+        TOOL_STATE_SHOW => "state_show",
+        _ => return None,
     })
 }
 
@@ -2406,6 +2476,8 @@ fn call_tools_profiles(config: &McpConfig) -> Result<Value, ProtocolError> {
     }))
 }
 
+/// Preserve the canonical CLI's redaction and refusal responses without running
+/// an alternate MCP-side extraction or capture implementation.
 fn call_cli_tool(
     arguments: &Value,
     command_args: Vec<String>,
@@ -2607,6 +2679,10 @@ fn call_read(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, snapshot_args(arguments)?, None)
+}
+
+fn snapshot_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["snapshot".to_string()];
     if optional_bool(arguments, "interactive")?.unwrap_or(true) {
         args.push("-i".to_string());
@@ -2626,7 +2702,7 @@ fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(selector);
     }
 
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
@@ -2784,22 +2860,22 @@ fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_get_selector(arguments: &Value, what: &str) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, get_selector_args(arguments, what)?, None)
+}
+
+fn get_selector_args(arguments: &Value, what: &str) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
-    call_cli_tool(
-        arguments,
-        vec!["get".to_string(), what.to_string(), selector],
-        None,
-    )
+    Ok(vec!["get".to_string(), what.to_string(), selector])
 }
 
 fn call_get_attr(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, get_attr_args(arguments)?, None)
+}
+
+fn get_attr_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let name = required_string(arguments, "name")?;
-    call_cli_tool(
-        arguments,
-        vec!["get".to_string(), "attr".to_string(), selector, name],
-        None,
-    )
+    Ok(vec!["get".to_string(), "attr".to_string(), selector, name])
 }
 
 fn call_is(arguments: &Value, what: &str) -> Result<Value, ProtocolError> {
@@ -4843,6 +4919,157 @@ mod tests {
             webmcp_list_args(&json!({})).unwrap(),
             vec!["webmcp", "list"]
         );
+    }
+
+    #[test]
+    fn sensitive_input_protected_tools_use_canonical_cli_parser() {
+        let arguments = json!({"selector": "#card", "name": "value", "interactive": false,
+            "extraArgs": ["--content-boundaries"]});
+        let parse = |args: Vec<String>| {
+            let flags = crate::flags::parse_flags(&args);
+            let mut command =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            command.as_object_mut().unwrap().remove("id");
+            command
+        };
+        for (mcp_args, direct) in [
+            (
+                snapshot_args(&arguments).unwrap(),
+                vec!["snapshot", "-s", "#card"],
+            ),
+            (
+                get_selector_args(&arguments, "value").unwrap(),
+                vec!["get", "value", "#card"],
+            ),
+            (
+                get_selector_args(&arguments, "text").unwrap(),
+                vec!["get", "text", "#card"],
+            ),
+            (
+                get_selector_args(&arguments, "html").unwrap(),
+                vec!["get", "html", "#card"],
+            ),
+            (
+                get_attr_args(&arguments).unwrap(),
+                vec!["get", "attr", "#card", "value"],
+            ),
+        ] {
+            let wrapped = cli_tool_args(&arguments, mcp_args, None).unwrap();
+            let direct = direct.into_iter().map(str::to_string).collect();
+            assert_eq!(parse(wrapped), parse(direct));
+        }
+    }
+
+    #[test]
+    fn sensitive_input_channel_args_preserve_cli_policy() {
+        for (name, parts) in [
+            (TOOL_EVAL, vec!["eval", "document.title"]),
+            (TOOL_SCREENSHOT, vec!["screenshot", "benign.png"]),
+            (TOOL_PDF, vec!["pdf", "benign.pdf"]),
+            (TOOL_WAIT_FOR_FUNCTION, vec!["wait", "--fn", "window.ready"]),
+            (TOOL_TRACE_START, vec!["trace", "start"]),
+            (TOOL_PROFILER_START, vec!["profiler", "start"]),
+            (TOOL_RECORD_START, vec!["record", "start", "record.webm"]),
+            (TOOL_NETWORK_HAR_START, vec!["network", "har", "start"]),
+            (TOOL_STREAM_ENABLE, vec!["stream", "enable"]),
+        ] {
+            let wrapped = cli_tool_args(
+                &json!({}),
+                parts.into_iter().map(str::to_string).collect(),
+                None,
+            )
+            .unwrap();
+            let flags = crate::flags::parse_flags(&wrapped);
+            let command =
+                crate::commands::parse_command(&crate::flags::clean_args(&wrapped), &flags)
+                    .unwrap();
+            let action = command["action"].as_str().unwrap();
+            assert_eq!(Some(action), sensitive_tool_action(name));
+            let description = sensitive_tool_description(name);
+            assert_eq!(
+                description.contains("Always refused"),
+                crate::native::sensitive::always_denied(action)
+            );
+            assert_eq!(
+                description.contains("output is guarded"),
+                crate::native::sensitive::guarded(action, &command)
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_input_tool_descriptions_follow_native_policy() {
+        for name in [
+            TOOL_EVAL,
+            TOOL_SCREENSHOT,
+            TOOL_PDF,
+            TOOL_READ,
+            TOOL_DOWNLOAD,
+            TOOL_CONSOLE,
+            TOOL_GET_VALUE,
+            TOOL_RECORD_START,
+            TOOL_TRACE_START,
+            TOOL_PROFILER_STOP,
+            TOOL_NETWORK_HAR_START,
+            TOOL_STREAM_ENABLE,
+        ] {
+            let description = sensitive_tool_description(name);
+            assert!(description.contains("canonical CLI"));
+            assert!(description.contains("No bypass flag"));
+            if let Some(action) = sensitive_tool_action(name) {
+                assert_eq!(
+                    description.contains("Always refused"),
+                    crate::native::sensitive::always_denied(action)
+                );
+                assert_eq!(
+                    description.contains("output is guarded"),
+                    crate::native::sensitive::guarded(action, &json!({}))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sensitive_input_markers_and_refusals_survive_mcp_rendering() {
+        for kind in [
+            "cc-number",
+            "cc-exp",
+            "cc-exp-month",
+            "cc-exp-year",
+            "cc-csc",
+            "password",
+            "one-time-code",
+        ] {
+            let marker = format!("[redacted: {}]", kind);
+            for key in ["snapshot", "value", "text", "html", "attribute"] {
+                let response = json!({"success": true, "data": {key: marker}});
+                let result = tool_result_from_run(CliRun {
+                    exit_code: Some(0),
+                    stdout: response.to_string(),
+                    stderr: String::new(),
+                });
+                assert_eq!(result["isError"], false);
+                assert!(result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&marker));
+                assert_eq!(result["structuredContent"]["response"], response);
+            }
+        }
+        let response = json!({"success": false,
+            "error": "SENSITIVE_OUTPUT_UNSUPPORTED: native arbitrary output is refused"});
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(1),
+            stdout: response.to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("SENSITIVE_OUTPUT_UNSUPPORTED"));
+        assert_eq!(result["structuredContent"]["response"], response);
     }
 
     #[test]

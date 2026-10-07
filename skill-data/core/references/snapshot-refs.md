@@ -1,6 +1,6 @@
 # Snapshot and Refs
 
-Compact element references that reduce context usage dramatically for AI agents.
+Compact element references that reduce context usage dramatically for AI agents. Native snapshots and `get value/text/html/attr` replace protected form values with typed `[redacted: …]` markers without changing live fields. `cc-name` remains public. Shadow DOM and cross-origin out-of-process iframes are covered. This is form-input protection, not general secret detection in arbitrary page text. See [trust-boundaries.md](trust-boundaries.md#native-sensitive-form-input-contract) for exact markers, guarded channels, and sticky tab detection.
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 

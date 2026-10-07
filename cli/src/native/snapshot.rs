@@ -327,7 +327,22 @@ pub async fn take_snapshot(
         )
         .await?;
 
+    let observation = super::sensitive::observe(client, session_id, iframe_sessions).await?;
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
+    for node in &mut tree_nodes {
+        node.name = observation.protect_text(&node.name);
+        node.value_text = node
+            .value_text
+            .as_deref()
+            .map(|s| observation.protect_text(s));
+        if let Some(redacted) = node.backend_node_id.and_then(|bid| {
+            observation
+                .controls
+                .get(&(effective_session_id.to_string(), bid))
+        }) {
+            node.value_text = Some(redacted.clone());
+        }
+    }
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
@@ -368,10 +383,16 @@ pub async fn take_snapshot(
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let cursor_elements: HashMap<i64, CursorElementInfo> =
+    let mut cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
             .await
             .unwrap_or_default();
+    for info in cursor_elements.values_mut() {
+        info.text = observation.protect_text(&info.text);
+        info.hints
+            .iter_mut()
+            .for_each(|s| *s = observation.protect_text(s));
+    }
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
 
@@ -593,7 +614,7 @@ pub async fn take_snapshot(
         return Ok("(empty page)".to_string());
     }
 
-    Ok(trimmed)
+    Ok(observation.protect_text(&trimmed))
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.

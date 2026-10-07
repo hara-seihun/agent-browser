@@ -1,6 +1,6 @@
 # Init Scripts & Extensions
 
-Init scripts run before page JavaScript. Use them to install hooks, polyfills, instrumentation, or test helpers before the first navigation.
+Native `addinitscript` is always refused with `SENSITIVE_OUTPUT_UNSUPPORTED` before execution. `addscript`, `eval`, and `wait --fn` remain functional on benign tabs but refuse on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. There is no bypass flag. Use protected snapshots and getters on sensitive tabs; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Launch-time scripts
 

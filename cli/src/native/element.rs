@@ -857,8 +857,7 @@ pub async fn get_element_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return this.innerText || this.textContent || ''; }".to_string(),
+                function_declaration: super::sensitive::getter_js("text", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -896,10 +895,7 @@ pub async fn get_element_attribute(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: format!(
-                    "function() {{ return this.getAttribute({}); }}",
-                    serde_json::to_string(attribute).unwrap_or_default()
-                ),
+                function_declaration: super::sensitive::getter_js("attribute", Some(attribute)),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1084,7 +1080,7 @@ pub async fn get_element_inner_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerText || ''; }".to_string(),
+                function_declaration: super::sensitive::getter_js("innertext", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1121,7 +1117,7 @@ pub async fn get_element_inner_html(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return this.innerHTML || ''; }".to_string(),
+                function_declaration: super::sensitive::getter_js("html", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1158,9 +1154,7 @@ pub async fn get_element_input_value(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration:
-                    "function() { return typeof this.value === 'string' ? this.value : ''; }"
-                        .to_string(),
+                function_declaration: super::sensitive::getter_js("value", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

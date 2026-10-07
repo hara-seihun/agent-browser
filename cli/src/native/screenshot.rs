@@ -104,6 +104,7 @@ pub async fn take_screenshot(
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
+    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
             Some(selector) => {
@@ -138,6 +139,9 @@ pub async fn take_screenshot(
     }
 
     let base64 = base64?;
+    // Captured bytes stay in memory until the complete frame inventory is
+    // public again. Do not create a raw file and redact or delete it later.
+    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
     let annotations = if options.annotate {
         let scroll = if options.full_page {
             Some(get_scroll_offsets(client, session_id).await?)

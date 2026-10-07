@@ -3699,10 +3699,31 @@ Examples:
         _ => return false,
     };
     println!("{}", help.trim());
+    println!("\n{}", SENSITIVE_INPUT_HELP);
     true
 }
 
+/// Native output protection is unconditional; these are not policy defaults or CLI flags.
+const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active; no bypass flag):
+  snapshot, get value/text/html/attr redact protected form values as:
+    [redacted: cc-number], [redacted: cc-exp], [redacted: cc-exp-month],
+    [redacted: cc-exp-year], [redacted: cc-csc], [redacted: password],
+    [redacted: one-time-code]. cc-name stays public; live fields stay unchanged.
+  Covers shadow DOM and cross-origin out-of-process iframes.
+  This is native form-input protection, not general secret detection in page text.
+  Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
+  inspect/expose, addinitscript.
+  Guarded on current or remembered sensitive tabs: eval/evalhandle, addscript,
+  wait --fn, screenshots/PDF/diffs, downloads, active-tab read and browser-data
+  output (logs/network/React/a11y/WebMCP/clipboard/storage/cookies/state).
+  Guarded commands stay functional on benign tabs. Detection is sticky for the
+  daemon/tab lifetime, including field removal and navigation. Observation errors
+  fail closed. Refusals use SENSITIVE_OUTPUT_UNSUPPORTED before execution,
+  capture or writes. Use protected snapshots/getters on sensitive tabs.
+  MCP delegates to the canonical CLI; profiles, extraArgs and approval do not bypass it.";
+
 pub fn print_help() {
+    println!("{}\n", SENSITIVE_INPUT_HELP);
     println!(
         r#"
 agent-browser - fast browser automation CLI for AI agents

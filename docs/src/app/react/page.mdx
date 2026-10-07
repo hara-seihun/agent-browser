@@ -1,6 +1,6 @@
 # React & Web Vitals
 
-agent-browser can inspect React component trees, record re-renders, classify Suspense boundaries, measure Core Web Vitals, and perform SPA navigation.
+Native React tree, component, and Suspense inspection remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` before collecting output on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Enable React inspection
 

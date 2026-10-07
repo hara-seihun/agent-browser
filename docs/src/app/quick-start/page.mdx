@@ -1,5 +1,7 @@
 # Quick Start
 
+Native form inspection protects card, password, and one-time-code values without changing live fields; `cc-name` remains public. Eval and screenshot/PDF channels work on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` on current or remembered sensitive tabs; detection is sticky for the daemon/tab lifetime, including navigation. Continuous capture and `addinitscript` are always refused. There is no bypass flag. See [Security](/security#native-sensitive-form-inputs) for the exact protected API scope and markers.
+
 ## Core workflow
 
 Every browser automation follows this pattern:
@@ -29,8 +31,7 @@ agent-browser snapshot -i                # Get interactive elements with refs
 agent-browser click @e2                  # Click by ref
 agent-browser fill @e3 "test@example.com" # Fill input by ref
 agent-browser get text @e1               # Get text content
-agent-browser screenshot                 # Save to temp directory
-agent-browser screenshot page.png        # Save to specific path
+agent-browser get value @e3              # Protected form values return typed redaction markers
 agent-browser close
 ```
 
@@ -58,7 +59,6 @@ agent-browser open example.com --headed
 agent-browser wait @e1                   # Wait for element
 agent-browser wait --text "Welcome"      # Wait for expected text
 agent-browser wait --url "**/dashboard"  # Wait for URL pattern
-agent-browser wait --fn "window.appReady === true" # Wait for JS condition
 agent-browser wait --load domcontentloaded # Wait for the DOM lifecycle event
 ```
 

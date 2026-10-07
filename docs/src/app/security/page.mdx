@@ -2,7 +2,43 @@
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
-All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.
+Native sensitive form input protection is always active. Other security controls on this page are opt-in.
+
+## Native sensitive form inputs
+
+Native `snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with typed markers. Live fields stay unchanged, including during filling and submission. Shadow DOM and cross-origin out-of-process iframes are covered.
+
+<table>
+  <thead><tr><th>Input kind</th><th>Output marker</th></tr></thead>
+  <tbody>
+    <tr><td>Card number</td><td><code>[redacted: cc-number]</code></td></tr>
+    <tr><td>Card expiry</td><td><code>[redacted: cc-exp]</code></td></tr>
+    <tr><td>Expiry month</td><td><code>[redacted: cc-exp-month]</code></td></tr>
+    <tr><td>Expiry year</td><td><code>[redacted: cc-exp-year]</code></td></tr>
+    <tr><td>Card security code</td><td><code>[redacted: cc-csc]</code></td></tr>
+    <tr><td>Password</td><td><code>[redacted: password]</code></td></tr>
+    <tr><td>One-time code</td><td><code>[redacted: one-time-code]</code></td></tr>
+  </tbody>
+</table>
+
+`cc-name` is public. This is protection for native form-input APIs, not a general detector for secrets in arbitrary page text.
+
+Classification uses password input type, sensitive autocomplete tokens, and recognized `name`/`id` identifiers. Refusals have two scopes:
+
+- **Always refused:** recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript`, even on pages without sensitive inputs.
+- **Guarded:** `eval`, `evalhandle`, `addscript`, `wait --fn`, screenshots/PDF, screenshot diffs, downloads, active-tab `read`, and browser-data output including console/errors, network responses, React inspection, accessibility audits, WebMCP invocation/results, clipboard, storage/cookies, and saved-state output. These remain functional on benign tabs but refuse when the tab currently has sensitive controls or was previously detected as sensitive.
+
+Refusal returns an error prefixed `SENSITIVE_OUTPUT_UNSUPPORTED` before execution, capture, or file writes. Incomplete observation fails closed. Sensitive-tab detection is sticky for the daemon/tab lifetime: removing fields or navigating the same tab does not reset it. Use protected snapshots and getters on sensitive tabs. There is no bypass flag, environment variable, or configuration switch. Action approval does not override a refusal.
+
+MCP delegates to the canonical CLI. Tool profiles and `extraArgs` preserve the same protection rather than providing alternate access.
+
+```bash
+agent-browser snapshot -i
+agent-browser get value '#card-number'
+# [redacted: cc-number]
+```
+
+Always-refused channels remain documented for discoverability. Guarded command examples apply to benign tabs without remembered sensitive detection, not as alternate extraction routes on sensitive tabs.
 
 ## Threat Model
 
@@ -17,7 +53,7 @@ These features are designed to mitigate the following threats when an LLM-based 
 
 ### Known limitations
 
-- **WebSocket/EventSource blocking is best-effort.** It works by overriding browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore the original constructors. Deny `eval` via `--action-policy` for maximum protection.
+- **WebSocket/EventSource blocking is best-effort.** It works by overriding browser constructors via an init script. The site's own scripts can interfere with page-level controls; native arbitrary script commands are guarded independently of action policy.
 - **Domain filter timing on cloud providers.** Cloud providers run outside the local Chrome process, so resources loaded by provider-side startup behavior before agent-browser connects are not retroactively blocked. agent-browser rejects pre-existing browser attach modes, Chrome profiles, direct-page provider plugins, restore/state replay, and raw startup Chrome args when the allowlist is active.
 - **The domain allowlist is not an operating-system firewall.** Locally launched Chrome disables non-proxied WebRTC UDP in addition to blocking `RTCPeerConnection` in page JavaScript. Combine the allowlist with host, container, or network egress controls when you require a boundary below the browser process.
 - **Pre-existing attach modes, profiles, saved state, and startup args do not support the domain allowlist.** agent-browser rejects `--allowed-domains` with `--cdp`, `--auto-connect`, `--profile`, `--restore`, `--state`, `state load`, and raw Chrome args that select profiles, restore sessions, or open startup pages because pages or saved origins may run before agent-browser can verify containment.

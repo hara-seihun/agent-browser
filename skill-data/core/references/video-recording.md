@@ -1,6 +1,6 @@
 # Video Recording
 
-Capture browser automation as video for debugging, documentation, or verification.
+Native video recording commands are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or writes, even on benign tabs. There is no bypass flag. Use protected snapshots and getters for inspection. Syntax below is retained for discoverability; see [trust-boundaries.md](trust-boundaries.md#native-sensitive-form-input-contract).
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
