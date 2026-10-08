@@ -736,7 +736,7 @@ agent-browser session id --scope worktree --prefix next-dev-loop
 agent-browser session info --json
 ```
 
-`session info` in the native daemon is metadata-only: it reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. It is not a browser health probe.
+`session info` in the native daemon is metadata-only: it reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. It is not a browser health probe. The JSON CLI preserves the native failure envelope and code; unavailable runtime metadata is not converted into a successful inventory result.
 
 If a command or background maintenance holds daemon state, native `session info`, `close`, and `confirm` immediately return JSON with `"success": false` and `"code": "daemon_busy"`. No close was performed; the active operation remains owned and in progress. Retry once it settles.
 

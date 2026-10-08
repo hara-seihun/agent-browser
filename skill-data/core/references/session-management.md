@@ -96,7 +96,7 @@ agent-browser --session "$SESSION" session info --json
 
 ### Native Inspection and Close
 
-`session info` is metadata-only: it reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. Do not use it as a browser health probe.
+`session info` is metadata-only: it reports recorded daemon, launch, and restore status without checking browser liveness, draining DOM events, validating restore state, or changing configuration. Do not use it as a browser health probe. The JSON CLI preserves native failure envelopes and codes; unavailable runtime metadata is not successful inspection.
 
 If a command or background maintenance holds daemon state, native `session info`, `close`, and `confirm` immediately return JSON with `"success": false` and `"code": "daemon_busy"`. No close was performed; the active operation remains owned and in progress. Retry once it settles rather than treating a busy response as cancellation or successful close.
 

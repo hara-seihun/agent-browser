@@ -3084,6 +3084,7 @@ Operations:
 
 Native info is metadata-only: no browser liveness check, DOM/event drain,
 restore validation, or configuration mutation. It is not a health probe.
+The JSON CLI preserves native failure envelopes and codes, not successful metadata.
 If a command or background maintenance holds daemon state, info, close,
 and confirm return immediate JSON success:false with code:daemon_busy. No close was
 performed; the operation remains owned and in progress. Retry when settled.

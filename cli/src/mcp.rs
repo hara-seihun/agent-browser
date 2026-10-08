@@ -1774,7 +1774,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show recorded session, daemon, launch, and restore metadata through the canonical CLI. Native inspection performs no browser liveness check, DOM/event drain, restore validation, or configuration mutation. If a command or background maintenance holds daemon state, returns success:false with code:daemon_busy; the active operation remains owned and in progress. Retry when it settles.",
+            "Show recorded session, daemon, launch, and restore metadata through the canonical CLI. Native inspection performs no browser liveness check, DOM/event drain, restore validation, or configuration mutation. The JSON CLI preserves native failure envelopes and codes. If a command or background maintenance holds daemon state, returns success:false with code:daemon_busy; the active operation remains owned and in progress. Retry when it settles.",
             json!({}),
             &[],
         ),

@@ -676,6 +676,12 @@ fn run_session_info(session: &str, json_mode: bool) {
     });
 
     if json_mode {
+        if let Some(response) = runtime.as_ref().filter(|response| !response.success) {
+            print_json_value(
+                serde_json::to_value(response).expect("Response serialization failed"),
+            );
+            return;
+        }
         print_json_value(json!({
             "success": true,
             "data": {
