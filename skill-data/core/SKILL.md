@@ -70,6 +70,10 @@ The browser stays running across commands so these feel like a single session. B
 
 Use `fill` with ISO values for date/time fields, including controlled React inputs: `2026-10-28` for a date and `2026-10-28T19:30` for local date-time. Empty text clears them; invalid or non-editable temporal inputs fail without changing their value.
 
+## Clean-tab authorization restoration
+
+For an app authenticated through per-tab sessionStorage, use `state save-tab <path> <account> <origin> <ttl-seconds>` on the authorized clean tab, then `tab new`, `state load-tab <path> <account> <origin>`, and only then `open <url>`. Worker replacement uses the same explicit load on a fresh owned blank target. The Unix-private capsule binds UID/person context, exact origin, declared account and expiry; no defaults or inferred authorization. It transfers only sessionStorage, not context-wide cookies/localStorage. Guarded tabs and attached browsers refuse, and sensitive guards remain sticky. Delete the secret file and close owned tabs when done. See [authentication](references/authentication.md#clean-tab-startup-capsules).
+
 ## MCP integration
 
 For tools that support Model Context Protocol servers, start the stdio server:

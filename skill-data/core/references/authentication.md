@@ -99,6 +99,21 @@ export AGENT_BROWSER_PROFILE=~/.myapp-profile
 agent-browser open https://app.example.com/dashboard
 ```
 
+## Clean-tab startup capsules
+
+A new/replacement tab may lack per-tab sessionStorage even after cookies/localStorage restore. With explicit authorization for your own account and exact origin, capture only an authenticated clean top-level tab:
+
+```bash
+agent-browser state save-tab ./tab-auth.json my-account https://example.com 300
+agent-browser tab new
+agent-browser state load-tab ./tab-auth.json my-account https://example.com
+agent-browser open https://example.com
+```
+
+Account is caller-declared authorization, not discovered site identity. Exact HTTP(S) origin is canonical, has no path/trailing slash, and includes non-default ports. Mandatory TTL is 1..86400 seconds. Capsules are secret create-only Unix 0600 files bound to effective UID and the exact `PI_KENAN_MEMORY_PERSON` set/unset context. Load checks owner/account/origin/expiry before installing on a fresh owned Chrome `about:blank` target with no prior navigation/bootstrap. Missing, expired, mismatched or unsafe state returns typed `tab_state_*` refusal; Windows, attached browsers and non-Chrome backends are unsupported.
+
+The target-local top-level bootstrap seeds missing sessionStorage keys at that exact origin before application scripts, until expiry; it does not overwrite existing keys. It is not installed on other tabs or frames. Each new/replacement tab needs explicit load-tab; closing the tab removes its bootstrap. Capture/load refuse current or remembered sensitive tabs, without resetting guards. Restore context-wide cookies/localStorage separately through authorized ordinary state; cookie domain scope is not exact-origin isolation. Capsules are not ordinary state-show/autosave files and do not use `AGENT_BROWSER_ENCRYPTION_KEY`. Delete the file after use, never paste its values, and use a new path for each capture.
+
 ## Session Persistence
 
 Use `--restore` with a stable `--session` to auto-save and restore cookies + localStorage without managing files:

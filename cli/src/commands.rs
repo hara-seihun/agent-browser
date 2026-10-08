@@ -1755,8 +1755,45 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
+            const VALID: &[&str] = &[
+                "save", "load", "save-tab", "load-tab", "list", "clear", "show", "clean", "rename",
+            ];
             match rest.first().copied() {
+                Some("save-tab") | Some("load-tab") => {
+                    let saving = rest[0] == "save-tab";
+                    let usage = if saving {
+                        "state save-tab <path> <account> <origin> <ttl-seconds>"
+                    } else {
+                        "state load-tab <path> <account> <origin>"
+                    };
+                    if rest.len() != if saving { 5 } else { 4 } {
+                        return Err(ParseError::InvalidValue {
+                            message:
+                                "Explicit path, account, exact origin and (for save) TTL required"
+                                    .into(),
+                            usage,
+                        });
+                    }
+                    crate::native::tab_state::validate_scope(rest[2], rest[3]).map_err(|e| {
+                        ParseError::InvalidValue {
+                            message: e.message(),
+                            usage,
+                        }
+                    })?;
+                    let mut command = json!({"id":id,"action":if saving {"state_save_tab"} else {"state_load_tab"},"path":rest[1],"account":rest[2],"origin":rest[3]});
+                    if saving {
+                        let ttl = rest[4]
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|n| *n > 0 && *n <= 86400)
+                            .ok_or_else(|| ParseError::InvalidValue {
+                                message: "TTL must be 1..86400 seconds".into(),
+                                usage,
+                            })?;
+                        command["ttlSeconds"] = json!(ttl);
+                    }
+                    Ok(command)
+                }
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state save".to_string(),
@@ -1868,7 +1905,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
-                    usage: "state <save|load|list|clear|show|clean|rename> ...",
+                    usage: "state <save|load|save-tab|load-tab|list|clear|show|clean|rename> ...",
                 }),
             }
         }

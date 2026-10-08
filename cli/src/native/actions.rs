@@ -562,6 +562,8 @@ pub struct DaemonState {
     pub session_id: String,
     /// Per-target, in-memory form observations. Never included in saved state.
     pub sensitive_observations: HashMap<String, super::sensitive::Observation>,
+    /// Targets explicitly armed with a tab capsule. Contains no credential values.
+    pub tab_state_targets: HashSet<String>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -710,6 +712,7 @@ impl DaemonState {
             last_autosave_attempt: None,
             session_id,
             sensitive_observations: HashMap::new(),
+            tab_state_targets: HashSet::new(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -3008,6 +3011,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "session_info" => Ok(session_info(state)),
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
+        "state_save_tab" | "state_load_tab" => handle_tab_state(cmd, state).await,
         "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
             state::dispatch_state_command(cmd)
                 .expect("dispatch_state_command must handle all state_* actions matched here")
@@ -6834,6 +6838,99 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     .await?;
 
     Ok(json!({ "saved": true, "path": saved_path }))
+}
+
+/// Explicitly capture or arm one clean tab; never resets sensitive observations.
+async fn handle_tab_state(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let path = cmd
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("tab_state_invalid_scope: missing path")?;
+    let account = cmd
+        .get("account")
+        .and_then(Value::as_str)
+        .ok_or("tab_state_invalid_scope: missing account")?;
+    let origin = cmd
+        .get("origin")
+        .and_then(Value::as_str)
+        .ok_or("tab_state_invalid_scope: missing origin")?;
+    let mgr = state
+        .browser
+        .as_ref()
+        .ok_or("tab_state_unsupported: browser not launched")?;
+    if mgr.is_cdp_connection() || state.engine != "chrome" {
+        return Err("tab_state_unsupported: requires owned Chrome browser".into());
+    }
+    let session = mgr.active_session_id()?.to_string();
+    let observation =
+        super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+    let known = state
+        .sensitive_observations
+        .entry(session.clone())
+        .or_default();
+    known.merge(observation);
+    if known.has_sensitive() {
+        return Err(format!(
+            "{}: guarded tab cannot capture or restore tab state",
+            super::sensitive::UNSUPPORTED
+        ));
+    }
+    if cmd["action"] == "state_save_tab" {
+        let ttl = cmd
+            .get("ttlSeconds")
+            .and_then(Value::as_u64)
+            .ok_or("tab_state_invalid_expiry: missing ttlSeconds")?;
+        return super::tab_state::save(&mgr.client, &session, path, account, origin, ttl)
+            .await
+            .map_err(|e| e.message());
+    }
+    ensure_state_replay_supported_by_active_domain_filter(state, "state load-tab").await?;
+    if state.tab_state_targets.contains(&session) {
+        return Err("tab_state_already_armed: target already has a bootstrap".into());
+    }
+    let location = mgr
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({"expression":"location.href", "returnByValue":true})),
+            Some(&session),
+        )
+        .await?;
+    if location["result"]["value"].as_str() != Some("about:blank") {
+        return Err("tab_state_not_blank: use a new about:blank tab before loading".into());
+    }
+    let target_info = mgr
+        .client
+        .send_command(
+            "Target.getTargetInfo",
+            Some(json!({"targetId":mgr.active_target_id()?})),
+            None,
+        )
+        .await?;
+    let target = target_info
+        .get("targetInfo")
+        .and_then(Value::as_object)
+        .ok_or("tab_state_invalid_target: missing target inventory")?;
+    if target.get("openerId").is_some() {
+        return Err(
+            "tab_state_not_fresh: opener-created targets can inherit another tab's state".into(),
+        );
+    }
+    let history = mgr
+        .client
+        .send_command_no_params("Page.getNavigationHistory", Some(&session))
+        .await?;
+    if history["entries"]
+        .as_array()
+        .is_none_or(|entries| entries.len() != 1 || entries[0]["url"] != "about:blank")
+    {
+        return Err("tab_state_not_fresh: create a new blank target before loading".into());
+    }
+    let result = super::tab_state::load(&mgr.client, &session, path, account, origin)
+        .await
+        .map_err(|e| e.message())?;
+    state.tab_state_targets.insert(session);
+    Ok(result)
 }
 
 async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -12933,7 +13030,7 @@ fn error_response(id: &str, error: &str) -> Value {
     if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
     } else if let Some((code, _)) = error.split_once(": ") {
-        if code.starts_with("webmcp_") {
+        if code.starts_with("webmcp_") || code.starts_with("tab_state_") {
             resp["code"] = json!(code);
         }
     }

@@ -449,6 +449,8 @@ agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 agent-browser state save <path>       # Save auth state
 agent-browser state load <path>       # Load auth state
+agent-browser state save-tab <path> <account> <origin> <ttl-seconds>
+agent-browser state load-tab <path> <account> <origin>
 agent-browser state list              # List saved state files
 agent-browser state show <file>       # Show state summary
 agent-browser state rename <old> <new> # Rename state file
@@ -836,6 +838,21 @@ agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open
 ```
 
 State is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. It respects the `--restore-save` policy.
+
+### Authorized clean-tab startup
+
+Some apps keep their authentication in per-tab `sessionStorage`. A cookie/localStorage restore does not authorize a new document in a different tab. Capture a clean authenticated tab explicitly, then arm each fresh replacement/new tab before opening the app:
+
+```bash
+agent-browser state save-tab ./tab-auth.json my-account https://example.com 300
+agent-browser tab new
+agent-browser state load-tab ./tab-auth.json my-account https://example.com
+agent-browser open https://example.com
+```
+
+`account` is your explicit authorization declaration, not identity inferred from the website. `origin` must be a canonical HTTP(S) origin including any non-default port, without a path/trailing slash. TTL is mandatory, 1 to 86400 seconds. Unix owned Chrome is supported; attached browsers and other backends refuse. Files are secret, create-only, mode 0600, owned by the current effective Unix UID and bound to the exact `PI_KENAN_MEMORY_PERSON` context (including whether it is set). Delete the file when done; use a new path for another capture. Load refuses missing, expired, mismatched, symlinked, hard-linked or public-readable files, and requires a fresh `about:blank` target with no prior navigation or bootstrap. Typed `tab_state_*` errors never return credential values.
+
+Only the selected top-level origin's sessionStorage is captured, not cookies or localStorage. Restore context-wide cookies/localStorage separately through already-authorized ordinary state; cookie domains do not promise exact-origin isolation. The target-local bootstrap runs before application scripts, seeds missing keys only on top-level documents at the exact authorized origin until expiry, and never overwrites existing keys. Other tabs and frames receive no bootstrap; each new/replacement tab requires its own explicit `load-tab`. Close the tab to discard its bootstrap. Capsules are not ordinary `state show`/automatic-restore files and do not use `AGENT_BROWSER_ENCRYPTION_KEY`. Current and remembered sensitive tabs refuse both capture and restoration without clearing any guard.
 
 ### State Encryption
 

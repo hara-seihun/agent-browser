@@ -45,6 +45,10 @@ pub mod stream;
 #[allow(dead_code)]
 pub mod tab_binding;
 #[allow(dead_code)]
+pub mod tab_state;
+#[cfg(test)]
+mod tab_state_tests;
+#[allow(dead_code)]
 pub mod tracing;
 #[allow(dead_code)]
 pub mod webdriver;

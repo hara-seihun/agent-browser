@@ -475,6 +475,8 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
             | "storage_get"
             | "cookies_get"
             | "state_save"
+            | "state_save_tab"
+            | "state_load_tab"
             | "state_show"
     ) || (action == "wait" && cmd.get("expression").is_some())
         || (action == "read" && cmd.get("url").is_none())

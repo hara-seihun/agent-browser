@@ -1228,8 +1228,13 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                     color::success_indicator(),
                     color::green(path)
                 ),
-                "state_save" => println!(
+                "state_save" | "state_save_tab" => println!(
                     "{} State saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "state_load_tab" => println!(
+                    "{} Tab startup state armed from {}",
                     color::success_indicator(),
                     color::green(path)
                 ),
@@ -3010,11 +3015,25 @@ Save, restore, list, and manage browser state (cookies, localStorage, sessionSto
 Operations:
   save <path>                        Save current state to file
   load <path>                        Load state from file
+  save-tab <path> <account> <origin> <ttl-seconds>
+                                    Capture private selected-tab sessionStorage
+  load-tab <path> <account> <origin> Arm fresh blank tab before application startup
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
   clear [session-name] [--all]       Clear saved states
   clean --older-than <days>          Delete expired state files
+
+Clean-tab Capsules (Unix, owned Chrome only):
+  Explicit account and canonical HTTP(S) origin required, TTL 1..86400 seconds.
+  Files are create-only, mode 0600, owner/person-bound, and contain secrets.
+  Load on a fresh about:blank tab, then open the exact authorized origin.
+  Only sessionStorage is copied; cookies/localStorage use ordinary state separately.
+  Bootstrap seeds missing keys on top-level documents until expiry; existing keys stay.
+  New/replacement tabs require explicit load-tab. Close the tab to discard bootstrap.
+  Guarded tabs refuse capture/restoration; guards are never reset. No attached browsers.
+  Account is caller-declared authorization, not discovered site identity.
+  PI_KENAN_MEMORY_PERSON, when set, binds the capsule to that exact person context.
 
 Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
@@ -3032,6 +3051,10 @@ Global Options:
 Examples:
   agent-browser state save ./auth-state.json
   agent-browser state load ./auth-state.json
+  agent-browser state save-tab ./tab-auth.json my-account https://example.com 300
+  agent-browser tab new
+  agent-browser state load-tab ./tab-auth.json my-account https://example.com
+  agent-browser open https://example.com
   agent-browser state list
   agent-browser state show myapp-default.json
   agent-browser state rename old-name new-name

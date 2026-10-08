@@ -126,6 +126,8 @@ const TOOL_AUTH_SHOW: &str = "agent_browser_auth_show";
 const TOOL_AUTH_DELETE: &str = "agent_browser_auth_delete";
 const TOOL_STATE_SAVE: &str = "agent_browser_state_save";
 const TOOL_STATE_LOAD: &str = "agent_browser_state_load";
+const TOOL_STATE_SAVE_TAB: &str = "agent_browser_state_save_tab";
+const TOOL_STATE_LOAD_TAB: &str = "agent_browser_state_load_tab";
 const TOOL_STATE_LIST: &str = "agent_browser_state_list";
 const TOOL_STATE_CLEAR: &str = "agent_browser_state_clear";
 const TOOL_STATE_SHOW: &str = "agent_browser_state_show";
@@ -402,6 +404,8 @@ const STATE_PROFILE_TOOLS: &[&str] = &[
     TOOL_AUTH_DELETE,
     TOOL_STATE_SAVE,
     TOOL_STATE_LOAD,
+    TOOL_STATE_SAVE_TAB,
+    TOOL_STATE_LOAD_TAB,
     TOOL_STATE_LIST,
     TOOL_STATE_CLEAR,
     TOOL_STATE_SHOW,
@@ -1533,6 +1537,20 @@ fn parity_tools() -> Vec<Value> {
             &["path"],
         ),
         tool(
+            TOOL_STATE_SAVE_TAB,
+            "State save tab",
+            "Capture private expiring selected-tab sessionStorage. Owned Chrome only; guarded tabs refuse. Account and exact origin are explicit authorization declarations, not identity discovery.",
+            json!({"path":{"type":"string"},"account":{"type":"string"},"origin":{"type":"string"},"ttlSeconds":{"type":"integer","minimum":1,"maximum":86400}}),
+            &["path","account","origin","ttlSeconds"],
+        ),
+        tool(
+            TOOL_STATE_LOAD_TAB,
+            "State load tab",
+            "Arm a fresh owned about:blank tab with matching owner/account/origin sessionStorage before startup. Does not restore cookies or localStorage; missing/expired state refuses.",
+            json!({"path":{"type":"string"},"account":{"type":"string"},"origin":{"type":"string"}}),
+            &["path","account","origin"],
+        ),
+        tool(
             TOOL_STATE_LIST,
             "State list",
             "List saved states.",
@@ -2119,6 +2137,8 @@ fn sensitive_tool_action(name: &str) -> Option<&'static str> {
         TOOL_STORAGE_GET => "storage_get",
         TOOL_COOKIES_GET => "cookies_get",
         TOOL_STATE_SAVE => "state_save",
+        TOOL_STATE_SAVE_TAB => "state_save_tab",
+        TOOL_STATE_LOAD_TAB => "state_load_tab",
         TOOL_STATE_SHOW => "state_show",
         _ => return None,
     })
@@ -2384,6 +2404,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
         TOOL_STATE_SAVE => call_one_string(arguments, "state save", "path"),
         TOOL_STATE_LOAD => call_one_string(arguments, "state load", "path"),
+        TOOL_STATE_SAVE_TAB => call_tab_state(arguments, true),
+        TOOL_STATE_LOAD_TAB => call_tab_state(arguments, false),
         TOOL_STATE_LIST => call_literal(arguments, &["state", "list"]),
         TOOL_STATE_CLEAR => call_state_clear(arguments),
         TOOL_STATE_SHOW => call_one_string(arguments, "state show", "path"),
@@ -3245,6 +3267,30 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 
 fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, auth_login_args(arguments)?, None)
+}
+
+fn tab_state_args(arguments: &Value, saving: bool) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec![
+        "state".into(),
+        if saving {
+            "save-tab".into()
+        } else {
+            "load-tab".into()
+        },
+        required_string(arguments, "path")?,
+        required_string(arguments, "account")?,
+        required_string(arguments, "origin")?,
+    ];
+    if saving {
+        let ttl = optional_u64(arguments, "ttlSeconds")?
+            .ok_or_else(|| ProtocolError::invalid_params("ttlSeconds is required"))?;
+        args.push(ttl.to_string());
+    }
+    Ok(args)
+}
+
+fn call_tab_state(arguments: &Value, saving: bool) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, tab_state_args(arguments, saving)?, None)
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4919,6 +4965,35 @@ mod tests {
             webmcp_list_args(&json!({})).unwrap(),
             vec!["webmcp", "list"]
         );
+    }
+
+    #[test]
+    fn tab_state_mcp_cli_parity_and_explicit_scope() {
+        let arguments = json!({"path":"private.json","account":"own","origin":"https://example.com","ttlSeconds":300});
+        for (saving, tool, action) in [
+            (true, TOOL_STATE_SAVE_TAB, "state_save_tab"),
+            (false, TOOL_STATE_LOAD_TAB, "state_load_tab"),
+        ] {
+            let args = tab_state_args(&arguments, saving).unwrap();
+            let parsed =
+                crate::commands::parse_command(&args, &crate::flags::parse_flags(&[])).unwrap();
+            assert_eq!(parsed["action"], action);
+            assert_eq!(parsed["account"], "own");
+            assert_eq!(parsed["origin"], "https://example.com");
+            assert_eq!(sensitive_tool_action(tool), Some(action));
+            assert!(crate::native::sensitive::guarded(action, &parsed));
+            if saving {
+                assert_eq!(parsed["ttlSeconds"], 300);
+            }
+            assert!(tab_state_args(&json!({"path":"private.json"}), saving).is_err());
+        }
+        let args=tab_state_args(&json!({"path":"private.json","account":"own","origin":"https://example.com/","ttlSeconds":300}),true).unwrap();
+        assert!(crate::commands::parse_command(&args, &crate::flags::parse_flags(&[])).is_err());
+        assert!(tab_state_args(
+            &json!({"path":"private.json","account":"own","origin":"https://example.com"}),
+            true
+        )
+        .is_err());
     }
 
     #[test]

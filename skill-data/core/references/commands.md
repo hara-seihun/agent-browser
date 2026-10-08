@@ -365,6 +365,10 @@ Other capabilities use the same protocol:
 ```bash
 agent-browser state save auth.json    # Save cookies, storage, auth state
 agent-browser state load auth.json    # Restore saved state
+agent-browser state save-tab tab-auth.json my-account https://example.com 300
+agent-browser tab new
+agent-browser state load-tab tab-auth.json my-account https://example.com
+agent-browser open https://example.com # Bootstrap before startup, sessionStorage only
 ```
 
 ## Live Streaming

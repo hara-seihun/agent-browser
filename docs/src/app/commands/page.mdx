@@ -453,6 +453,8 @@ agent-browser confirm c_8f3a1234
 ```bash
 agent-browser state save <path>       # Save auth state to file
 agent-browser state load <path>       # Load auth state from file
+agent-browser state save-tab <path> <account> <origin> <ttl-seconds>
+agent-browser state load-tab <path> <account> <origin> # Fresh owned blank tab, then open
 agent-browser state list              # List saved state files
 agent-browser state show <file>       # Show state summary
 agent-browser state rename <old> <new> # Rename state file

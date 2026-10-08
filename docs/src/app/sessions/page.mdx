@@ -244,6 +244,21 @@ agent-browser state save ./backup.json
 agent-browser state load ./backup.json
 ```
 
+## Authorized clean-tab startup
+
+Per-tab sessionStorage authentication requires explicit capture and restoration on every new/replacement target, before application startup:
+
+```bash
+agent-browser state save-tab ./tab-auth.json my-account https://example.com 300
+agent-browser tab new
+agent-browser state load-tab ./tab-auth.json my-account https://example.com
+agent-browser open https://example.com
+```
+
+Account is caller-declared authorization, not inferred website identity. Use a canonical HTTP(S) origin with no path/trailing slash and a mandatory TTL of 1..86400 seconds. Unix owned Chrome only; attached browsers and other backends refuse. Secret files are create-only, mode 0600, effective-UID/person-bound (`PI_KENAN_MEMORY_PERSON`, including set/unset), and validated for exact account/origin and expiry before loading. Missing, expired, unsafe or mismatched state yields typed `tab_state_*` errors. Loading requires a fresh `about:blank` target with no prior navigation/bootstrap.
+
+Only selected top-level sessionStorage is captured. The target-local bootstrap seeds missing keys at the exact origin before application scripts, until expiry; existing keys remain unchanged. Other tabs/frames receive no bootstrap. Close the tab to discard it and delete the secret file when done. Current/remembered sensitive tabs refuse capture/restoration and guards are never cleared. Context-wide cookies/localStorage use separately authorized ordinary state; cookie domains do not imply exact-origin isolation. Capsules are not state-show/autosave files and do not use `AGENT_BROWSER_ENCRYPTION_KEY`.
+
 ## Authenticated sessions
 
 Use `--headers` to set HTTP headers for a specific origin:
