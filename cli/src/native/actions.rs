@@ -9643,16 +9643,7 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            interaction::fill(
-                &mgr.client,
-                &session_id,
-                &state.ref_map,
-                selector,
-                value,
-                &state.iframe_sessions,
-            )
-            .await?;
-            Ok(json!({ "filled": selector }))
+            handle_fill(&json!({ "selector": selector, "value": value }), state).await
         }
         "check" => {
             interaction::check(
@@ -12930,7 +12921,9 @@ fn error_response(id: &str, error: &str) -> Value {
     });
     // Machine-readable code for "the bound tab no longer exists" so scripts
     // using --json can match on it instead of parsing the message.
-    if error.starts_with(super::browser::TAB_GONE_PREFIX) {
+    if let Some(code) = interaction::fill_error_code(error) {
+        resp["code"] = json!(code);
+    } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {

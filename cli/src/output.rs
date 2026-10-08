@@ -1722,7 +1722,10 @@ Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 Date/time inputs accept ISO values, including controlled React fields.
 Use YYYY-MM-DD for dates, YYYY-MM-DDTHH:mm for local date-times.
-Empty text clears them. Invalid or non-editable temporal inputs fail.
+Empty text clears them. Direct/ref/find fills check retention after a bounded
+rendering/task window (at most 100 ms). Invalid or non-editable inputs fail.
+JSON code: fill_invalid_value, fill_not_editable, fill_value_not_retained,
+           fill_target_detached, fill_page_error.
 
 Global Options:
   --json               Output as JSON

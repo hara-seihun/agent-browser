@@ -2160,6 +2160,84 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
 }
 
+async fn temporal_fixture() -> (String, SensitiveInputServer) {
+    let fixture = std::process::Command::new("node")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/controlled-temporal-fixture.mjs"
+        ))
+        .output()
+        .expect("node is required for the real React temporal fixture");
+    assert!(
+        fixture.status.success(),
+        "Install pinned React fixture dependencies with pnpm install: {}",
+        String::from_utf8_lossy(&fixture.stderr)
+    );
+    let body = std::sync::Arc::new(fixture.stdout);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                if stream.read(&mut request).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            });
+        }
+    });
+    (url, SensitiveInputServer(server))
+}
+
+async fn temporal_fill_command(
+    state: &mut DaemonState,
+    route: &str,
+    id: &str,
+    label: &str,
+    value: &str,
+) -> Value {
+    match route {
+        "direct" => {
+            json!({"id":"fill", "action":"fill", "selector":format!("#{id}"), "value":value})
+        }
+        "semantic" => {
+            json!({"id":"fill", "action":"getbylabel", "label":label, "subaction":"fill", "value":value})
+        }
+        "find" => crate::commands::parse_command(
+            &["find", "label", label, "fill", value].map(str::to_string),
+            &crate::flags::parse_flags(&[]),
+        )
+        .unwrap(),
+        "ref" => {
+            let snapshot =
+                execute_command(&json!({"id":"snapshot", "action":"snapshot"}), state).await;
+            assert_success(&snapshot);
+            let element = state
+                .ref_map
+                .entries_sorted()
+                .into_iter()
+                .find(|(_, element)| element.name == label && element.role == "textbox")
+                .unwrap()
+                .0;
+            json!({"id":"fill", "action":"fill", "selector":format!("@{element}"), "value":value})
+        }
+        _ => panic!("Unknown test fill route: {route}"),
+    }
+}
+
+async fn temporal_state(state: &mut DaemonState, id: &str, expected: &str) {
+    let resp = execute_command(&json!({"id":"state", "action":"evaluate", "script":format!("[document.getElementById('{id}').value, JSON.parse(document.getElementById('state').textContent)['{id}']]")}), state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([expected, expected]));
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_fill_controlled_temporal_inputs() {
@@ -2170,73 +2248,154 @@ async fn e2e_fill_controlled_temporal_inputs() {
     )
     .await;
     assert_success(&resp);
-    let resp = execute_command(&json!({ "id": "2", "action": "navigate", "url": "data:text/html,<input id='date' type='date'><input id='datetime' type='datetime-local'>" }), &mut state).await;
-    assert_success(&resp);
-    // Model the own-property value tracker used by React controlled inputs.
+    let (url, _server) = temporal_fixture().await;
     let resp = execute_command(
-        &json!({ "id": "3", "action": "evaluate", "script": r#"(() => {
-        const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        window.formState = {};
-        for (const [id, value] of [['date','2026-10-02'], ['datetime','2026-10-02T23:00']]) {
-            const input = document.getElementById(id);
-            input.value = value;
-            let tracked = value;
-            window.formState[id] = value;
-            Object.defineProperty(input, 'value', {
-                get() { return native.get.call(this); },
-                set(value) { tracked = String(value); native.set.call(this, value); }
-            });
-            input.addEventListener('input', () => {
-                if (tracked !== native.get.call(input)) {
-                    tracked = native.get.call(input);
-                    window.formState[id] = tracked;
-                }
-                input.value = window.formState[id];
-            });
-        }
-    })()"# }),
+        &json!({ "id": "2", "action": "navigate", "url": url }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    for (id, value) in [
-        ("date", "2026-10-28"),
-        ("datetime", "2026-10-28T19:30"),
-        ("date", ""),
-        ("datetime", ""),
+    let resp = execute_command(
+        &json!({"id":"ready", "action":"wait", "selector":"#date"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for (id, label, value, initial) in [
+        ("date", "Start", "2030-01-01", "2026-10-02"),
+        ("datetime", "End", "2030-01-01T11:00", "2026-10-02T23:00"),
     ] {
-        let resp = execute_command(
-            &json!({ "id": "4", "action": "fill", "selector": format!("#{id}"), "value": value }),
-            &mut state,
+        for route in ["direct", "semantic", "find", "ref"] {
+            for value in [value, "", initial] {
+                let cmd = temporal_fill_command(&mut state, route, id, label, value).await;
+                let resp = execute_command(&cmd, &mut state).await;
+                assert_success(&resp);
+                temporal_state(&mut state, id, value).await;
+                let resp = execute_command(
+                    &json!({"id":"rerender", "action":"click", "selector":"#rerender"}),
+                    &mut state,
+                )
+                .await;
+                assert_success(&resp);
+                temporal_state(&mut state, id, value).await;
+            }
+            for (setup, value, code) in [
+                ("false", "not-a-date", "fill_invalid_value"),
+                ("readOnly", value, "fill_not_editable"),
+                ("disabled", value, "fill_not_editable"),
+            ] {
+                let resp = execute_command(&json!({"id":"noneditable", "action":"evaluate", "script":format!("document.getElementById('{id}').readOnly = {readonly}; document.getElementById('{id}').disabled = {disabled}", readonly = setup == "readOnly", disabled = setup == "disabled")}), &mut state).await;
+                assert_success(&resp);
+                let cmd = temporal_fill_command(&mut state, route, id, label, value).await;
+                let resp = execute_command(&cmd, &mut state).await;
+                assert_eq!(resp["success"], false, "{route}: {resp}");
+                assert_eq!(resp["code"], code, "{route}: {resp}");
+                temporal_state(&mut state, id, initial).await;
+            }
+            let resp = execute_command(&json!({"id":"editable", "action":"evaluate", "script":format!("document.getElementById('{id}').readOnly = false; document.getElementById('{id}').disabled = false")}), &mut state).await;
+            assert_success(&resp);
+        }
+    }
+    let resp = execute_command(&json!({"id":"close", "action":"close"}), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_controlled_temporal_inputs_paired_batch() {
+    let mut state = DaemonState::new();
+    let (url, _server) = temporal_fixture().await;
+    let resp = execute_command(
+        &json!({"id":"open", "action":"navigate", "url":url}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id":"ready", "action":"wait", "selector":"#start"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    // Same shared-object spread setters and ordered text/date/text mutations
+    // as the reported calendar flow, with only disposable fixture data.
+    for (label, value) in [
+        ("Title", "Test event"),
+        ("Event start", "2030-01-01T10:00"),
+        ("Event end", "2030-01-01T11:00"),
+        ("Event time zone", "UTC"),
+    ] {
+        let cmd = crate::commands::parse_command(
+            &["find", "label", label, "fill", value].map(str::to_string),
+            &crate::flags::parse_flags(&[]),
         )
-        .await;
+        .unwrap();
+        let resp = execute_command(&cmd, &mut state).await;
         assert_success(&resp);
-        let resp = execute_command(&json!({ "id": "5", "action": "evaluate", "script": format!("[document.getElementById('{id}').value, window.formState['{id}']]") }), &mut state).await;
-        assert_success(&resp);
-        assert_eq!(get_data(&resp)["result"], json!([value, value]));
     }
     let resp = execute_command(
-        &json!({ "id": "6", "action": "fill", "selector": "#date", "value": "not-a-date" }),
+        &json!({"id":"rerender", "action":"click", "selector":"#rerender"}),
         &mut state,
     )
     .await;
-    assert_eq!(
-        resp["success"], false,
-        "invalid date fills must report an error"
-    );
-    let resp = execute_command(&json!({ "id": "7", "action": "evaluate", "script": "document.getElementById('date').readOnly = true" }), &mut state).await;
     assert_success(&resp);
     let resp = execute_command(
-        &json!({ "id": "8", "action": "fill", "selector": "#date", "value": "2026-10-28" }),
+        &json!({"id":"save", "action":"click", "selector":"#save"}),
         &mut state,
     )
     .await;
-    assert_eq!(
-        resp["success"], false,
-        "read-only date fills must report an error"
-    );
-    let resp = execute_command(&json!({ "id": "9", "action": "evaluate", "script": "[document.getElementById('date').value, window.formState.date]" }), &mut state).await;
-    assert_eq!(get_data(&resp)["result"], json!(["", ""]));
+    assert_success(&resp);
+    temporal_state(&mut state, "start", "2030-01-01T10:00").await;
+    temporal_state(&mut state, "end", "2030-01-01T11:00").await;
+    let resp = execute_command(&json!({"id":"saved", "action":"evaluate", "script":"JSON.parse(document.getElementById('saved').textContent)"}), &mut state).await;
+    assert_success(&resp);
+    let saved = get_data(&resp)["result"].clone();
+    assert_eq!(saved["title"], "Test event");
+    assert_eq!(saved["start"], "2030-01-01T10:00");
+    assert_eq!(saved["end"], "2030-01-01T11:00");
+    assert_eq!(saved["timezone"], "UTC");
+    let resp = execute_command(&json!({"id":"close", "action":"close"}), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_controlled_temporal_inputs_deferred_rejection() {
+    let mut state = DaemonState::new();
+    let (url, _server) = temporal_fixture().await;
+    let resp = execute_command(
+        &json!({"id":"open", "action":"navigate", "url":url}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id":"ready", "action":"wait", "selector":"#reject"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id":"reject-mode", "action":"click", "selector":"#reject"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    for (id, label, value, initial) in [
+        ("date", "Start", "2030-01-01", "2026-10-02"),
+        ("datetime", "End", "2030-01-01T11:00", "2026-10-02T23:00"),
+    ] {
+        for route in ["direct", "semantic", "find", "ref"] {
+            let cmd = temporal_fill_command(&mut state, route, id, label, value).await;
+            let resp = execute_command(&cmd, &mut state).await;
+            assert_eq!(
+                resp["success"], false,
+                "deferred application rejection must not report success: {resp}"
+            );
+            assert_eq!(resp["code"], "fill_value_not_retained");
+            temporal_state(&mut state, id, initial).await;
+        }
+    }
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }

@@ -51,5 +51,9 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
-  "devDependencies": {}
+  "devDependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "scheduler": "0.27.0"
+  }
 }

@@ -111,6 +111,35 @@ pub async fn hover(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum TemporalFillOutcome {
+    NotTemporal,
+    Filled,
+    InvalidValue,
+    NotEditable,
+    ValueNotRetained,
+    TargetDetached,
+}
+
+pub fn fill_error_code(error: &str) -> Option<&'static str> {
+    [
+        "fill_invalid_value",
+        "fill_not_editable",
+        "fill_value_not_retained",
+        "fill_target_detached",
+        "fill_page_error",
+    ]
+    .into_iter()
+    .find(|code| {
+        error
+            .strip_prefix(code)
+            .is_some_and(|rest| rest.starts_with(": "))
+    })
+}
+
+/// Direct, ref and semantic fills share this operation and retained-value check.
+/// Temporal success waits through a rendering opportunity; rejection is coded.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -128,21 +157,6 @@ pub async fn fill(
     )
     .await?;
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
     // Chromium's date editors do not accept Input.insertText. Bypass framework
     // value trackers with the native setter, then let input/change update state.
     let temporal = client
@@ -150,21 +164,40 @@ pub async fn fill(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: r#"async function(value) {
-                    if (this.tagName !== 'INPUT' || !['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type)) return { handled: false };
-                    if (this.disabled || this.readOnly) return { handled: true, error: 'Input is disabled or read-only' };
+                    if (this.tagName !== 'INPUT' || !['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type)) return { status: 'not_temporal' };
+                    if (this.matches(':disabled') || this.readOnly) return { status: 'not_editable' };
                     const probe = this.ownerDocument.createElement('input');
                     probe.type = this.type;
                     probe.value = value;
-                    if (value && !probe.value) return { handled: true, error: 'Invalid value for ' + this.type + ' input' };
+                    if (value && !probe.value) return { status: 'invalid_value' };
                     const expected = probe.value;
                     const view = this.ownerDocument.defaultView;
                     const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set;
+                    this.focus();
                     setter.call(this, expected);
                     this.dispatchEvent(new view.Event('input', { bubbles: true }));
                     this.dispatchEvent(new view.Event('change', { bubbles: true }));
-                    await Promise.resolve();
-                    if (this.value !== expected) return { handled: true, error: 'Date input did not retain the supplied value' };
-                    return { handled: true };
+                    // React commits and application validators can run after the
+                    // event's microtasks. Observe after rendering, not inside dispatch.
+                    await new Promise(resolve => {
+                        let frame, secondFrame, task;
+                        const done = () => {
+                            view.cancelAnimationFrame(frame);
+                            view.cancelAnimationFrame(secondFrame);
+                            view.clearTimeout(task);
+                            view.clearTimeout(deadline);
+                            resolve();
+                        };
+                        const deadline = view.setTimeout(done, 100);
+                        frame = view.requestAnimationFrame(() => {
+                            secondFrame = view.requestAnimationFrame(() => {
+                                task = view.setTimeout(done, 0);
+                            });
+                        });
+                    });
+                    if (!this.isConnected) return { status: 'target_detached' };
+                    if (this.value !== expected) return { status: 'value_not_retained' };
+                    return { status: 'filled' };
                 }"#
                 .to_string(),
                 object_id: Some(object_id.clone()),
@@ -179,15 +212,32 @@ pub async fn fill(
         )
         .await?;
     if temporal.get("exceptionDetails").is_some() {
-        return Err("Date input fill failed in the page".to_string());
+        return Err("fill_page_error: Temporal fill failed in the page".to_string());
     }
-    let temporal = &temporal["result"]["value"];
-    if let Some(error) = temporal.get("error").and_then(|v| v.as_str()) {
-        return Err(error.to_string());
+    let outcome: TemporalFillOutcome = serde_json::from_value(temporal["result"]["value"].clone())
+        .map_err(|_| "fill_page_error: Invalid temporal fill outcome".to_string())?;
+    match outcome {
+        TemporalFillOutcome::NotTemporal => {}
+        TemporalFillOutcome::Filled => return Ok(()),
+        TemporalFillOutcome::InvalidValue => return Err("fill_invalid_value: Invalid value for temporal input".to_string()),
+        TemporalFillOutcome::NotEditable => return Err("fill_not_editable: Input is disabled or read-only".to_string()),
+        TemporalFillOutcome::ValueNotRetained => return Err("fill_value_not_retained: Temporal input did not retain the supplied value after rendering".to_string()),
+        TemporalFillOutcome::TargetDetached => return Err("fill_target_detached: Temporal input was replaced before retention could be checked".to_string()),
     }
-    if temporal.get("handled").and_then(|v| v.as_bool()) == Some(true) {
-        return Ok(());
-    }
+
+    client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: "function() { this.focus(); }".to_string(),
+                object_id: Some(object_id.clone()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
 
     // Select all + delete to clear
     client
@@ -1290,6 +1340,23 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporal_fill_outcomes_fail_closed() {
+        assert!(serde_json::from_value::<TemporalFillOutcome>(
+            serde_json::json!({"handled": true})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<TemporalFillOutcome>(
+            serde_json::json!({"status": "unknown"})
+        )
+        .is_err());
+        assert_eq!(
+            fill_error_code("fill_value_not_retained: rejection"),
+            Some("fill_value_not_retained")
+        );
+        assert_eq!(fill_error_code("fill_unknown: rejection"), None);
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
