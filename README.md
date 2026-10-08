@@ -149,7 +149,7 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
-`fill` accepts ISO values for date/time inputs, including controlled React fields: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`, and the browser's canonical formats for `time`, `month` and `week`. Empty text clears them. Invalid, disabled or read-only temporal inputs return an error without changing their value.
+`fill` accepts ISO values for date/time inputs, including controlled React fields: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`, and the browser's canonical formats for `time`, `month` and `week`. Empty text clears them. Direct selectors, refs and `find … fill` share the same retained-value check after a bounded rendering/task window (at most 100 ms). Invalid, disabled or read-only temporal inputs return an error without changing their value. JSON failures carry `fill_invalid_value`, `fill_not_editable`, `fill_value_not_retained`, `fill_target_detached` or `fill_page_error` in `code`; application rejection is not success.
 
 ### WebMCP (experimental)
 

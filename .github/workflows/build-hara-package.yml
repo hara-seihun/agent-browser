@@ -34,6 +34,12 @@ jobs:
           grep -Eq 'e2e_sensitive[^:]*: test' test-receipts/test-list.log
           cargo test --release --manifest-path cli/Cargo.toml -- --test-threads=1 2>&1 | tee test-receipts/unit.log
           cargo test --release --manifest-path cli/Cargo.toml e2e_sensitive -- --ignored --test-threads=1 2>&1 | tee test-receipts/sensitive-e2e.log
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+      - name: Install pinned real React temporal fixture dependencies
+        run: pnpm install --filter agent-browser --frozen-lockfile --ignore-scripts
       - name: Retained controlled temporal input and frame custody coverage
         shell: bash
         run: |

@@ -863,7 +863,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector. Temporal inputs accept ISO values (YYYY-MM-DD or YYYY-MM-DDTHH:mm), including controlled fields; invalid or non-editable temporal inputs fail.",
+            "Clear and fill an input by @ref or CSS selector. Temporal inputs accept ISO values (YYYY-MM-DD or YYYY-MM-DDTHH:mm), including controlled fields. Direct and find fills check retained values after a bounded rendering/task window (at most 100 ms); invalid, non-editable, reset or replaced inputs return a fill_* code.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }

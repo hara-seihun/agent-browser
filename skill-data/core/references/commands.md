@@ -80,7 +80,7 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
-`fill` accepts ISO date/time values on controlled inputs: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`. Empty text clears them; invalid, disabled or read-only temporal inputs return an error without changing their value.
+`fill` accepts ISO date/time values on controlled inputs: `YYYY-MM-DD` for `date`, `YYYY-MM-DDTHH:mm` for `datetime-local`. Empty text clears them; invalid, disabled or read-only temporal inputs return an error without changing their value. Direct selectors, refs and `find … fill` share a retained-value check after a bounded rendering/task window (at most 100 ms). JSON failures carry `fill_invalid_value`, `fill_not_editable`, `fill_value_not_retained`, `fill_target_detached` or `fill_page_error` in `code`.
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
