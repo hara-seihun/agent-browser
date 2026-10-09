@@ -113,8 +113,8 @@ pub async fn hover(
 
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum TemporalFillOutcome {
-    NotTemporal,
+enum NativeFillOutcome {
+    KeyboardRequired,
     Filled,
     InvalidValue,
     NotEditable,
@@ -139,7 +139,7 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
 }
 
 /// Direct, ref and semantic fills share this operation and retained-value check.
-/// Temporal success waits through a rendering opportunity; rejection is coded.
+/// Temporal edits and empty clears wait through rendering; rejection is coded.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -157,22 +157,27 @@ pub async fn fill(
     )
     .await?;
 
-    // Chromium's date editors do not accept Input.insertText. Bypass framework
-    // value trackers with the native setter, then let input/change update state.
-    let temporal = client
+    // Temporal editors cannot use Input.insertText, and empty insertText cannot
+    // clear React state after assigning through its value tracker. Use the realm's
+    // native setter for both; retain keyboard insertion for ordinary nonempty text.
+    let native = client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: r#"async function(value) {
-                    if (this.tagName !== 'INPUT' || !['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type)) return { status: 'not_temporal' };
+                    const input = this.tagName === 'INPUT';
+                    const textarea = this.tagName === 'TEXTAREA';
+                    const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
+                    if (!temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
                     if (this.matches(':disabled') || this.readOnly) return { status: 'not_editable' };
-                    const probe = this.ownerDocument.createElement('input');
-                    probe.type = this.type;
+                    const probe = this.ownerDocument.createElement(input ? 'input' : 'textarea');
+                    if (input) probe.type = this.type;
                     probe.value = value;
                     if (value && !probe.value) return { status: 'invalid_value' };
                     const expected = probe.value;
                     const view = this.ownerDocument.defaultView;
-                    const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set;
+                    const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
                     this.focus();
                     setter.call(this, expected);
                     this.dispatchEvent(new view.Event('input', { bubbles: true }));
@@ -211,18 +216,18 @@ pub async fn fill(
             Some(&effective_session_id),
         )
         .await?;
-    if temporal.get("exceptionDetails").is_some() {
-        return Err("fill_page_error: Temporal fill failed in the page".to_string());
+    if native.get("exceptionDetails").is_some() {
+        return Err("fill_page_error: Native fill failed in the page".to_string());
     }
-    let outcome: TemporalFillOutcome = serde_json::from_value(temporal["result"]["value"].clone())
-        .map_err(|_| "fill_page_error: Invalid temporal fill outcome".to_string())?;
+    let outcome: NativeFillOutcome = serde_json::from_value(native["result"]["value"].clone())
+        .map_err(|_| "fill_page_error: Invalid native fill outcome".to_string())?;
     match outcome {
-        TemporalFillOutcome::NotTemporal => {}
-        TemporalFillOutcome::Filled => return Ok(()),
-        TemporalFillOutcome::InvalidValue => return Err("fill_invalid_value: Invalid value for temporal input".to_string()),
-        TemporalFillOutcome::NotEditable => return Err("fill_not_editable: Input is disabled or read-only".to_string()),
-        TemporalFillOutcome::ValueNotRetained => return Err("fill_value_not_retained: Temporal input did not retain the supplied value after rendering".to_string()),
-        TemporalFillOutcome::TargetDetached => return Err("fill_target_detached: Temporal input was replaced before retention could be checked".to_string()),
+        NativeFillOutcome::KeyboardRequired => {}
+        NativeFillOutcome::Filled => return Ok(()),
+        NativeFillOutcome::InvalidValue => return Err("fill_invalid_value: Invalid value for input".to_string()),
+        NativeFillOutcome::NotEditable => return Err("fill_not_editable: Input is disabled or read-only".to_string()),
+        NativeFillOutcome::ValueNotRetained => return Err("fill_value_not_retained: Input did not retain the supplied value after rendering".to_string()),
+        NativeFillOutcome::TargetDetached => return Err("fill_target_detached: Input was replaced before retention could be checked".to_string()),
     }
 
     client

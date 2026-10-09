@@ -10,7 +10,7 @@ const sources = Object.fromEntries([
   ['scheduler', 'scheduler', 'scheduler.production.js'],
 ].map(([id, pkg, file]) => [id, readFileSync(join(dirname(require.resolve(pkg)), 'cjs', file), 'utf8')]));
 
-process.stdout.write(`<html><head><title>Controlled temporal fixture</title></head><body><div id="root"></div><script>
+process.stdout.write(`<html><head><meta charset="utf-8"><title>Controlled temporal fixture</title></head><body><div id="root"></div><script>
 (() => {
   const sources = ${JSON.stringify(sources).replaceAll('</script', '<\\/script')}, loaded = {};
   function require(id) {
@@ -21,8 +21,10 @@ process.stdout.write(`<html><head><title>Controlled temporal fixture</title></he
     return loaded[id].exports;
   }
   const React = require('react'), { createRoot } = require('react-dom/client');
+  window.fillEvents = [];
+  document.addEventListener('input', e => window.fillEvents.push({kind: 'input', id: e.target.id, value: e.target.value}));
   function App() {
-    const [value, setValue] = React.useState({date: '2026-10-02', datetime: '2026-10-02T23:00', start: '2026-10-02T10:00', end: '2026-10-02T11:00', title: 'Fixture', timezone: 'UTC'});
+    const [value, setValue] = React.useState({date: '2026-10-02', datetime: '2026-10-02T23:00', start: '2026-10-02T10:00', end: '2026-10-02T11:00', title: 'Fixture', timezone: 'UTC', scenario: 25, notes: 'Initial notes'});
     const [revision, setRevision] = React.useState(0);
     const [reject, setReject] = React.useState(false);
     function change(key, initial) {
@@ -36,7 +38,20 @@ process.stdout.write(`<html><head><title>Controlled temporal fixture</title></he
       React.createElement('input', {id: 'date', type: 'date', role: 'textbox', placeholder: 'Start', title: 'Start', 'data-testid': 'date', value: value.date, onChange: change('date', '2026-10-02')}),
       React.createElement('label', {htmlFor: 'datetime'}, 'End'),
       React.createElement('input', {id: 'datetime', type: 'datetime-local', role: 'textbox', placeholder: 'End', title: 'End', 'data-testid': 'datetime', value: value.datetime, onChange: change('datetime', '2026-10-02T23:00')}),
-      ...[['title', 'Title', 'text'], ['start', 'Event start', 'datetime-local'], ['end', 'Event end', 'datetime-local'], ['timezone', 'Event time zone', 'text']].map(([key, label, type]) => React.createElement('label', {key}, label, React.createElement('input', {id: key, type, value: value[key], onChange: e => setValue({...value, [key]: e.target.value})}))),
+      ...[['title', 'Title', 'text'], ['start', 'Event start', 'datetime-local'], ['end', 'Event end', 'datetime-local'], ['timezone', 'Event time zone', 'text']].map(([key, label, type]) => React.createElement('label', {key}, label, React.createElement('input', {id: key, type, value: value[key], onChange: e => {
+        window.fillEvents.push({kind: 'onChange', id: key, value: e.target.value});
+        setValue({...value, [key]: e.target.value});
+      }}))),
+      React.createElement('label', null, 'SOM override · share of SAM', React.createElement('input', {id: 'scenario', type: 'number', min: 0, max: 100, step: 'any', value: value.scenario ?? '', onChange: e => {
+        window.fillEvents.push({kind: 'onChange', id: 'scenario', value: e.target.value});
+        if (e.target.value === '') setValue({...value, scenario: null});
+        else if (Number.isFinite(e.target.valueAsNumber)) setValue({...value, scenario: e.target.valueAsNumber});
+      }})),
+      React.createElement('label', null, 'Notes', React.createElement('textarea', {id: 'notes', value: value.notes, onChange: e => {
+        window.fillEvents.push({kind: 'onChange', id: 'notes', value: e.target.value});
+        setValue({...value, notes: e.target.value});
+      }})),
+      value.scenario !== null && React.createElement('span', {id: 'overlay'}, 'Scenario overlay active'),
       React.createElement('output', {id: 'state'}, JSON.stringify({...value, revision})),
       React.createElement('button', {id: 'save', onClick: () => document.getElementById('saved').textContent = JSON.stringify(value)}, 'Save'),
       React.createElement('output', {id: 'saved'}),

@@ -49,6 +49,7 @@ jobs:
             cargo test --release --manifest-path cli/Cargo.toml e2e_console_includes_cross_origin_frame_logs -- --ignored --test-threads=1
             cargo test --release --manifest-path cli/Cargo.toml e2e_attach_preserves_existing_cross_origin_frames -- --ignored --test-threads=1
             cargo test --release --manifest-path cli/Cargo.toml e2e_fill_controlled_temporal_inputs -- --ignored --test-threads=1
+            cargo test --release --manifest-path cli/Cargo.toml e2e_fill_controlled_empty_inputs -- --ignored --test-threads=1 --nocapture
             cargo test --release --manifest-path cli/Cargo.toml e2e_tab_state -- --ignored --test-threads=1
           } 2>&1 | tee test-receipts/retained-frame-date-e2e.log
       - name: Preserve durable test receipts
@@ -82,6 +83,10 @@ jobs:
           install -m 755 cli/target/release/agent-browser bin/agent-browser-linux-x64
           pnpm pack
           sha256sum agent-browser-0.37.1.tgz > agent-browser-0.37.1.tgz.sha256
+      - name: Record package integrity and executable glibc floor
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/native-package-proof.mjs agent-browser-0.37.1.tgz bin/agent-browser-linux-x64 "$GITHUB_SHA" "$RELEASE_TAG" > native-package-proof.json
       - name: Publish immutable package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,6 +96,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             agent-browser-0.37.1.tgz \
             agent-browser-0.37.1.tgz.sha256 \
+            native-package-proof.json \
             --target "$GITHUB_SHA" \
-            --title "Retained temporal fill and authorized clean-tab restoration for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Native snapshots and getters redact protected payment, password and one-time-code fields without changing live values. cc-name stays public. Coverage includes shadow DOM and cross-origin out-of-process iframes. Eval, screenshot/PDF, downloads and browser-data output are guarded on current or remembered sensitive tabs. Continuous recording/trace/profiler/HAR/stream and addinitscript always fail closed with SENSITIVE_OUTPUT_UNSUPPORTED; no bypass flag. Session metadata never probes CDP; in-flight lifecycle requests return daemon_busy without cancelling the owning operation. Restore save and owned browser close requests are bounded, and external CDP browsers are detached without Browser.close. Publication requires the full unit suite and real Chrome sensitive input e2e suite, with durable test logs. Temporal fill routes check retained values after rendering and reject application resets with typed errors. Explicit expiring owner/account/origin-bound clean-tab capsules restore sessionStorage before app startup without replaying context-wide cookies. Publication additionally requires real React temporal-route and clean-tab replacement/new-tab isolation regressions. Retains prior frame custody repairs. Packaged source commit: $GITHUB_SHA."
+            --title "Retained controlled browser fills for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 package built on Ubuntu 22.04 for both fleet hosts. Empty controlled input and textarea fills bypass framework trackers, dispatch input/change, and check retained values after rendering. Tests prove actual React state, onChange, number zero-to-null overlay removal, rerender and saved state through direct/ref/find/semantic routes. Retains controlled temporal fills, authorized clean-tab startup capsules, typed session metadata failures, bounded browser lifecycle, cross-origin frame custody and sensitive-output protection. Publication requires full native units and real Chrome controlled-fill, frame, clean-tab and sensitive-input tests with durable receipts. Package integrity, executable hash and measured glibc requirement are in native-package-proof.json. Packaged source commit: $GITHUB_SHA."
