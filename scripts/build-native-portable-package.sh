@@ -17,7 +17,7 @@ export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
   printf 'source=%s\n' "$source"
   rustc --version
   cargo --version
-  cargo zigbuild --version
+  uv tool list
   pnpm --version
 } > "$output/toolchain.txt"
 pnpm install --filter agent-browser --frozen-lockfile --ignore-scripts
@@ -32,4 +32,4 @@ pnpm pack --pack-destination "$output"
 package="$output/agent-browser-0.37.1.tgz"
 sha256sum "$package" > "$package.sha256"
 node scripts/native-package-proof.mjs "$package" bin/agent-browser-linux-x64 "$source" "$tag" > "$output/native-package-proof.json"
-cat "$output/native-package-proof.json"
+node -e 'console.log(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$output/native-package-proof.json"

@@ -1347,12 +1347,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn temporal_fill_outcomes_fail_closed() {
-        assert!(serde_json::from_value::<TemporalFillOutcome>(
+    fn native_fill_outcomes_fail_closed() {
+        assert!(serde_json::from_value::<NativeFillOutcome>(
             serde_json::json!({"handled": true})
         )
         .is_err());
-        assert!(serde_json::from_value::<TemporalFillOutcome>(
+        assert!(serde_json::from_value::<NativeFillOutcome>(
             serde_json::json!({"status": "unknown"})
         )
         .is_err());
