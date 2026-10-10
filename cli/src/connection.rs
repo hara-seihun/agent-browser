@@ -1416,7 +1416,8 @@ mod tests {
             serde_json::json!({"id":"fixture", "action":"auth_login", "timeout":1000}),
             "one-shot",
         )
-        .unwrap_err();
+        .err()
+        .expect("lost reply must fail without replay");
         assert!(error.contains("outcome unknown; not replayed"));
         assert!(!daemon_unreachable(&error));
         server.join().unwrap();
