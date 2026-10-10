@@ -1,0 +1,100 @@
+name: Build immutable auth deadline package
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable release tag for this source commit
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag for this source commit
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auth-deadline-package-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  focused-package-linux-x64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bind immutable source and verification scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -n "$RELEASE_TAG"
+          mkdir -p test-receipts
+          git show --no-patch --format=fuller HEAD > test-receipts/source.log
+          printf '%s\n' "$GITHUB_SHA" > test-receipts/source-sha
+          printf '%s\n' 'Native auth, stdio plugin lifetime and Unix IPC mocks only; no browser, profile, session or credential access' > test-receipts/scope.log
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Compile and run bounded auth, plugin and IPC mocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --locked --manifest-path cli/Cargo.toml -- --list 2>&1 | tee test-receipts/test-list.log
+          for test in \
+            plugins::tests::plugin_timeout_retires_lock_holder_descendant \
+            plugins::tests::plugin_cancellation_retires_lock_holder_descendant \
+            plugins::tests::credential_invocation_advertises_remaining_budget \
+            connection::tests::test_auth_transport_does_not_replay_lost_response \
+            commands::tests::test_auth_login_total_budget \
+            native::daemon::test_auth_disconnect_cancels_queued_request \
+            mcp::tests::auth_login_tool_exposes_and_forwards_no_navigate; do
+            grep -Fx "$test: test" test-receipts/test-list.log
+          done
+          cargo test --release --locked --manifest-path cli/Cargo.toml plugins::tests:: -- --test-threads=1 2>&1 | tee test-receipts/plugins.log
+          cargo test --release --locked --manifest-path cli/Cargo.toml test_auth_ -- --test-threads=1 2>&1 | tee test-receipts/auth-ipc.log
+          cargo test --release --locked --manifest-path cli/Cargo.toml auth_login_tool_exposes_and_forwards_no_navigate -- --test-threads=1 2>&1 | tee test-receipts/mcp-auth.log
+      - name: Build native executable from the same source
+        run: cargo build --release --locked --manifest-path cli/Cargo.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+      - name: Pack executable and record measured package integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 755 cli/target/release/agent-browser bin/agent-browser-linux-x64
+          pnpm pack
+          sha256sum agent-browser-0.37.1.tgz > agent-browser-0.37.1.tgz.sha256
+          node scripts/native-package-proof.mjs agent-browser-0.37.1.tgz bin/agent-browser-linux-x64 "$GITHUB_SHA" "$RELEASE_TAG" > native-package-proof.json
+          cp native-package-proof.json test-receipts/
+          tar -czf auth-deadline-test-receipts.tgz test-receipts
+      - name: Publish immutable Linux x64 package and source-bound receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            agent-browser-0.37.1.tgz \
+            agent-browser-0.37.1.tgz.sha256 \
+            native-package-proof.json \
+            auth-deadline-test-receipts.tgz \
+            --target "$GITHUB_SHA" \
+            --title "Native auth deadlines for glibc 2.35" \
+            --notes "Linux x64 agent-browser 0.37.1 built on Ubuntu 22.04. Focused mock receipts cover explicit login/plugin budgets, descendant retirement on timeout and cancellation, no ambiguous auth IPC replay, disconnected requests and MCP parity. Retains existing controlled-fill, frame, clean-tab and sensitive-output fixes without rerunning unrelated real-browser suites. The package proof binds source SHA, SHA-256, SHA-512 integrity, executable SHA-256 and measured glibc requirement at or below 2.35. Packaged source: $GITHUB_SHA. Workflow run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+      - name: Preserve focused receipts on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-deadline-test-receipts
+          path: test-receipts/
+          if-no-files-found: error

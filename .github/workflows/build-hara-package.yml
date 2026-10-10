@@ -7,12 +7,28 @@ on:
         description: Immutable release tag for this source commit
         required: true
         type: string
+      verification_scope:
+        description: Verification scope for immutable publication
+        required: true
+        default: retained-full
+        type: choice
+        options:
+          - retained-full
+          - auth-mocks
 
 permissions:
   contents: write
 
 jobs:
+  auth-deadline-package:
+    if: inputs.verification_scope == 'auth-mocks'
+    uses: ./.github/workflows/build-auth-deadline-package.yml
+    with:
+      release_tag: ${{ inputs.release_tag }}
+    secrets: inherit
+
   sensitive-input-tests:
+    if: inputs.verification_scope != 'auth-mocks'
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
@@ -61,6 +77,7 @@ jobs:
           if-no-files-found: warn
 
   package-linux-x64:
+    if: inputs.verification_scope != 'auth-mocks'
     needs: sensitive-input-tests
     # Converge runs glibc 2.36. Keep the published executable compatible with
     # both fleet hosts instead of inheriting ubuntu-latest's newer libc.
