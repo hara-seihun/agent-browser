@@ -55,12 +55,14 @@ jobs:
             connection::tests::test_auth_transport_does_not_replay_lost_response \
             commands::tests::test_auth_login_total_budget \
             native::daemon::test_auth_disconnect_cancels_queued_request \
-            mcp::tests::auth_login_tool_exposes_and_forwards_no_navigate; do
+            mcp::tests::auth_login_tool_exposes_and_forwards_no_navigate \
+            session_info_transport_failure_is_not_runtime_success; do
             grep -Fx "$test: test" test-receipts/test-list.log
           done
           cargo test --release --locked --manifest-path cli/Cargo.toml plugins::tests:: -- --test-threads=1 2>&1 | tee test-receipts/plugins.log
           cargo test --release --locked --manifest-path cli/Cargo.toml test_auth_ -- --test-threads=1 2>&1 | tee test-receipts/auth-ipc.log
           cargo test --release --locked --manifest-path cli/Cargo.toml auth_login_tool_exposes_and_forwards_no_navigate -- --test-threads=1 2>&1 | tee test-receipts/mcp-auth.log
+          cargo test --release --locked --manifest-path cli/Cargo.toml --test session_info_cli -- --test-threads=1 2>&1 | tee test-receipts/session-info-cli.log
       - name: Build native executable from the same source
         run: cargo build --release --locked --manifest-path cli/Cargo.toml
       - uses: actions/setup-node@v4
@@ -90,7 +92,7 @@ jobs:
             auth-deadline-test-receipts.tgz \
             --target "$GITHUB_SHA" \
             --title "Native auth deadlines for glibc 2.35" \
-            --notes "Linux x64 agent-browser 0.37.1 built on Ubuntu 22.04. Focused mock receipts cover explicit login/plugin budgets, descendant retirement on timeout and cancellation, no ambiguous auth IPC replay, disconnected requests and MCP parity. Retains existing controlled-fill, frame, clean-tab and sensitive-output fixes without rerunning unrelated real-browser suites. The package proof binds source SHA, SHA-256, SHA-512 integrity, executable SHA-256 and measured glibc requirement at or below 2.35. Packaged source: $GITHUB_SHA. Workflow run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            --notes "Linux x64 agent-browser 0.37.1 built on Ubuntu 22.04. Focused mock receipts cover explicit login/plugin budgets, descendant retirement on timeout and cancellation, no ambiguous auth IPC replay, disconnected requests, typed metadata transport failure and MCP parity. Retains existing controlled-fill, frame, clean-tab and sensitive-output fixes without rerunning unrelated real-browser suites. The package proof binds source SHA, SHA-256, SHA-512 integrity, executable SHA-256 and measured glibc requirement at or below 2.35. Packaged source: $GITHUB_SHA. Workflow run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
       - name: Preserve focused receipts on every outcome
         if: always()
         uses: actions/upload-artifact@v4
