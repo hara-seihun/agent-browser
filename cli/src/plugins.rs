@@ -9,7 +9,49 @@ use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::Instant;
+
+const MAX_PLUGIN_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+#[cfg(unix)]
+struct PluginProcessGroup(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl PluginProcessGroup {
+    fn terminate(&mut self) -> Result<(), String> {
+        let Some(pgid) = self.0 else {
+            return Ok(());
+        };
+        // The child starts its own group before exec; descendants inherit it.
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err("Failed to terminate plugin process group".to_string());
+        }
+        self.0 = None;
+        Ok(())
+    }
+
+    fn handoff(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PluginProcessGroup {
+    fn drop(&mut self) {
+        // Also runs when an outer command deadline drops the invocation future.
+        let _ = self.terminate();
+    }
+}
+
+fn bounded_plugin_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .take(limit)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
 
 pub const PROTOCOL_VERSION: &str = "agent-browser.plugin.v1";
 pub const TYPE_PLUGIN_MANIFEST: &str = "plugin.manifest";
@@ -150,12 +192,16 @@ fn validate_plugin(plugin: &PluginConfig, capability: &str) -> Result<(), String
         return Err("Plugin entry is missing a name".to_string());
     }
     if plugin.command.trim().is_empty() {
-        return Err(format!("Plugin '{}' is missing a command", plugin.name));
+        return Err(format!(
+            "Plugin '{}' is missing a command",
+            bounded_plugin_text(&plugin.name, 80)
+        ));
     }
     if !plugin.capabilities.iter().any(|c| c == capability) {
         return Err(format!(
             "Plugin '{}' does not declare required capability '{}'",
-            plugin.name, capability
+            bounded_plugin_text(&plugin.name, 80),
+            bounded_plugin_text(capability, 80)
         ));
     }
     Ok(())
@@ -185,7 +231,7 @@ async fn invoke_plugin(
     request_type: &str,
     capability: &str,
     request: serde_json::Value,
-    timeout_secs: u64,
+    deadline: Instant,
     expose_plugin_error: bool,
 ) -> Result<serde_json::Value, String> {
     validate_plugin(plugin, capability)?;
@@ -195,15 +241,21 @@ async fn invoke_plugin(
         "capability": capability,
         "request": request,
     });
-    invoke_plugin_process(plugin, payload, timeout_secs, expose_plugin_error).await
+    invoke_plugin_process(plugin, payload, deadline, expose_plugin_error).await
 }
 
 async fn invoke_plugin_process(
     plugin: &PluginConfig,
     payload: serde_json::Value,
-    timeout_secs: u64,
+    deadline: Instant,
     expose_plugin_error: bool,
 ) -> Result<serde_json::Value, String> {
+    let name = bounded_plugin_text(&plugin.name, 80);
+    if Instant::now() >= deadline {
+        return Err(format!("Plugin '{}' timed out", name));
+    }
+    let input =
+        serde_json::to_vec(&payload).map_err(|_| "Failed to encode plugin request".to_string())?;
     let mut command = tokio::process::Command::new(&plugin.command);
     command
         .args(&plugin.args)
@@ -212,43 +264,71 @@ async fn invoke_plugin_process(
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
+    #[cfg(unix)]
+    command.process_group(0);
+
     let mut child = command
         .spawn()
-        .map_err(|e| format!("Failed to start plugin '{}': {}", plugin.name, e))?;
+        .map_err(|_| format!("Failed to start plugin '{}'", name))?;
+    #[cfg(unix)]
+    let mut process_group = PluginProcessGroup(Some(
+        child
+            .id()
+            .ok_or_else(|| "Plugin process has no PID".to_string())? as libc::pid_t,
+    ));
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Plugin process has no stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Plugin process has no stdout".to_string())?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        let input = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to encode plugin request: {}", e))?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|e| format!("Failed to write plugin request: {}", e))?;
+    let result = tokio::time::timeout_at(deadline, async {
+        let write = async {
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|_| format!("Failed to write plugin '{}' request", name))?;
+            drop(stdin);
+            Ok::<_, String>(())
+        };
+        let read = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(MAX_PLUGIN_RESPONSE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| format!("Failed to read plugin '{}' response", name))?;
+            if bytes.len() as u64 > MAX_PLUGIN_RESPONSE_BYTES {
+                return Err(format!("Plugin '{}' response exceeded byte limit", name));
+            }
+            Ok(bytes)
+        };
+        let wait = async {
+            child
+                .wait()
+                .await
+                .map_err(|_| format!("Plugin '{}' failed", name))
+        };
+        tokio::try_join!(write, read, wait)
+    })
+    .await;
+    let (_, stdout, status) = result.map_err(|_| format!("Plugin '{}' timed out", name))??;
+
+    if !status.success() {
+        return Err(format!("Plugin '{}' exited unsuccessfully", name));
     }
-    drop(child.stdin.take());
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| format!("Plugin '{}' timed out", plugin.name))?
-    .map_err(|e| format!("Plugin '{}' failed: {}", plugin.name, e))?;
-
-    if !output.status.success() {
-        return Err(format!("Plugin '{}' exited unsuccessfully", plugin.name));
-    }
-
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| format!("Plugin '{}' returned invalid JSON", plugin.name))?;
+    let response: serde_json::Value = serde_json::from_slice(&stdout)
+        .map_err(|_| format!("Plugin '{}' returned invalid JSON", name))?;
     let protocol = response
         .get("protocol")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if protocol != PROTOCOL_VERSION {
-        return Err(format!(
-            "Plugin '{}' used unsupported protocol '{}'",
-            plugin.name, protocol
-        ));
+        return Err(format!("Plugin '{}' used unsupported protocol", name));
     }
     if !response
         .get("success")
@@ -260,21 +340,50 @@ async fn invoke_plugin_process(
                 .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("plugin returned success=false");
-            return Err(format!("Plugin '{}' failed: {}", plugin.name, error));
+            return Err(format!(
+                "Plugin '{}' failed: {}",
+                name,
+                bounded_plugin_text(error, 256)
+            ));
         }
-        return Err(format!("Plugin '{}' returned success=false", plugin.name));
+        return Err(format!("Plugin '{}' returned success=false", name));
+    }
+
+    #[cfg(unix)]
+    if payload.get("type").and_then(|value| value.as_str()) == Some("browser.launch") {
+        let browser: BrowserProviderPluginResponse = serde_json::from_value(response.clone())
+            .map_err(|_| format!("Browser provider plugin '{}' returned invalid JSON", name))?;
+        let browser = browser
+            .browser
+            .or(browser.data)
+            .filter(|browser| !browser.cdp_url.is_empty())
+            .ok_or_else(|| format!("Browser provider plugin '{}' returned no browser", name))?;
+        // A successful launch transfers descendant ownership to browser.close.
+        drop(browser);
+        process_group.handoff();
+    } else {
+        process_group.terminate()?;
     }
 
     Ok(response)
 }
 
+/// Resolves credentials within the caller's existing operation deadline.
+/// Plugins receive the remaining budget as request.timeoutMs; neither subprocess
+/// I/O nor descendants may outlive the invocation on Unix.
 pub async fn resolve_credential_with_plugins(
     provider: &str,
     plugins: &[PluginConfig],
     request: CredentialResolveRequest<'_>,
+    deadline: Instant,
 ) -> Result<ResolvedCredential, String> {
-    let plugin = find_plugin(plugins, provider)
-        .ok_or_else(|| format!("Credential plugin '{}' is not configured", provider))?;
+    let plugin = find_plugin(plugins, provider).ok_or_else(|| {
+        format!(
+            "Credential plugin '{}' is not configured",
+            bounded_plugin_text(provider, 80)
+        )
+    })?;
+    let provider = bounded_plugin_text(provider, 80);
     let response = invoke_plugin(
         plugin,
         "credential.resolve",
@@ -283,8 +392,9 @@ pub async fn resolve_credential_with_plugins(
             "profileName": request.profile_name,
             "itemRef": request.item_ref,
             "url": request.url,
+            "timeoutMs": deadline.saturating_duration_since(Instant::now()).as_millis(),
         }),
-        15,
+        deadline,
         false,
     )
     .await?;
@@ -292,8 +402,8 @@ pub async fn resolve_credential_with_plugins(
         .map_err(|_| format!("Credential plugin '{}' returned invalid JSON", provider))?;
     if response.protocol != PROTOCOL_VERSION {
         return Err(format!(
-            "Credential plugin '{}' used unsupported protocol '{}'",
-            provider, response.protocol
+            "Credential plugin '{}' used unsupported protocol",
+            provider
         ));
     }
     if !response.success {
@@ -326,7 +436,7 @@ pub async fn connect_browser_provider_with_plugins(
         "browser.launch",
         CAPABILITY_BROWSER_PROVIDER,
         request,
-        60,
+        Instant::now() + std::time::Duration::from_secs(60),
         false,
     )
     .await?;
@@ -378,7 +488,7 @@ pub async fn close_browser_provider_with_plugins(
         "browser.close",
         CAPABILITY_BROWSER_PROVIDER,
         cleanup,
-        15,
+        Instant::now() + std::time::Duration::from_secs(15),
         false,
     )
     .await?;
@@ -396,7 +506,7 @@ pub async fn launch_mutations_from_plugins(
             "launch.mutate",
             CAPABILITY_LAUNCH_MUTATE,
             request.clone(),
-            15,
+            Instant::now() + std::time::Duration::from_secs(15),
             false,
         )
         .await?;
@@ -562,7 +672,13 @@ async fn discover_plugin_manifest(plugin: &PluginConfig) -> Result<PluginManifes
         "request": {},
     });
 
-    let response = invoke_plugin_process(plugin, payload, 60, true).await?;
+    let response = invoke_plugin_process(
+        plugin,
+        payload,
+        Instant::now() + std::time::Duration::from_secs(60),
+        true,
+    )
+    .await?;
     let response: PluginManifestResponse = serde_json::from_value(response)
         .map_err(|_| format!("Plugin '{}' returned invalid manifest JSON", plugin.name))?;
     if response.protocol != PROTOCOL_VERSION {
@@ -844,7 +960,7 @@ pub fn run_plugin_command(args: &[String], plugins: &[PluginConfig], json_output
                 request_type,
                 capability,
                 payload,
-                60,
+                Instant::now() + std::time::Duration::from_secs(60),
                 true,
             )) {
                 Ok(response) => println!("{}", response),
@@ -1171,6 +1287,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
                 item_ref: Some("Example"),
                 url: None,
             },
+            Instant::now() + std::time::Duration::from_secs(2),
         )
         .await
         .unwrap();
@@ -1214,6 +1331,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
                 item_ref: Some("Example"),
                 url: None,
             },
+            Instant::now() + std::time::Duration::from_secs(2),
         )
         .await
         .unwrap_err();
@@ -1299,48 +1417,380 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"arg
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn timed_out_plugin_is_killed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let marker_path = dir.path().join("plugin-finished");
-        let plugin_path = dir.path().join("mock-slow-plugin");
-        std::fs::write(
-            &plugin_path,
-            r#"#!/bin/sh
-cat >/dev/null
-sleep 2
-printf done > "$1"
-printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
-"#,
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&plugin_path, perms).unwrap();
-
-        let plugin = PluginConfig {
-            name: "slow".to_string(),
-            command: plugin_path.to_string_lossy().to_string(),
-            args: vec![marker_path.to_string_lossy().to_string()],
-            capabilities: vec![CAPABILITY_COMMAND_RUN.to_string()],
-            ..PluginConfig::default()
+    #[test]
+    #[ignore = "subprocess fixture invoked by plugin lifetime tests"]
+    fn plugin_lock_holder_fixture() {
+        use std::os::fd::AsRawFd;
+        let Ok(lock_path) = std::env::var("AGENT_BROWSER_TEST_LOCK") else {
+            return;
         };
+        let ready_path = std::env::var("AGENT_BROWSER_TEST_READY").unwrap();
+        let lock = fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        fs::write(ready_path, std::process::id().to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
 
+    #[cfg(unix)]
+    struct LockHolderPlugin {
+        dir: tempfile::TempDir,
+        plugin: PluginConfig,
+        lock: fs::File,
+    }
+
+    #[cfg(unix)]
+    impl LockHolderPlugin {
+        fn new(read_stdin: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let plugin_path = dir.path().join("mock-lock-holder-plugin");
+            fs::write(
+                &plugin_path,
+                r#"#!/bin/sh
+if [ "$4" = read ]; then cat >/dev/null; fi
+AGENT_BROWSER_TEST_LOCK="$2" AGENT_BROWSER_TEST_READY="$3" "$1" --exact plugins::tests::plugin_lock_holder_fixture --ignored --nocapture &
+wait
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(&plugin_path, fs::Permissions::from_mode(0o755)).unwrap();
+            let lock_path = dir.path().join("lock");
+            let lock = fs::File::options()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap();
+            let plugin = PluginConfig {
+                name: "slow".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                args: vec![
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                    lock_path.to_string_lossy().to_string(),
+                    dir.path().join("ready").to_string_lossy().to_string(),
+                    if read_stdin { "read" } else { "stall" }.to_string(),
+                ],
+                capabilities: vec![CAPABILITY_COMMAND_RUN.to_string()],
+                ..PluginConfig::default()
+            };
+            Self { dir, plugin, lock }
+        }
+
+        fn complete_with(&mut self, response: &str) {
+            fs::write(
+                &self.plugin.command,
+                r#"#!/bin/sh
+cat >/dev/null
+AGENT_BROWSER_TEST_LOCK="$2" AGENT_BROWSER_TEST_READY="$3" "$1" --exact plugins::tests::plugin_lock_holder_fixture --ignored --nocapture >/dev/null 2>/dev/null &
+while [ ! -s "$3" ]; do sleep 0.01; done
+printf '%s' "$5"
+"#,
+            )
+            .unwrap();
+            self.plugin.args.push(response.to_string());
+        }
+
+        fn lock_available(&self) -> bool {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                assert_eq!(
+                    unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) },
+                    0
+                );
+                true
+            } else {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EWOULDBLOCK)
+                );
+                false
+            }
+        }
+
+        async fn wait_ready(&self) {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if fs::read_to_string(self.dir.path().join("ready"))
+                        .ok()
+                        .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("lock-holder descendant must start");
+        }
+
+        async fn assert_released(&self) {
+            self.wait_ready().await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !self.lock_available() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("plugin descendant must release its lock after invocation ends");
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockHolderPlugin {
+        fn drop(&mut self) {
+            // Retire only this fixture's holder if the cleanup assertion fails.
+            if !self.lock_available() {
+                let pid: libc::pid_t = fs::read_to_string(self.dir.path().join("ready"))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_timeout_retires_lock_holder_descendant() {
+        let fixture = LockHolderPlugin::new(true);
         let err = invoke_plugin(
-            &plugin,
+            &fixture.plugin,
             "slow.run",
             CAPABILITY_COMMAND_RUN,
             json!({}),
-            1,
-            true,
+            Instant::now() + std::time::Duration::from_secs(1),
+            false,
         )
         .await
         .unwrap_err();
-
         assert!(err.contains("timed out"));
-        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
-        assert!(!marker_path.exists());
+        fixture.assert_released().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_timeout_bounds_stalled_stdin_and_retires_descendant() {
+        let fixture = LockHolderPlugin::new(false);
+        let started = Instant::now();
+        let err = invoke_plugin(
+            &fixture.plugin,
+            "slow.run",
+            CAPABILITY_COMMAND_RUN,
+            json!({"secret": "x".repeat(1024 * 1024)}),
+            started + std::time::Duration::from_secs(1),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        fixture.assert_released().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_cancellation_retires_lock_holder_descendant() {
+        for read_stdin in [true, false] {
+            let fixture = LockHolderPlugin::new(read_stdin);
+            let plugin = fixture.plugin.clone();
+            let task = tokio::spawn(async move {
+                invoke_plugin(
+                    &plugin,
+                    "slow.run",
+                    CAPABILITY_COMMAND_RUN,
+                    json!({"secret": "x".repeat(1024 * 1024)}),
+                    Instant::now() + std::time::Duration::from_secs(30),
+                    false,
+                )
+                .await
+            });
+            fixture.wait_ready().await;
+            assert!(!fixture.lock_available());
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            fixture.assert_released().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_credential_invocation_retires_descendants() {
+        let mut fixture = LockHolderPlugin::new(true);
+        fixture.complete_with(
+            r#"{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass"}}"#,
+        );
+        let credential = resolve_credential_with_plugins(
+            "slow",
+            &[fixture.plugin.clone()],
+            CredentialResolveRequest {
+                profile_name: "example",
+                item_ref: None,
+                url: None,
+            },
+            Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(credential.username, "user");
+        fixture.assert_released().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_browser_launch_hands_off_descendants() {
+        let mut fixture = LockHolderPlugin::new(true);
+        fixture.plugin.capabilities = vec![CAPABILITY_BROWSER_PROVIDER.to_string()];
+        fixture.complete_with(
+            r#"{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test"}}"#,
+        );
+        let browser =
+            connect_browser_provider_with_plugins("slow", &[fixture.plugin.clone()], json!({}))
+                .await
+                .unwrap();
+        assert!(!browser.cdp_url.is_empty());
+        assert!(!fixture.lock_available());
+        // The fixture's Drop stands in for the browser owner's later cleanup.
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_browser_launch_retires_descendants() {
+        let mut fixture = LockHolderPlugin::new(true);
+        fixture.plugin.capabilities = vec![CAPABILITY_BROWSER_PROVIDER.to_string()];
+        fixture.complete_with(
+            r#"{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":""}}"#,
+        );
+        let err =
+            connect_browser_provider_with_plugins("slow", &[fixture.plugin.clone()], json!({}))
+                .await
+                .unwrap_err();
+        assert!(err.contains("returned no browser"));
+        fixture.assert_released().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn credential_invocation_advertises_remaining_budget() {
+        let plugin = PluginConfig {
+            name: "mock".to_string(),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"input=$(cat)
+budget=$(printf '%s' "$input" | grep -o '"timeoutMs":[0-9]*' | cut -d: -f2)
+printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"%s","password":"fixture"}}' "$budget"
+"#
+                .to_string(),
+            ],
+            capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
+            ..PluginConfig::default()
+        };
+        let deadline = Instant::now() + std::time::Duration::from_millis(1700);
+        let credential = resolve_credential_with_plugins(
+            "mock",
+            &[plugin],
+            CredentialResolveRequest {
+                profile_name: "example",
+                item_ref: None,
+                url: None,
+            },
+            deadline,
+        )
+        .await
+        .unwrap();
+        let budget: u64 = credential.username.parse().unwrap();
+        assert!(budget > 0 && budget <= 1700);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exhausted_plugin_budget_does_not_spawn() {
+        let fixture = LockHolderPlugin::new(true);
+        let err = invoke_plugin(
+            &fixture.plugin,
+            "slow.run",
+            CAPABILITY_COMMAND_RUN,
+            json!({}),
+            Instant::now(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"));
+        assert!(!fixture.dir.path().join("ready").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_response_byte_limit_is_secret_safe() {
+        let plugin = PluginConfig {
+            name: "mock".to_string(),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; head -c 1048577 /dev/zero".to_string(),
+            ],
+            capabilities: vec![CAPABILITY_COMMAND_RUN.to_string()],
+            ..PluginConfig::default()
+        };
+        let err = invoke_plugin(
+            &plugin,
+            "mock.run",
+            CAPABILITY_COMMAND_RUN,
+            json!({}),
+            Instant::now() + std::time::Duration::from_secs(2),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("response exceeded byte limit"));
+        assert!(err.len() < 100);
+    }
+
+    #[test]
+    fn plugin_diagnostics_are_bounded_and_single_line() {
+        let text = format!("{}\n\r\0", "é".repeat(1000));
+        let bounded = bounded_plugin_text(&text, 256);
+        assert_eq!(bounded.chars().count(), 256);
+        assert!(!bounded.chars().any(char::is_control));
+        assert_eq!(bounded_plugin_text("a\n\r\0b", 80), "a   b");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn credential_plugin_protocol_error_never_echoes_secret() {
+        let plugin = PluginConfig {
+            name: "mock".to_string(),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s' '{\"protocol\":\"secret-token-value\",\"success\":true}'".to_string(),
+            ],
+            capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
+            ..PluginConfig::default()
+        };
+        let err = resolve_credential_with_plugins(
+            "mock",
+            &[plugin],
+            CredentialResolveRequest {
+                profile_name: "example",
+                item_ref: None,
+                url: None,
+            },
+            Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("unsupported protocol"));
+        assert!(!err.contains("secret-token-value"));
     }
 }
