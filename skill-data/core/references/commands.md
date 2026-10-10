@@ -334,7 +334,7 @@ EOF
 
 ```bash
 agent-browser auth save <name> --url <url> --username <user> --password-stdin
-agent-browser auth login <name>          # Login using saved credentials
+agent-browser auth login <name> [--timeout <ms>] # One total login deadline
 agent-browser auth login <name> --no-navigate
                                           # Use active page after same-origin validation
 agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
@@ -348,6 +348,8 @@ agent-browser plugin show <name>         # Show one configured plugin
 agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
+
+`--timeout` accepts 1..300000ms and covers all login stages, including credential retrieval. The initial budget is 180000ms or an explicitly configured action timeout. Outer tools must allow that plus 10 seconds. Interrupted/lost responses have unknown effects and are never automatically resent; caller disconnect cancels subsequent stages.
 
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 

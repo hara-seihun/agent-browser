@@ -245,7 +245,7 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
-Use `--url`, `--username-selector`, `--password-selector`, and `--submit-selector` on `auth login` to override plugin-provided metadata for the current login only.
+Use `--url`, `--username-selector`, `--password-selector`, and `--submit-selector` on `auth login` to override plugin-provided metadata for the current login only. `--timeout <ms>` sets one total deadline (1..300000ms; initial 180000ms unless an action timeout is configured). Credential plugins receive remaining `request.timeoutMs` and must keep lookup descendants in the plugin process group. Group cleanup is owned by the native caller. Set any outer timeout beyond the login budget plus 10 seconds. Caller disconnect cancels subsequent login stages; effects already dispatched can still settle and lost replies are never replayed.
 
 Gate plugin secret access separately from normal login automation:
 

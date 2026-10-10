@@ -2722,6 +2722,10 @@ Login Options:
 
 Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
+  --timeout <ms> covers all stages (1..300000ms; initial budget 180000ms
+  unless a default action timeout is configured). IPC allows 10s extra.
+  Caller disconnect cancels later stages; lost replies are not replayed.
+  Dispatched effects may still settle; inspect before another login.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
   Selector wait timeout follows the default action timeout.
@@ -3915,7 +3919,7 @@ Batch:
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
-  auth login <name>          Login using saved credentials (waits for form fields)
+  auth login <name> [--timeout <ms>]  Login with one total lookup/form deadline
   auth login <name> --no-navigate
                              Use active page after verifying credential URL origin
   auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]

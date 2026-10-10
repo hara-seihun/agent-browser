@@ -1011,34 +1011,13 @@ fn connect(session: &str) -> Result<Connection, String> {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_DELAY_MS: u64 = 200;
-
-    let mut last_error = String::new();
-
-    for attempt in 0..MAX_RETRIES {
-        if attempt > 0 {
-            thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
+    send_command_once(&cmd, session).map_err(|error| {
+        if is_transient_error(&error) {
+            format!("IPC transport interrupted: {}", error)
+        } else {
+            error
         }
-
-        match send_command_once(&cmd, session) {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                if is_transient_error(&e) {
-                    last_error = e;
-                    continue;
-                }
-                // Non-transient error, fail immediately
-                return Err(e);
-            }
-        }
-    }
-
-    Err(format!(
-        "{} (after {} retries - daemon may be busy or unresponsive)",
-        last_error, MAX_RETRIES
-    ))
+    })
 }
 
 /// Check if an error is transient and worth retrying against the SAME daemon.
@@ -1109,17 +1088,24 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
     json_str.push('\n');
 
-    stream
-        .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to send: {}", e))?;
+    stream.write_all(json_str.as_bytes()).map_err(|e| {
+        format!(
+            "Failed to send: {}; command outcome unknown; not replayed",
+            e
+        )
+    })?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|e| format!("Failed to read: {}", e))?;
+    reader.read_line(&mut response_line).map_err(|e| {
+        format!(
+            "Failed to read: {}; command outcome unknown; not replayed",
+            e
+        )
+    })?;
 
-    serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+    serde_json::from_str(&response_line)
+        .map_err(|_| "Invalid response; command outcome unknown; not replayed".to_string())
 }
 
 #[cfg(test)]
@@ -1400,7 +1386,51 @@ mod tests {
         assert!(daemon_config_matches(session, &opts));
     }
 
-    // === Transient Error Detection Tests ===
+    #[test]
+    #[cfg(unix)]
+    fn test_auth_transport_does_not_replay_lost_response() {
+        use std::os::unix::net::UnixListener;
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let listener = UnixListener::bind(dir.path().join("one-shot.sock")).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["action"],
+                "auth_login"
+            );
+            listener.set_nonblocking(true).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        let error = send_command(
+            serde_json::json!({"id":"fixture", "action":"auth_login", "timeout":1000}),
+            "one-shot",
+        )
+        .unwrap_err();
+        assert!(error.contains("outcome unknown; not replayed"));
+        assert!(!daemon_unreachable(&error));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_auth_transport_budget_exceeds_operation_deadline() {
+        assert_eq!(
+            read_timeout_for(&serde_json::json!({"timeout":180000})),
+            Duration::from_secs(190)
+        );
+    }
+
+    // === Transport Error Classification Tests ===
 
     #[test]
     fn test_is_transient_error_eagain_macos() {

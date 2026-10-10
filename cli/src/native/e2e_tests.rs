@@ -2225,7 +2225,12 @@ async fn temporal_fill_command(
                 .into_iter()
                 .find(|(_, element)| {
                     element.name == label
-                        && element.role == if id == "scenario" { "spinbutton" } else { "textbox" }
+                        && element.role
+                            == if id == "scenario" {
+                                "spinbutton"
+                            } else {
+                                "textbox"
+                            }
                 })
                 .unwrap()
                 .0;
@@ -2308,8 +2313,20 @@ async fn e2e_fill_controlled_temporal_inputs() {
 async fn e2e_fill_controlled_empty_inputs() {
     let mut state = DaemonState::new();
     let (url, _server) = temporal_fixture().await;
-    assert_success(&execute_command(&json!({"id":"open", "action":"navigate", "url":url}), &mut state).await);
-    assert_success(&execute_command(&json!({"id":"ready", "action":"wait", "selector":"#scenario"}), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({"id":"open", "action":"navigate", "url":url}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id":"ready", "action":"wait", "selector":"#scenario"}),
+            &mut state,
+        )
+        .await,
+    );
     for (id, label, value) in [
         ("title", "Title", "Replacement title"),
         ("scenario", "SOM override · share of SAM", "0"),
@@ -2327,18 +2344,54 @@ async fn e2e_fill_controlled_empty_inputs() {
             let proof = get_data(&observed)["result"].clone();
             println!("empty-clear {route} {id}: {proof}");
             assert_eq!(proof["dom"], "", "{route} {id}: {proof}");
-            assert_eq!(proof["state"], if id == "scenario" { Value::Null } else { json!("") }, "{route} {id}: {proof}");
+            assert_eq!(
+                proof["state"],
+                if id == "scenario" {
+                    Value::Null
+                } else {
+                    json!("")
+                },
+                "{route} {id}: {proof}"
+            );
             for kind in ["input", "onChange"] {
-                assert!(proof["events"].as_array().unwrap().contains(&json!({"kind":kind, "id":id, "value":""})), "{route} {id}: missing {kind}: {proof}");
+                assert!(
+                    proof["events"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!({"kind":kind, "id":id, "value":""})),
+                    "{route} {id}: missing {kind}: {proof}"
+                );
             }
             if id == "scenario" {
                 assert_eq!(proof["overlay"], false);
             }
-            assert_success(&execute_command(&json!({"id":"rerender", "action":"click", "selector":"#rerender"}), &mut state).await);
-            assert_success(&execute_command(&json!({"id":"save", "action":"click", "selector":"#save"}), &mut state).await);
+            assert_success(
+                &execute_command(
+                    &json!({"id":"rerender", "action":"click", "selector":"#rerender"}),
+                    &mut state,
+                )
+                .await,
+            );
+            assert_success(
+                &execute_command(
+                    &json!({"id":"save", "action":"click", "selector":"#save"}),
+                    &mut state,
+                )
+                .await,
+            );
             let saved = execute_command(&json!({"id":"saved", "action":"evaluate", "script":format!("[document.getElementById('{id}').value, JSON.parse(document.getElementById('saved').textContent)['{id}']]")}), &mut state).await;
             assert_success(&saved);
-            assert_eq!(get_data(&saved)["result"], json!(["", if id == "scenario" { Value::Null } else { json!("") }]));
+            assert_eq!(
+                get_data(&saved)["result"],
+                json!([
+                    "",
+                    if id == "scenario" {
+                        Value::Null
+                    } else {
+                        json!("")
+                    }
+                ])
+            );
         }
     }
     assert_success(&execute_command(&json!({"id":"close", "action":"close"}), &mut state).await);
@@ -6763,7 +6816,7 @@ async fn e2e_auth_login_no_navigate_preserves_active_page_state() {
     let request_count_before = document_requests.load(Ordering::SeqCst);
 
     let login = execute_command(
-        &json!({ "id": "6", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &json!({ "id": "6", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true, "timeout": 30000 }),
         &mut state,
     )
     .await;
@@ -6858,6 +6911,7 @@ printf '%s' '{{"protocol":"agent-browser.plugin.v1","success":true,"credential":
         &json!({
             "id": "5",
             "action": "auth_login",
+            "timeout": 30000,
             "name": "provider-stateful-login",
             "noNavigate": true,
             "credentialProvider": "mock",
@@ -6944,7 +6998,7 @@ async fn e2e_auth_login_rejects_cross_origin_no_navigate() {
     );
 
     let login = execute_command(
-        &json!({ "id": "5", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &json!({ "id": "5", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true, "timeout": 30000 }),
         &mut state,
     )
     .await;
@@ -7007,7 +7061,7 @@ async fn e2e_auth_login_no_navigate_requires_usable_active_page() {
         .await,
     );
     let login = execute_command(
-        &json!({ "id": "2", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &json!({ "id": "2", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true, "timeout": 30000 }),
         &mut state,
     )
     .await;
@@ -7064,7 +7118,7 @@ async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
     assert_success(&save);
 
     let login = execute_command(
-        &json!({ "id": "3", "action": "auth_login", "name": profile_name.clone() }),
+        &json!({ "id": "3", "action": "auth_login", "name": profile_name.clone(), "timeout": 30000 }),
         &mut state,
     )
     .await;

@@ -168,8 +168,8 @@ pub async fn fill(
                     const input = this.tagName === 'INPUT';
                     const textarea = this.tagName === 'TEXTAREA';
                     const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
-                    if (!temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
                     if (this.matches(':disabled') || this.readOnly) return { status: 'not_editable' };
+                    if (!temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
                     const probe = this.ownerDocument.createElement(input ? 'input' : 'textarea');
                     if (input) probe.type = this.type;
                     probe.value = value;
@@ -224,10 +224,24 @@ pub async fn fill(
     match outcome {
         NativeFillOutcome::KeyboardRequired => {}
         NativeFillOutcome::Filled => return Ok(()),
-        NativeFillOutcome::InvalidValue => return Err("fill_invalid_value: Invalid value for input".to_string()),
-        NativeFillOutcome::NotEditable => return Err("fill_not_editable: Input is disabled or read-only".to_string()),
-        NativeFillOutcome::ValueNotRetained => return Err("fill_value_not_retained: Input did not retain the supplied value after rendering".to_string()),
-        NativeFillOutcome::TargetDetached => return Err("fill_target_detached: Input was replaced before retention could be checked".to_string()),
+        NativeFillOutcome::InvalidValue => {
+            return Err("fill_invalid_value: Invalid value for input".to_string())
+        }
+        NativeFillOutcome::NotEditable => {
+            return Err("fill_not_editable: Input is disabled or read-only".to_string())
+        }
+        NativeFillOutcome::ValueNotRetained => {
+            return Err(
+                "fill_value_not_retained: Input did not retain the supplied value after rendering"
+                    .to_string(),
+            )
+        }
+        NativeFillOutcome::TargetDetached => {
+            return Err(
+                "fill_target_detached: Input was replaced before retention could be checked"
+                    .to_string(),
+            )
+        }
     }
 
     client
@@ -1348,10 +1362,10 @@ mod tests {
 
     #[test]
     fn native_fill_outcomes_fail_closed() {
-        assert!(serde_json::from_value::<NativeFillOutcome>(
-            serde_json::json!({"handled": true})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<NativeFillOutcome>(serde_json::json!({"handled": true}))
+                .is_err()
+        );
         assert!(serde_json::from_value::<NativeFillOutcome>(
             serde_json::json!({"status": "unknown"})
         )

@@ -2537,10 +2537,41 @@ fn policy_actions_for_command(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    Box::pin(execute_command_inner(cmd, state)).await
+    if cmd.get("action").and_then(Value::as_str) != Some("auth_login") {
+        return Box::pin(execute_command_inner(cmd, state, None)).await;
+    }
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let Some(budget_ms) = cmd
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .filter(|ms| *ms > 0 && *ms <= 300_000)
+    else {
+        return error_response(
+            id,
+            "auth_login_timeout_required: positive timeout up to 300000ms is required",
+        );
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
+    match tokio::time::timeout_at(
+        deadline,
+        Box::pin(execute_command_inner(cmd, state, Some(deadline))),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            let mut response = error_response(id, "auth_login_timeout: login deadline expired; dispatched effects may still settle; outcome unknown; not replayed");
+            response["code"] = json!("auth_login_timeout");
+            response
+        }
+    }
 }
 
-async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
+async fn execute_command_inner(
+    cmd: &Value,
+    state: &mut DaemonState,
+    auth_deadline: Option<tokio::time::Instant>,
+) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let lifecycle_confirmation = action == "confirm"
         && state.pending_confirmation.as_ref().is_some_and(|pending| {
@@ -3119,7 +3150,14 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "credentials" => handle_http_credentials(cmd, state).await,
         "emulatemedia" => handle_set_media(cmd, state).await,
         "auth_save" => handle_auth_save(cmd).await,
-        "auth_login" => handle_auth_login(cmd, state).await,
+        "auth_login" => {
+            handle_auth_login(
+                cmd,
+                state,
+                auth_deadline.expect("auth login deadline established at boundary"),
+            )
+            .await
+        }
         "auth_list" => handle_credentials_list().await,
         "auth_delete" => handle_credentials_delete(cmd).await,
         "auth_show" => handle_auth_show(cmd).await,
@@ -12102,7 +12140,11 @@ fn ensure_auth_login_origin_matches(
     ))
 }
 
-async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_auth_login(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: tokio::time::Instant,
+) -> Result<Value, String> {
     let name = cmd
         .get("name")
         .and_then(|v| v.as_str())
@@ -12149,6 +12191,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 item_ref: cmd.get("credentialItem").and_then(|v| v.as_str()),
                 url: url_override,
             },
+            deadline,
         )
         .await?;
         auth::AuthProfile {
@@ -14721,7 +14764,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
             ]
         });
 
-        let err = handle_auth_login(&cmd, &mut state).await.unwrap_err();
+        let err = handle_auth_login(
+            &cmd,
+            &mut state,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err, "Browser not launched");
         assert!(!marker_path.exists());
@@ -14765,7 +14814,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
             ]
         });
 
-        let err = handle_auth_login(&cmd, &mut state).await.unwrap_err();
+        let err = handle_auth_login(
+            &cmd,
+            &mut state,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err, AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR);
         assert!(!marker_path.exists());

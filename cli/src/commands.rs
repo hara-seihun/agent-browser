@@ -1061,7 +1061,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
-                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--timeout <ms>] [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: AUTH_LOGIN_USAGE,
@@ -1073,10 +1073,29 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
                     let mut no_navigate = false;
+                    let mut timeout_ms = flags.default_timeout.unwrap_or(180_000);
 
                     let mut j = 2;
                     while j < rest.len() {
                         match rest[j] {
+                            "--timeout" => {
+                                let raw = rest.get(j + 1).ok_or_else(|| {
+                                    ParseError::MissingArguments {
+                                        context: "auth login --timeout".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    }
+                                })?;
+                                timeout_ms = raw
+                                    .parse::<u64>()
+                                    .ok()
+                                    .filter(|ms| *ms > 0 && *ms <= 300_000)
+                                    .ok_or_else(|| ParseError::InvalidValue {
+                                        message: "auth login timeout must be 1..300000ms"
+                                            .to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    })?;
+                                j += 1;
+                            }
                             "--no-navigate" => {
                                 if rest
                                     .get(j + 1)
@@ -1168,7 +1187,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         j += 1;
                     }
 
-                    let mut cmd = json!({ "id": id, "action": "auth_login", "name": name });
+                    let mut cmd = json!({ "id": id, "action": "auth_login", "name": name, "timeout": timeout_ms });
                     if let Some(provider) = credential_provider {
                         cmd["credentialProvider"] = json!(provider);
                     }
@@ -6460,6 +6479,22 @@ mod tests {
         assert_eq!(cmd["passwordSelector"], "#password");
         assert_eq!(cmd["submitSelector"], "input[type=submit]");
         assert!(cmd.get("noNavigate").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_total_budget() {
+        let cmd = parse_command(&args("auth login fixture"), &default_flags()).unwrap();
+        assert_eq!(cmd["timeout"], 180000);
+        let cmd =
+            parse_command(&args("auth login fixture --timeout 250"), &default_flags()).unwrap();
+        assert_eq!(cmd["timeout"], 250);
+        for value in ["0", "300001", "unknown", "-1"] {
+            assert!(parse_command(
+                &args(&format!("auth login fixture --timeout {}", value)),
+                &default_flags()
+            )
+            .is_err());
+        }
     }
 
     #[test]

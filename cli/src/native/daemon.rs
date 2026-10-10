@@ -556,7 +556,19 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = dispatch_command(&cmd, &state, &idle_activity).await;
+                let response = if action == "auth_login" {
+                    let command = dispatch_command(&cmd, &state, &idle_activity);
+                    tokio::pin!(command);
+                    tokio::select! {
+                        response = &mut command => response,
+                        next = buf_reader.fill_buf() => match next {
+                            Ok(bytes) if !bytes.is_empty() => command.await,
+                            _ => return,
+                        },
+                    }
+                } else {
+                    dispatch_command(&cmd, &state, &idle_activity).await
+                };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
@@ -579,6 +591,34 @@ async fn handle_connection<S>(
             Err(_) => break,
         }
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn test_auth_disconnect_cancels_queued_request() {
+    use tokio::io::AsyncWriteExt;
+    let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+    let held = state.lock().await;
+    let (mut client, server) = tokio::io::duplex(4096);
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        handle_connection(
+            server,
+            task_state,
+            Arc::new(IdleActivity::new()),
+            None,
+            Arc::new(Notify::new()),
+        )
+        .await;
+    });
+    client.write_all(b"{\"id\":\"fixture\",\"action\":\"auth_login\",\"name\":\"fixture\",\"timeout\":1000}\n").await.unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_millis(500), task)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(held);
+    assert!(state.try_lock().is_ok());
 }
 
 fn looks_like_http(line: &str) -> bool {

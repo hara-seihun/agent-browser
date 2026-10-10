@@ -1490,9 +1490,10 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile within one total operation deadline. Lost responses are not replayed.",
             json!({
                 "name": { "type": "string" },
+                "loginTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 300000, "description": "Total login budget, including credential lookup and navigation; initial budget is 180000ms unless a default action timeout is configured." },
                 "noNavigate": {
                     "type": "boolean",
                     "default": false,
@@ -3259,6 +3260,10 @@ fn call_auth_save(arguments: &Value) -> Result<Value, ProtocolError> {
 fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let name = required_string(arguments, "name")?;
     let mut args = vec!["auth".to_string(), "login".to_string(), name];
+    if let Some(timeout) = optional_u64(arguments, "loginTimeoutMs")? {
+        args.push("--timeout".to_string());
+        args.push(timeout.to_string());
+    }
     if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
         args.push("--no-navigate".to_string());
     }
@@ -3266,7 +3271,13 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 }
 
 fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, auth_login_args(arguments)?, None)
+    let args = auth_login_args(arguments)?;
+    let mut effective = arguments.clone();
+    if effective.get("timeoutMs").is_none() {
+        let budget = optional_u64(arguments, "loginTimeoutMs")?.unwrap_or(180_000);
+        effective["timeoutMs"] = json!(budget.saturating_add(10_000));
+    }
+    call_cli_tool(&effective, args, None)
 }
 
 fn tab_state_args(arguments: &Value, saving: bool) -> Result<Vec<String>, ProtocolError> {
@@ -4377,6 +4388,14 @@ mod tests {
         assert_eq!(
             auth_login_args(&json!({ "name": "work", "noNavigate": true })).unwrap(),
             vec!["auth", "login", "work", "--no-navigate"]
+        );
+        assert_eq!(
+            auth_login["inputSchema"]["properties"]["loginTimeoutMs"]["maximum"],
+            300000
+        );
+        assert_eq!(
+            auth_login_args(&json!({"name":"fixture", "loginTimeoutMs":250})).unwrap(),
+            vec!["auth", "login", "fixture", "--timeout", "250"]
         );
     }
 

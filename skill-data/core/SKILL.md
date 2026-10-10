@@ -235,8 +235,10 @@ agent-browser auth save my-app --url https://app.example.com/login \
   --username user@example.com --password-stdin
 # (type password, Ctrl+D)
 
-agent-browser auth login my-app    # fills + clicks, waits for form
+agent-browser auth login my-app --timeout 180000    # one budget for lookup, form and submit
 ```
+
+Login stages share one total deadline (initial 180000ms, or configured action timeout; `--timeout` accepts 1..300000ms). Set an outer tool timeout beyond that budget plus 10 seconds. Lost responses are not replayed; dispatched effects may still settle. Disconnecting a login caller cancels its remaining stages and credential subprocess group.
 
 By default, `auth login` navigates to the effective credential URL. If an in-page click, challenge clearance, consent dismissal, or similar setup revealed the login form, preserve that state with `--no-navigate`:
 
