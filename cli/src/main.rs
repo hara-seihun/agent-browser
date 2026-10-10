@@ -655,7 +655,7 @@ fn run_session_id(args: &[String], json_mode: bool) {
 fn run_session_info(session: &str, json_mode: bool) {
     let inventory = walk_daemons();
     let active = inventory.sessions.iter().find(|s| s.name == session);
-    let runtime = active.and_then(|_| {
+    let runtime = active.map(|_| {
         send_command(
             json!({
                 "id": gen_id(),
