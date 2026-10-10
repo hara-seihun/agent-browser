@@ -7,7 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn session_info(response: Value) -> Value {
+fn session_info(response: Option<Value>) -> Value {
     let directory = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(directory.path().join("synthetic.sock")).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -40,7 +40,9 @@ fn session_info(response: Value) -> Value {
             .unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(request["action"], "session_info");
-        writeln!(stream, "{response}").unwrap();
+        if let Some(response) = response {
+            writeln!(stream, "{response}").unwrap();
+        }
     });
     let output = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
         .args(["--json", "--session", "synthetic", "session", "info"])
@@ -59,9 +61,9 @@ fn session_info(response: Value) -> Value {
 #[test]
 fn session_info_preserves_typed_daemon_failure() {
     for code in ["daemon_busy", "metadata_unavailable"] {
-        let response = session_info(
+        let response = session_info(Some(
             json!({"success":false,"code":code,"error":"Synthetic operation unavailable"}),
-        );
+        ));
         assert_eq!(response["success"], false);
         assert_eq!(response["code"], code);
         assert_eq!(response["error"], "Synthetic operation unavailable");
@@ -71,9 +73,22 @@ fn session_info_preserves_typed_daemon_failure() {
 }
 
 #[test]
+fn session_info_transport_failure_is_not_runtime_success() {
+    let response = session_info(None);
+    assert_eq!(response["success"], false);
+    assert_eq!(response["code"], "daemon_metadata_transport");
+    assert!(response["error"]
+        .as_str()
+        .unwrap()
+        .contains("outcome unknown; not replayed"));
+    assert!(response.get("data").is_none());
+}
+
+#[test]
 fn session_info_keeps_confirmed_runtime_metadata() {
-    let response =
-        session_info(json!({"success":true,"data":{"restoreKey":null,"browserLaunched":true}}));
+    let response = session_info(Some(
+        json!({"success":true,"data":{"restoreKey":null,"browserLaunched":true}}),
+    ));
     assert_eq!(response["success"], true);
     assert_eq!(response["data"]["active"], true);
     assert_eq!(response["data"]["runtime"]["browserLaunched"], true);

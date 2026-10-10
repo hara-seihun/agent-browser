@@ -349,7 +349,7 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
-`--timeout` accepts 1..300000ms and covers all login stages, including credential retrieval. The initial budget is 180000ms or an explicitly configured action timeout. Outer tools must allow that plus 10 seconds. Interrupted/lost responses have unknown effects and are never automatically resent; caller disconnect cancels subsequent stages.
+`--timeout` accepts 1..300000ms and covers all login stages, including credential retrieval. The initial budget is 180000ms or an explicitly configured action timeout. Outer tools must allow that plus 10 seconds. Interrupted/lost responses have unknown effects and are never automatically resent; caller disconnect cancels subsequent stages. `session info` preserves transport failure as `daemon_metadata_transport`, not successful empty runtime metadata.
 
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 

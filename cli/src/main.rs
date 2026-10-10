@@ -663,19 +663,31 @@ fn run_session_info(session: &str, json_mode: bool) {
             }),
             session,
         )
-        .ok()
     });
+    let transport_error = runtime
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .cloned();
+    let runtime = runtime.and_then(Result::ok);
 
     let runtime_data = runtime.as_ref().and_then(|resp| resp.data.clone());
-    let runtime_error = runtime.as_ref().and_then(|resp| {
-        if resp.success {
-            None
-        } else {
-            resp.error.clone()
-        }
+    let runtime_error = transport_error.clone().or_else(|| {
+        runtime.as_ref().and_then(|resp| {
+            if resp.success {
+                None
+            } else {
+                resp.error.clone()
+            }
+        })
     });
 
     if json_mode {
+        if let Some(error) = transport_error {
+            print_json_value(
+                json!({"success":false, "code":"daemon_metadata_transport", "error":error}),
+            );
+            return;
+        }
         if let Some(response) = runtime.as_ref().filter(|response| !response.success) {
             print_json_value(
                 serde_json::to_value(response).expect("Response serialization failed"),

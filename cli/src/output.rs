@@ -2726,6 +2726,7 @@ Login behavior:
   unless a default action timeout is configured). IPC allows 10s extra.
   Caller disconnect cancels later stages; lost replies are not replayed.
   Dispatched effects may still settle; inspect before another login.
+  session info reports daemon_metadata_transport on lost metadata replies.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
   Selector wait timeout follows the default action timeout.
