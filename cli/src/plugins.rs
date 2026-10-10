@@ -1625,6 +1625,7 @@ printf '%s' "$5"
     #[tokio::test]
     async fn successful_credential_invocation_retires_descendants() {
         let mut fixture = LockHolderPlugin::new(true);
+        fixture.plugin.capabilities = vec![CAPABILITY_CREDENTIAL_READ.to_string()];
         fixture.complete_with(
             r#"{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass"}}"#,
         );
