@@ -382,6 +382,7 @@ mod tests {
         state: DaemonState,
         generation: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         fills: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        active_membership: std::sync::Arc<std::sync::atomic::AtomicBool>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -389,7 +390,7 @@ mod tests {
         async fn new() -> Self {
             use futures_util::{SinkExt, StreamExt};
             use std::sync::{
-                atomic::{AtomicUsize, Ordering},
+                atomic::{AtomicBool, AtomicUsize, Ordering},
                 Arc,
             };
             use tokio_tungstenite::tungstenite::Message;
@@ -397,6 +398,8 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             let generation = Arc::new(AtomicUsize::new(1));
             let fills = Arc::new(AtomicUsize::new(0));
+            let active_membership = Arc::new(AtomicBool::new(true));
+            let server_membership = active_membership.clone();
             let server_generation = generation.clone();
             let server_fills = fills.clone();
             let server = tokio::spawn(async move {
@@ -412,10 +415,13 @@ mod tests {
                         "Target.getTargetInfo" => json!({"targetInfo":{"targetId":"page"}}),
                         "Page.getFrameTree" => {
                             let loader = format!("doc{}", server_generation.load(Ordering::SeqCst));
+                            let active = server_membership.load(Ordering::SeqCst);
                             if cmd["sessionId"] == "child-session" {
-                                json!({"frameTree":{"frame":{"id":"child", "loaderId":loader, "url":"https://child.test"}}})
+                                json!({"frameTree":{"frame":{"id":"child", "parentId":if active {"root"} else {"background-root"}, "loaderId":loader, "url":"https://child.test"}}})
+                            } else if active {
+                                json!({"frameTree":{"frame":{"id":"root", "loaderId":"topdoc", "url":"https://fixture.test"}, "childFrames":[{"frame":{"id":"child", "parentId":"root", "loaderId":loader, "url":"https://child.test"}}]}})
                             } else {
-                                json!({"frameTree":{"frame":{"id":"root", "loaderId":"topdoc", "url":"https://fixture.test"}, "childFrames":[{"frame":{"id":"child", "loaderId":loader, "url":"https://child.test"}}]}})
+                                json!({"frameTree":{"frame":{"id":"root", "loaderId":"topdoc", "url":"https://fixture.test"}}})
                             }
                         }
                         "Runtime.evaluate" => {
@@ -462,6 +468,7 @@ mod tests {
                 state,
                 generation,
                 fills,
+                active_membership,
                 server,
             }
         }
@@ -496,14 +503,40 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut fixture = Fixture::new().await;
         let generation = fixture.generation.clone();
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver_lookups = lookups.clone();
         let error = fill_with_resolver(
             &mut fixture.state,
             &Fixture::req(),
             Instant::now() + std::time::Duration::from_secs(2),
             |_| async move {
+                resolver_lookups.fetch_add(1, Ordering::SeqCst);
                 generation.store(2, Ordering::SeqCst);
                 Ok("synthetic-private-value".into())
             },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, BINDING);
+        assert_eq!(
+            lookups.load(Ordering::SeqCst),
+            1,
+            "loader drift must be rejected after lookup, not before it"
+        );
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn cached_iframe_on_other_page_never_looks_up() {
+        use std::sync::atomic::Ordering;
+        let mut fixture = Fixture::new().await;
+        fixture.active_membership.store(false, Ordering::SeqCst);
+        let error = fill_with_resolver(
+            &mut fixture.state,
+            &Fixture::req(),
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async { panic!("cached OOPIF belonging to another page must not resolve secrets") },
         )
         .await
         .unwrap_err();
