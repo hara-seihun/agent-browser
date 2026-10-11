@@ -2937,6 +2937,7 @@ async fn execute_command_inner(
     // and MCP. Inventory errors do not downgrade to an unprotected response.
     let observation_session = if let Some(mgr) = state.browser.as_ref() {
         match mgr.active_session_id() {
+            Ok(session) if action == "auth_fill" => Some(session.to_string()),
             Ok(session)
                 if !matches!(
                     action,
@@ -2946,7 +2947,6 @@ async fn execute_command_inner(
                         | "tab_switch"
                         | "tab_new"
                         | "session_info"
-                        | "auth_fill"
                         | "session_list"
                         | "stream_disable"
                 ) =>
@@ -3277,14 +3277,17 @@ async fn execute_command_inner(
     if let Some(session) = observation_session {
         // Refresh after effects such as typing. The old and new values are
         // protected before returning JSON, diagnostics or persisted snapshots.
-        if let Some(mgr) = state.browser.as_ref() {
-            match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await {
-                Ok(current) => state
-                    .sensitive_observations
-                    .entry(session.clone())
-                    .or_default()
-                    .merge(current),
-                Err(error) => return error_response(&id, &error),
+        if action != "auth_fill" {
+            if let Some(mgr) = state.browser.as_ref() {
+                match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await
+                {
+                    Ok(current) => state
+                        .sensitive_observations
+                        .entry(session.clone())
+                        .or_default()
+                        .merge(current),
+                    Err(error) => return error_response(&id, &error),
+                }
             }
         }
         if let Some(known) = state.sensitive_observations.get(&session) {
@@ -13087,7 +13090,10 @@ fn error_response(id: &str, error: &str) -> Value {
     } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
     } else if let Some((code, _)) = error.split_once(": ") {
-        if code.starts_with("webmcp_") || code.starts_with("tab_state_") {
+        if code.starts_with("webmcp_")
+            || code.starts_with("tab_state_")
+            || code.starts_with("auth_fill_")
+        {
             resp["code"] = json!(code);
         }
     }
@@ -13900,7 +13906,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sensitive_restore_refusal_precedes_browser_observation() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
         let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
         state.session_name = Some("synthetic-payment".into());
         state
             .sensitive_observations
@@ -13923,6 +13933,16 @@ mod tests {
         assert!(!refusal.contains("Synthetic-private-value"));
         assert_eq!(state.restore_save_status, "sensitive_output_unsupported");
         assert!(state.restore_saved_path.is_none());
+        assert_eq!(client.pending_len().await, 0);
+        assert!(fixture.commands.try_recv().is_err());
+        let info = execute_command(
+            &json!({"id":"payment-metadata", "action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        client.close().await;
+        fixture.server.await.unwrap();
     }
 
     #[tokio::test]
