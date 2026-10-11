@@ -1608,7 +1608,8 @@ impl DaemonState {
         let has_proxy_creds = self.proxy_credentials.read().await.is_some();
         let controls_active = filter.is_some() || has_proxy_creds;
         let mgr = self.browser.as_ref().ok_or("Browser not launched")?;
-        // Per-session ordering is mandatory; independent frame setup is not.
+        // Domain admissions are independent; controls and resume depend on all
+        // mandatory replies. Parallel frames and domains share the original budget.
         let outcomes = futures_util::future::join_all(pending.into_iter().map(|session| {
             let filter = filter.as_ref();
             async move {
@@ -1616,13 +1617,16 @@ impl DaemonState {
                     .client
                     .observation_progress
                     .track(super::observation_progress::Phase::FrameSetup, async {
-                        mgr.prepare_iframe_domains_pub(&session).await?;
-                        mgr.client
-                            .send_command_no_params("DOM.enable", Some(&session))
-                            .await?;
-                        mgr.client
-                            .send_command_no_params("Accessibility.enable", Some(&session))
-                            .await?;
+                        let (domains, dom, accessibility) = tokio::join!(
+                            mgr.prepare_iframe_domains_pub(&session),
+                            mgr.client
+                                .send_command_no_params("DOM.enable", Some(&session)),
+                            mgr.client
+                                .send_command_no_params("Accessibility.enable", Some(&session)),
+                        );
+                        domains?;
+                        dom?;
+                        accessibility?;
                         if controls_active {
                             install_network_controls_for_session(
                                 &mgr.client,
@@ -4942,80 +4946,91 @@ async fn reconcile_sensitive_tab(
                 }
                 Err(error) => return Err(error.into_message()),
             };
-        let represented = gap.unattached_frames();
-        let live: GetTargetsResult = mgr
-            .client
-            .observation_progress
-            .track(
-                super::observation_progress::Phase::RecoveryTargets,
-                mgr.client
-                    .send_command_typed("Target.getTargets", &json!({}), None),
-            )
-            .await
-            .map_err(|_| {
-                format!(
-                    "{}: live frame target inventory unavailable",
-                    super::sensitive::UNSUPPORTED
-                )
-            })?;
-        let client = mgr.client.clone();
-        let mut candidates: Vec<_> = represented
-            .into_iter()
-            .filter(|frame| {
-                let matches: Vec<_> = live
-                    .target_infos
-                    .iter()
-                    .filter(|target| &target.target_id == frame)
-                    .collect();
-                matches.len() == 1 && matches[0].target_type == "iframe"
-            })
-            .collect();
-        candidates.sort();
-        for frame in &candidates {
-            if !state.iframe_sessions.contains_key(frame) {
-                state
-                    .pending_iframe_attachments
-                    .entry(frame.clone())
-                    .or_insert_with(|| {
-                        let client = client.clone();
-                        let target_id = frame.clone();
-                        PendingIframeAttachment {
-                            task: tokio::spawn(async move {
-                                client
-                                    .send_command_typed(
-                                        "Target.attachToTarget",
-                                        &AttachToTargetParams {
-                                            target_id,
-                                            flatten: true,
-                                        },
-                                        None,
-                                    )
-                                    .await
-                            }),
-                        }
-                    });
-            }
-        }
-        // Await owned tasks by reference. Cancelling observation retains their
-        // responses and the setup custody for every successful attachment.
-        for frame in candidates {
-            if state.pending_iframe_attachments.contains_key(&frame) {
-                state.finish_iframe_attachment(&frame).await?;
-            }
-        }
-        state.prepare_pending_iframes().await?;
-        // Dynamic children may appear during setup. Complete reinventory, not
-        // an input replay, is the only transition to admitted observation.
-        state
-            .observation_progress
-            .clone()
-            .track(
-                super::observation_progress::Phase::DrainEvents,
-                state.drain_cdp_events_background(),
-            )
-            .await?;
+        recover_sensitive_frames(state, gap).await?;
         tokio::task::yield_now().await;
     }
+}
+
+/// Recover only the already-proven coverage gap. The caller discards its failed
+/// projection and inventories again; no duplicate throwaway observation is needed.
+async fn recover_sensitive_frames(
+    state: &mut DaemonState,
+    gap: super::sensitive::CoverageGap,
+) -> Result<(), String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let represented = gap.unattached_frames();
+    let live: GetTargetsResult = mgr
+        .client
+        .observation_progress
+        .track(
+            super::observation_progress::Phase::RecoveryTargets,
+            mgr.client
+                .send_command_typed("Target.getTargets", &json!({}), None),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "{}: live frame target inventory unavailable",
+                super::sensitive::UNSUPPORTED
+            )
+        })?;
+    let client = mgr.client.clone();
+    let mut candidates: Vec<_> = represented
+        .into_iter()
+        .filter(|frame| {
+            let matches: Vec<_> = live
+                .target_infos
+                .iter()
+                .filter(|target| &target.target_id == frame)
+                .collect();
+            matches.len() == 1 && matches[0].target_type == "iframe"
+        })
+        .collect();
+    candidates.sort();
+    for frame in &candidates {
+        if !state.iframe_sessions.contains_key(frame) {
+            state
+                .pending_iframe_attachments
+                .entry(frame.clone())
+                .or_insert_with(|| {
+                    let client = client.clone();
+                    let target_id = frame.clone();
+                    PendingIframeAttachment {
+                        task: tokio::spawn(async move {
+                            client
+                                .send_command_typed(
+                                    "Target.attachToTarget",
+                                    &AttachToTargetParams {
+                                        target_id,
+                                        flatten: true,
+                                    },
+                                    None,
+                                )
+                                .await
+                        }),
+                    }
+                });
+        }
+    }
+    // Await owned tasks by reference. Cancelling observation retains their
+    // responses and the setup custody for every successful attachment.
+    for frame in candidates {
+        if state.pending_iframe_attachments.contains_key(&frame) {
+            state.finish_iframe_attachment(&frame).await?;
+        }
+    }
+    state.prepare_pending_iframes().await?;
+    // Dynamic children may appear during setup. Complete reinventory, not
+    // an input replay, is the only transition to admitted observation.
+    state
+        .observation_progress
+        .clone()
+        .track(
+            super::observation_progress::Phase::DrainEvents,
+            state.drain_cdp_events_background(),
+        )
+        .await?;
+    Ok(())
 }
 
 fn require_restore_export_allowed(state: &mut DaemonState) -> Result<(), String> {
@@ -6098,9 +6113,17 @@ async fn protected_snapshot(
             )
             .await
             {
-                Ok(tree) => return Ok((tree, refs)),
-                Err(super::sensitive::InventoryError::Coverage(_)) => {
-                    observe_sensitive_tab_until(state, session, deadline).await?;
+                Ok((tree, observation)) => {
+                    state.active_iframe_sessions = observation.frame_sessions.clone();
+                    state
+                        .sensitive_observations
+                        .entry(session.to_owned())
+                        .or_default()
+                        .merge(observation);
+                    return Ok((tree, refs));
+                }
+                Err(super::sensitive::InventoryError::Coverage(gap)) => {
+                    recover_sensitive_frames(state, gap).await?;
                 }
                 Err(super::sensitive::InventoryError::Changed(_)) => {
                     progress
@@ -14953,6 +14976,167 @@ mod tests {
         assert_eq!(reads.len(), 6);
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_cloud_rtt_cold_and_recovered_frames_snapshot() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 3, |n| {
+                if n == 0 {
+                    vec![1, 2, 3]
+                } else {
+                    vec![]
+                }
+            });
+            for n in [2, 3] {
+                let frame = format!("frame-{n}");
+                state.iframe_sessions.remove(&frame);
+                inventory.targets.push((frame.clone(), "iframe".into()));
+                for node in inventory.ax_trees.get_mut(&frame).unwrap()["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    if let Some(value) = node["value"]["value"].as_str() {
+                        node["value"]["value"] = json!(value.replace(
+                            &format!("session-{n}"),
+                            &format!("synthetic-frame-frame-{n}")
+                        ));
+                    }
+                }
+            }
+            for method in [
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "WebMCP.enable",
+                "Target.setAutoAttach",
+                "DOM.enable",
+                "Accessibility.enable",
+                "DOM.getDocument",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(220));
+            }
+            for method in [
+                "Page.getFrameTree",
+                "Target.getTargets",
+                "Target.attachToTarget",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(110));
+            }
+            for method in [
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+                "Accessibility.getFullAXTree",
+                "Runtime.evaluate",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(10));
+            }
+        }
+        state.pending_iframe_setup.insert("session-1".into());
+        state.browser = Some(fixture.manager);
+        let started = std::time::Instant::now();
+        let (tree, refs) =
+            protected_snapshot(&mut state, &session, &SnapshotOptions::default(), None)
+                .await
+                .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!tree.contains("Synthetic-"));
+        assert_eq!(tree.matches("[redacted: cc-number]").count(), 4);
+        assert!(state.pending_iframe_setup.is_empty());
+        assert_eq!(state.active_iframe_sessions.len(), 3);
+        assert!(state.sensitive_observations[&session].has_sensitive());
+        for n in 1..=3 {
+            assert!(refs
+                .entries_sorted()
+                .iter()
+                .any(|(_, entry)| entry.name == format!("frame-{n}-cc-number")
+                    && entry.frame_id.as_deref() == Some(format!("frame-{n}").as_str())));
+        }
+        let mut deep = 0;
+        let mut attached = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["sessionId"], "unrepresented-session");
+            let method = command["method"].as_str().unwrap();
+            assert!(!method.starts_with("Input.") && method != "Page.navigate");
+            if method == "DOM.getDocument" && command["params"]["depth"] == -1 {
+                deep += 1;
+            }
+            if method == "Target.attachToTarget" {
+                attached += 1;
+            }
+        }
+        // One discarded incomplete inventory and one complete snapshot, with
+        // no duplicate getter inventory before/after the known coverage gap.
+        assert_eq!((deep, attached), (6, 2));
+        client.settle_object_cleanup().await.unwrap();
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_cloud_rtt_setup_all_domains_before_resume() {
+        for held in [
+            "Page.enable",
+            "Runtime.enable",
+            "Network.enable",
+            "Target.setAutoAttach",
+            "DOM.enable",
+            "Accessibility.enable",
+        ] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            fixture.frame_inventory.lock().unwrap().hold_method = Some(held.into());
+            let client = fixture.manager.client.clone();
+            let mut state = DaemonState::new();
+            state.browser = Some(fixture.manager);
+            state.pending_iframe_setup.insert("owned-frame".into());
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                state.prepare_pending_iframes()
+            )
+            .await
+            .is_err());
+            let mut seen = HashSet::new();
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap().to_owned();
+                assert_ne!(method, "Runtime.runIfWaitingForDebugger");
+                seen.insert(method);
+            }
+            for method in [
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "WebMCP.enable",
+                "Target.setAutoAttach",
+                "DOM.enable",
+                "Accessibility.enable",
+            ] {
+                assert!(seen.contains(method), "missing {method} while {held} held");
+            }
+            assert!(state.pending_iframe_setup.contains("owned-frame"));
+            fixture.frame_inventory.lock().unwrap().hold_method = None;
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            state.prepare_pending_iframes().await.unwrap();
+            assert!(state.pending_iframe_setup.is_empty());
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[tokio::test]

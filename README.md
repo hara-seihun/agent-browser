@@ -2077,3 +2077,7 @@ When enabled, agent-browser connects to an AgentCore cloud browser session inste
 ## License
 
 Apache-2.0
+
+### Protected cloud frame admission
+
+Pending iframe domain admissions overlap within each exact session and across frames. All mandatory domains and child auto-attachment must be confirmed, then network controls installed, before any debugger resume. Snapshot coverage recovery uses the already-proven missing-frame gap instead of constructing throwaway getter inventories; it still discards incomplete projections and takes a fresh complete, identity-validated snapshot. Setup, recovery, controls and projections remain inside the same original two-second deadline. Unknown coverage or missed deadline refuses; no partial success or longer cloud-browser budget is introduced.

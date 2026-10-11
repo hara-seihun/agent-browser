@@ -248,6 +248,7 @@ pub async fn take_snapshot(
         &std::collections::HashSet::new(),
     )
     .await
+    .map(|(output, _)| output)
 }
 
 pub(crate) async fn take_snapshot_with_controls(
@@ -259,7 +260,7 @@ pub(crate) async fn take_snapshot_with_controls(
     iframe_sessions: &HashMap<String, String>,
     private_controls: &HashMap<(String, i64), String>,
     private_text_nodes: &std::collections::HashSet<(String, i64)>,
-) -> Result<String, super::sensitive::InventoryError> {
+) -> Result<(String, super::sensitive::Observation), super::sensitive::InventoryError> {
     let (mut observation, batch) =
         super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
             collect_snapshot_batch(client, options, frame_id, context)
@@ -285,7 +286,7 @@ pub(crate) async fn take_snapshot_with_controls(
         &mut std::collections::HashSet::new(),
     )?;
     *ref_map = candidate_refs;
-    Ok(output)
+    Ok((output, observation))
 }
 
 struct SnapshotBatch {

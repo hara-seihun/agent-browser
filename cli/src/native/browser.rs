@@ -819,9 +819,30 @@ impl BrowserManager {
         self.prepare_domains(session_id).await
     }
 
-    /// Protected iframe admission requires confirmed child auto-attachment.
+    /// Independent CDP domain admissions share one RTT. Child auto-attachment
+    /// must be confirmed with all mandatory domains before the caller resumes.
     pub async fn prepare_iframe_domains_pub(&self, session_id: &str) -> Result<(), String> {
-        self.prepare_domains_with_attachment(session_id, true).await
+        let attachment = self.client.send_command(
+            "Target.setAutoAttach",
+            Some(json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true})),
+            Some(session_id),
+        );
+        let (page, runtime, network, _, attachment) = tokio::join!(
+            self.client
+                .send_command_no_params("Page.enable", Some(session_id)),
+            self.client
+                .send_command_no_params("Runtime.enable", Some(session_id)),
+            self.client
+                .send_command_no_params("Network.enable", Some(session_id)),
+            self.client
+                .send_command_no_params("WebMCP.enable", Some(session_id)),
+            attachment,
+        );
+        page?;
+        runtime?;
+        network?;
+        attachment?;
+        Ok(())
     }
 
     pub async fn resume_if_waiting_pub(&self, session_id: &str) -> Result<(), String> {

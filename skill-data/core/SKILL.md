@@ -559,3 +559,7 @@ That pulls in:
 ## Disabled click admission
 
 Native direct/ref/semantic clicks, double-clicks and `--new-tab` refuse disabled controls before pointer input or tab creation. Inherited HTML disabled and `aria-disabled=true` on the target or an ancestor return JSON `code: "click_disabled"` and `data.effectDispatched: false`. Repair the missing form prerequisite and take a fresh snapshot. Gesture success is not provider-effect confirmation; uncertain dispatched effects are never replayed.
+
+## Cloud protected-frame scheduling
+
+Native pending iframe domain admissions share one RTT wave; mandatory domain/child-attachment confirmation and network controls precede debugger resume. Snapshot recovery consumes its proven coverage gap directly and then takes a fresh complete inventory/projection. All stages retain the original two-second deadline, complete redaction and exact document/frame validation; timeout remains an explicit refusal, not partial output.
