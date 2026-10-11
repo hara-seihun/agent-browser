@@ -414,13 +414,28 @@ pub async fn observe(
         collect_document_frames(root, &session, &mut covered, &mut owners);
         collect_nodes(root, &session, &mut controls, &mut HashSet::new());
     }
-    if frames
+    let mut missing_owners: Vec<_> = owners
         .iter()
-        .any(|frame| covered.get(&frame.frame_id) != Some(&frame.session_id))
-        || owners.iter().any(|frame| !covered.contains_key(frame))
-    {
+        .filter(|frame| !covered.contains_key(*frame))
+        .cloned()
+        .collect();
+    let mut mismatched_frames: Vec<_> = frames
+        .iter()
+        .filter(|frame| covered.get(&frame.frame_id) != Some(&frame.session_id))
+        .map(|frame| {
+            (
+                &frame.frame_id,
+                &frame.session_id,
+                covered.get(&frame.frame_id),
+            )
+        })
+        .collect();
+    if !missing_owners.is_empty() || !mismatched_frames.is_empty() {
+        missing_owners.sort();
+        mismatched_frames.sort();
         return Err(format!(
-            "{UNSUPPORTED}: frame document coverage unavailable"
+            "{UNSUPPORTED}: frame document coverage unavailable: {}",
+            json!({ "missingOwnerFrameIds": missing_owners, "mismatchedFrameSessions": mismatched_frames, "coveredFrameSessions": covered, "attachedFrameSessions": iframe_sessions })
         ));
     }
     let mut observation = Observation::default();

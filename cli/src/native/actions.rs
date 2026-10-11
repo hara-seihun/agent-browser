@@ -4723,11 +4723,10 @@ async fn observe_sensitive_tab(
     };
     match first {
         Err(error)
-            if error
-                == format!(
-                    "{}: frame document coverage unavailable",
-                    super::sensitive::UNSUPPORTED
-                ) =>
+            if error.starts_with(&format!(
+                "{}: frame document coverage unavailable:",
+                super::sensitive::UNSUPPORTED
+            )) =>
         {
             // A browser round-trip orders already-created target notifications
             // before the drain. Merely draining the queue can race its reader.
