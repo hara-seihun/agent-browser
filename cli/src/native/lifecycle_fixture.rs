@@ -69,6 +69,7 @@ pub(crate) struct FrameInventory {
     pub ax_trees: HashMap<String, Value>,
     pub unreadable_ax: HashSet<String>,
     pub cursor_frames: HashSet<String>,
+    pub invalid_cursor_paths: HashSet<String>,
     pub session_reply_delays: HashMap<(String, String), std::time::Duration>,
     pub objects: HashMap<(String, String), String>,
     held: Vec<Value>,
@@ -291,7 +292,13 @@ impl SyntheticCdp {
                                         match inventory.documents.get(&root_frame).and_then(
                                             |document| fixture_structural_selector(document, 400),
                                         ) {
-                                            Some(selector) => {
+                                            Some(mut selector) => {
+                                                if inventory
+                                                    .invalid_cursor_paths
+                                                    .contains(&root_frame)
+                                                {
+                                                    selector.push_str(" > missing:nth-of-type(1)");
+                                                }
                                                 json!({"result":{"type":"object","value":[{"selector":selector,"text":format!("cursor-{root_frame}"),"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
                                             }
                                             None => {

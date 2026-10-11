@@ -14736,6 +14736,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_protected_inventory_uninventoried_cursor_path_refuses_without_refs_or_queries() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                if n == 0 {
+                    vec![1]
+                } else {
+                    vec![]
+                }
+            });
+            inventory.invalid_cursor_paths.insert("frame-1".into());
+        }
+        let mut refs = RefMap::new();
+        refs.add("e1".into(), Some(999), "button", "previous", None);
+        refs.set_next_ref_num(2);
+        let error = snapshot::take_snapshot(
+            &client,
+            &session,
+            &SnapshotOptions::default(),
+            &mut refs,
+            None,
+            &state.iframe_sessions,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error,
+            super::super::sensitive::InventoryError::Unavailable(_)
+        ));
+        assert!(!error.into_message().contains("Synthetic-"));
+        assert_eq!(refs.entries_sorted().len(), 1);
+        assert_eq!(refs.get("e1").unwrap().name, "previous");
+        assert_eq!(refs.next_ref_num(), 2);
+        client.settle_object_cleanup().await.unwrap();
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert_eq!(client.object_cleanup_len().await, 0);
+        assert_eq!(client.pending_len().await, 0);
+        let mut projections = 0;
+        let mut reads = HashSet::new();
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            assert_ne!(command["sessionId"], "unrepresented-session");
+            assert!(!method.starts_with("Input.") && method != "Page.navigate");
+            assert!(!matches!(method, "DOM.querySelector" | "DOM.describeNode"));
+            if method == "Runtime.evaluate" {
+                projections += 1;
+            }
+            if method == "Runtime.callFunctionOn" {
+                assert!(reads.insert((
+                    command["sessionId"].to_string(),
+                    command["params"]["objectId"].to_string()
+                )));
+            }
+        }
+        assert_eq!(projections, 2);
+        assert_eq!(reads.len(), 6);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_protected_inventory_four_waves_cold_setup_full_snapshot_fit_total_deadline() {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
         let client = fixture.manager.client.clone();
