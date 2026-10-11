@@ -2249,9 +2249,15 @@ Native restore saving has a 2-second limit. On timeout, cleanup continues
 and JSON reports closed:true, saveStatus:timeout, and saveError without
 replacing existing saved state.
 
-If a command or background maintenance holds native daemon state, returns
-immediate JSON success:false with code:daemon_busy. No close was performed;
-the active operation remains owned and in progress. Retry once it settles.
+A foreground command holding native state returns immediate JSON
+success:false code:daemon_busy. No close or command cancellation occurred.
+Background autosave is read-only, bounded to250ms; lifecycle allows300ms
+for its lock. Autosave timeout reports restore.saveStatus:maintenance_timeout,
+retaining previous persisted state. Exited-process cleanup holding state
+reports daemon_maintenance_busy. Background ticks do not drain CDP events,
+create collector tabs, or run pending validators; collector-dependent saves
+defer as autosave_requires_foreground, incomplete observation as
+autosave_observation_incomplete.
 
 Aliases: quit, exit
 
@@ -3117,9 +3123,15 @@ Operations:
 Native info is metadata-only: no browser liveness check, DOM/event drain,
 restore validation, or configuration mutation. It is not a health probe.
 The JSON CLI preserves native failure envelopes and codes, not successful metadata.
-If a command or background maintenance holds daemon state, info, close,
-and confirm return immediate JSON success:false with code:daemon_busy. No close was
-performed; the operation remains owned and in progress. Retry when settled.
+A foreground command holding state makes info, close and confirm return
+immediate success:false code:daemon_busy, without close or cancellation.
+Background autosave is read-only with a250ms deadline; lifecycle allows300ms
+for its lock. Autosave timeout reports restore.saveStatus:maintenance_timeout,
+retaining prior state; exited-process cleanup still owning the lock reports
+daemon_maintenance_busy. Background ticks leave event setup to foreground,
+never create collector tabs or run pending restore validators. Saves requiring
+collectors defer as autosave_requires_foreground; incomplete observation
+reports autosave_observation_incomplete.
 
 Environment:
   AGENT_BROWSER_SESSION    Default session name

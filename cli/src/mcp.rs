@@ -963,7 +963,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLOSE,
             "Close browser",
-            "Close the current browser session through the canonical CLI. Native daemon_busy means no close was performed and the active operation remains owned and in progress; retry when it settles. Restore saving is bounded to two seconds; on timeout cleanup continues with closed:true, saveStatus:timeout, and saveError, preserving existing saved state. External CDP browsers are detached without Browser.close. Owned Browser.close attempts are bounded to two seconds before transport cleanup and owned-process reaping.",
+            "Close the current browser session through the canonical CLI. Native daemon_busy means no close was performed and the foreground command remains owned, never cancelled. Background autosave is read-only and bounded to250ms; lifecycle allows300ms for its lock. Process cleanup still owning state reports daemon_maintenance_busy. Restore saving is bounded to two seconds; on timeout cleanup continues with closed:true, saveStatus:timeout, and saveError, preserving existing saved state. External CDP browsers are detached without Browser.close. Owned Browser.close attempts are bounded to two seconds before transport cleanup and owned-process reaping.",
             json!({
                 "all": { "type": "boolean", "default": false, "description": "Close all active sessions." }
             }),
@@ -1724,7 +1724,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONFIRM,
             "Confirm action",
-            "Approve a pending action. Native daemon_busy leaves the pending confirmation owned and unchanged; retry when the current operation settles. Confirmed session info and close retain the metadata-only and bounded-close contracts.",
+            "Approve a pending action. Native daemon_busy leaves the pending confirmation and foreground command owned and unchanged. Background autosave settles within250ms; lifecycle allows300ms for its lock. Process cleanup still holding state reports daemon_maintenance_busy. Confirmed session info and close retain the metadata-only and bounded-close contracts.",
             json!({ "id": { "type": "string" } }),
             &["id"],
         ),
@@ -1793,7 +1793,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show recorded session, daemon, launch, and restore metadata through the canonical CLI. Native inspection performs no browser liveness check, DOM/event drain, restore validation, or configuration mutation. The JSON CLI preserves native failure envelopes and codes. If a command or background maintenance holds daemon state, returns success:false with code:daemon_busy; the active operation remains owned and in progress. Retry when it settles.",
+            "Show recorded session, daemon, launch, and restore metadata through the canonical CLI. Native inspection performs no browser liveness check, DOM/event drain, restore validation, or configuration mutation. The JSON CLI preserves native failure envelopes and codes. A foreground command holding state returns success:false code:daemon_busy without cancellation. Background read-only autosave is bounded to250ms; lifecycle allows300ms for its lock. Autosave timeout reports restore.saveStatus:maintenance_timeout and retains previous state. Exited-process cleanup still holding the lock returns daemon_maintenance_busy. Background ticks never drain events or create collector targets.",
             json!({}),
             &[],
         ),

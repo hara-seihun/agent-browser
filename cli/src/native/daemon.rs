@@ -4,7 +4,10 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -241,8 +244,9 @@ async fn run_socket_server(
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
+                        let maintenance_active = _maintenance.active.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, maintenance_active, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -366,8 +370,9 @@ async fn run_socket_server(
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
+                        let maintenance_active = _maintenance.active.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, maintenance_active, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -437,11 +442,51 @@ async fn run_socket_server(
 
 type SharedDaemonState = Arc<tokio::sync::Mutex<DaemonState>>;
 
-struct BackgroundMaintenance(tokio::task::JoinHandle<()>);
+const MAINTENANCE_AUTOSAVE_BUDGET: Duration = Duration::from_millis(250);
+const MAINTENANCE_LOCK_BUDGET: Duration = Duration::from_millis(300);
+
+tokio::task_local! {
+    pub(crate) static BACKGROUND_AUTOSAVE: ();
+}
+
+/// Background saving is read-only until atomic file promotion. Collector targets
+/// and pending restore validators belong to foreground operations, not this scope.
+pub(crate) fn is_background_autosave() -> bool {
+    BACKGROUND_AUTOSAVE.try_with(|_| ()).is_ok()
+}
+
+struct MaintenanceOwner<'a>(&'a AtomicBool);
+
+impl Drop for MaintenanceOwner<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+struct BackgroundMaintenance {
+    task: tokio::task::JoinHandle<()>,
+    active: Arc<AtomicBool>,
+}
+
+async fn bounded_background_autosave(state: &mut DaemonState, interval_ms: u64) {
+    if tokio::time::timeout(
+        MAINTENANCE_AUTOSAVE_BUDGET,
+        BACKGROUND_AUTOSAVE.scope((), maybe_autosave_restore_state(state, interval_ms)),
+    )
+    .await
+    .is_err()
+    {
+        state.restore_save_status = "maintenance_timeout".into();
+        state.restore_saved_path = None;
+        let _ = writeln!(std::io::stderr(), "maintenance_timeout: background state observation exceeded 250ms; previous saved state retained");
+    }
+}
 
 impl BackgroundMaintenance {
     fn start(state: SharedDaemonState, autosave_interval_ms: u64) -> Self {
-        Self(tokio::spawn(async move {
+        let active = Arc::new(AtomicBool::new(false));
+        let task_active = active.clone();
+        let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -449,32 +494,34 @@ impl BackgroundMaintenance {
                 let Ok(mut s) = state.try_lock() else {
                     continue;
                 };
+                task_active.store(true, Ordering::SeqCst);
+                let _owner = MaintenanceOwner(&task_active);
                 let process_exited = s
                     .browser
                     .as_mut()
                     .is_some_and(|mgr| mgr.has_process_exited());
-                let result = if process_exited {
-                    close_current_browser(&mut s).await
-                } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await
-                } else {
-                    Ok(())
-                };
-                match result {
-                    Ok(()) => maybe_autosave_restore_state(&mut s, autosave_interval_ms).await,
-                    Err(error) => {
+                if process_exited {
+                    // Process retirement has its own bounded cleanup and is not
+                    // cancelled: it owns the exited process and transport.
+                    if let Err(error) = close_current_browser(&mut s).await {
                         let _ =
                             writeln!(std::io::stderr(), "Browser maintenance failed: {}", error);
                     }
+                } else {
+                    // Event receiver custody stays intact. Foreground browser
+                    // commands own setup/drain; background ticks never consume
+                    // events and then park the shared lock on a renderer await.
+                    bounded_background_autosave(&mut s, autosave_interval_ms).await;
                 }
             }
-        }))
+        });
+        Self { task, active }
     }
 }
 
 impl Drop for BackgroundMaintenance {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -482,6 +529,7 @@ async fn dispatch_command(
     cmd: &Value,
     state: &SharedDaemonState,
     idle_activity: &IdleActivity,
+    maintenance_active: &AtomicBool,
 ) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     let mut s = if matches!(
@@ -490,14 +538,18 @@ async fn dispatch_command(
     ) {
         match state.try_lock() {
             Ok(s) => s,
-            Err(_) => {
-                return serde_json::json!({
-                    "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
-                    "success": false,
-                    "code": "daemon_busy",
-                    "error": "A command or browser maintenance is still in progress; lifecycle state is unavailable. No close was performed; retry after that operation settles.",
-                });
+            Err(_) if maintenance_active.load(Ordering::SeqCst) => {
+                match tokio::time::timeout(MAINTENANCE_LOCK_BUDGET, state.lock()).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return lifecycle_busy_response(
+                            cmd,
+                            maintenance_active.load(Ordering::SeqCst),
+                        )
+                    }
+                }
             }
+            Err(_) => return lifecycle_busy_response(cmd, false),
         }
     } else {
         state.lock().await
@@ -507,9 +559,23 @@ async fn dispatch_command(
     response
 }
 
+fn lifecycle_busy_response(cmd: &Value, maintenance: bool) -> Value {
+    serde_json::json!({
+        "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
+        "success": false,
+        "code": if maintenance { "daemon_maintenance_busy" } else { "daemon_busy" },
+        "error": if maintenance {
+            "Process cleanup is still in progress; lifecycle state is unavailable. No close was performed."
+        } else {
+            "A foreground command is still in progress; lifecycle state is unavailable. No close was performed; the command remains owned and was not cancelled."
+        },
+    })
+}
+
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
+    maintenance_active: Arc<AtomicBool>,
     idle_activity: Arc<IdleActivity>,
     stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
@@ -557,7 +623,8 @@ async fn handle_connection<S>(
                     .to_string();
 
                 let response = if matches!(action.as_str(), "auth_login" | "auth_fill") {
-                    let command = dispatch_command(&cmd, &state, &idle_activity);
+                    let command =
+                        dispatch_command(&cmd, &state, &idle_activity, &maintenance_active);
                     tokio::pin!(command);
                     tokio::select! {
                         response = &mut command => response,
@@ -567,7 +634,7 @@ async fn handle_connection<S>(
                         },
                     }
                 } else {
-                    dispatch_command(&cmd, &state, &idle_activity).await
+                    dispatch_command(&cmd, &state, &idle_activity, &maintenance_active).await
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
@@ -605,6 +672,7 @@ async fn test_auth_disconnect_cancels_queued_request() {
         handle_connection(
             server,
             task_state,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(IdleActivity::new()),
             None,
             Arc::new(Notify::new()),
@@ -718,7 +786,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn lifecycle_requests_report_busy_without_cancelling_stalled_maintenance() {
+    async fn lifecycle_recovers_from_stalled_background_autosave() {
         let guard = crate::test_utils::EnvGuard::new(&[
             "HOME",
             "AGENT_BROWSER_ACTION_POLICY",
@@ -763,7 +831,7 @@ mod tests {
                 state_for_server,
                 activity_for_server,
                 None,
-                1,
+                30_000,
             )
             .await
         });
@@ -776,37 +844,33 @@ mod tests {
         let peer = tokio::net::UnixStream::connect(socket_path).await.unwrap();
         let (reader, mut writer) = tokio::io::split(peer);
         let mut reader = BufReader::new(reader);
-        for action in [
-            "session_info",
-            "close",
-            "confirm",
-            INTERNAL_DAEMON_SHUTDOWN_ACTION,
-        ] {
-            writer
-                .write_all(
-                    format!("{}\n", serde_json::json!({"id": "busy", "action": action})).as_bytes(),
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::json!({"id":"metadata", "action":"session_info"})
                 )
-                .await
-                .unwrap();
-            let mut line = String::new();
-            tokio::time::timeout(Duration::from_millis(100), reader.read_line(&mut line))
-                .await
-                .expect("lifecycle must not queue behind CDP")
-                .unwrap();
-            let response: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(response["success"], false, "{response}");
-            assert_eq!(response["code"], "daemon_busy");
-            assert!(!close_completed_response(action, &response));
-            assert_eq!(
-                client.pending_len().await,
-                1,
-                "busy lifecycle must preserve the operation owner"
-            );
-        }
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_millis(500), reader.read_line(&mut line))
+            .await
+            .expect("metadata must recover after bounded autosave without renderer response")
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["success"], true, "{response}");
+        assert!(response.to_string().contains("maintenance_timeout"));
+        assert_eq!(
+            client.pending_len().await,
+            0,
+            "read-only autosave cancellation retires the pending CDP wait"
+        );
         client.close().await;
         let retained = tokio::time::timeout(Duration::from_secs(1), state.lock())
             .await
-            .expect("maintenance must settle after disconnect");
+            .expect("bounded maintenance must release its owner");
         assert!(
             retained.browser.is_some(),
             "busy close must not remove the browser"
@@ -819,6 +883,74 @@ mod tests {
         drop(retained);
         daemon_server.abort();
         assert!(daemon_server.await.unwrap_err().is_cancelled());
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_busy_preserves_foreground_command() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
+        let mut initial = DaemonState::new();
+        initial.browser = Some(fixture.manager);
+        let state = Arc::new(tokio::sync::Mutex::new(initial));
+        let command_state = state.clone();
+        let command_client = client.clone();
+        let command = tokio::spawn(async move {
+            let _owned = command_state.lock().await;
+            command_client
+                .send_command_no_params("Fixture.effect", None)
+                .await
+        });
+        fixture.commands.recv().await.unwrap();
+        for action in [
+            "session_info",
+            "close",
+            "confirm",
+            INTERNAL_DAEMON_SHUTDOWN_ACTION,
+        ] {
+            let response = tokio::time::timeout(
+                Duration::from_millis(100),
+                dispatch_command(
+                    &serde_json::json!({"id":"busy", "action":action}),
+                    &state,
+                    &IdleActivity::new(),
+                    &AtomicBool::new(false),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["code"], "daemon_busy");
+            assert!(!close_completed_response(action, &response));
+            assert_eq!(client.pending_len().await, 1);
+            assert!(!command.is_finished());
+        }
+        client.close().await;
+        assert!(command.await.unwrap().is_err());
+        assert!(state.lock().await.browser.is_some());
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_tick_does_not_park_on_renderer_when_saving_disabled() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
+        let mut initial = DaemonState::new();
+        initial.browser = Some(fixture.manager);
+        let state = Arc::new(tokio::sync::Mutex::new(initial));
+        let maintenance = BackgroundMaintenance::start(state.clone(), 0);
+        // Await a timer tick without arbitrary polling. Disabled saving must
+        // release the lock and issue no renderer commands at all.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), fixture.commands.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(client.pending_len().await, 0);
+        assert!(state.try_lock().is_ok());
+        drop(maintenance);
+        client.close().await;
         fixture.server.await.unwrap();
     }
 
@@ -840,6 +972,7 @@ mod tests {
         handle_connection(
             daemon,
             state,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(IdleActivity::new()),
             None,
             notify.clone(),

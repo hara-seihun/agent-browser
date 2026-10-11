@@ -278,6 +278,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
+Native lifecycle requests never cancel a foreground command: `daemon_busy` means it remains owned and no close occurred. Background autosave is read-only and bounded to 250ms; lifecycle requests allow 300ms to acquire that lock. `restore.saveStatus: maintenance_timeout` retains the previous persisted state. Collector-dependent background saves defer to foreground, and background ticks leave CDP setup events unconsumed. See [references/session-management.md](references/session-management.md) for exact statuses.
+
 ### Persist session across runs
 
 ```bash

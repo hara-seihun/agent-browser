@@ -115,6 +115,9 @@ async fn collect_storage_via_temp_target(
     origins: &[String],
     origin_js: &str,
 ) -> Result<Vec<OriginStorage>, String> {
+    if super::daemon::is_background_autosave() {
+        return Err("autosave_requires_foreground: remaining origins need an owned collector target; previous state retained".into());
+    }
     let create_result: CreateTargetResult = client
         .send_command_typed(
             "Target.createTarget",
@@ -273,34 +276,52 @@ pub async fn save_state(
     })()"#;
 
     // Merge visited origins with current frame tree origins
+    let background = super::daemon::is_background_autosave();
     let mut all_origins = visited_origins.clone();
-    if let Ok(tree_result) = client
+    match client
         .send_command_no_params("Page.getFrameTree", Some(session_id))
         .await
     {
-        if let Some(tree) = tree_result.get("frameTree") {
-            collect_frame_origins(tree, &mut all_origins);
+        Ok(tree_result) => match tree_result.get("frameTree") {
+            Some(tree) => collect_frame_origins(tree, &mut all_origins),
+            None if background => return Err(
+                "autosave_observation_incomplete: frame tree unavailable; previous state retained"
+                    .into(),
+            ),
+            None => {}
+        },
+        Err(_) if background => {
+            return Err(
+                "autosave_observation_incomplete: frame tree unavailable; previous state retained"
+                    .into(),
+            )
         }
+        Err(_) => {}
     }
 
     // 1. Collect localStorage from the current page
     let mut origins = Vec::new();
     let mut current_origin = String::new();
 
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
-        current_origin = storage.origin.clone();
-        if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-            origins.push(storage);
-        }
+    match eval_origin_storage(client, session_id, origin_js).await {
+        Some(storage) => {
+            current_origin = storage.origin.clone();
+            if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
+                origins.push(storage);
+            }
+        },
+        None if background => return Err("autosave_observation_incomplete: active origin storage unavailable; previous state retained".into()),
+        None => {},
     }
 
     // 2. Collect localStorage from remaining origins via a disposable temp target
     all_origins.remove(&current_origin);
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
-        if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
-        {
+        let collected = collect_storage_via_temp_target(client, &remaining, origin_js).await;
+        if background {
+            origins.extend(collected?);
+        } else if let Ok(temp_origins) = collected {
             origins.extend(temp_origins);
         }
     }
@@ -848,6 +869,29 @@ pub fn get_sessions_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn background_save_never_creates_collector_target() {
+        let mut fixture = crate::native::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
+        let error = crate::native::daemon::BACKGROUND_AUTOSAVE
+            .scope(
+                (),
+                super::collect_storage_via_temp_target(
+                    &client,
+                    &["https://fixture.test".into()],
+                    "synthetic-storage-probe",
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("autosave_requires_foreground:"));
+        assert!(fixture.commands.try_recv().is_err());
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
     use super::*;
 
     #[test]
