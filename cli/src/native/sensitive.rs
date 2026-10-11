@@ -729,10 +729,14 @@ async fn inventory_control(
     object_group: &str,
 ) -> Result<Vec<String>, InventoryError> {
     let resolved = client
-        .send_command(
-            "DOM.resolveNode",
-            Some(json!({ "backendNodeId": control.backend, "objectGroup": object_group })),
-            Some(&control.session),
+        .observation_progress
+        .track(
+            Phase::ControlResolve,
+            client.send_command(
+                "DOM.resolveNode",
+                Some(json!({ "backendNodeId": control.backend, "objectGroup": object_group })),
+                Some(&control.session),
+            ),
         )
         .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive control unavailable"))?;
@@ -740,11 +744,13 @@ async fn inventory_control(
         .as_str()
         .ok_or_else(|| format!("{UNSUPPORTED}: sensitive control handle unavailable"))?;
     let values = async {
-        let values = client.send_command("Runtime.callFunctionOn", Some(json!({
-            "objectId": object,
-            "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', this.tagName === 'TEXTAREA' ? this.textContent : '']; }",
-            "returnByValue": true,
-        })), Some(&control.session)).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
+        let values = client.observation_progress.track(Phase::ControlValues,
+            client.send_command("Runtime.callFunctionOn", Some(json!({
+                "objectId": object,
+                "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', this.tagName === 'TEXTAREA' ? this.textContent : '']; }",
+                "returnByValue": true,
+            })), Some(&control.session)),
+        ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
         if values.get("exceptionDetails").is_some() {
             return Err(format!("{UNSUPPORTED}: sensitive control observation failed").into());
         }
@@ -762,10 +768,14 @@ async fn inventory_control(
     }
     .await;
     client
-        .send_command(
-            "Runtime.releaseObject",
-            Some(json!({ "objectId": object })),
-            Some(&control.session),
+        .observation_progress
+        .track(
+            Phase::ControlRelease,
+            client.send_command(
+                "Runtime.releaseObject",
+                Some(json!({ "objectId": object })),
+                Some(&control.session),
+            ),
         )
         .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive observation cleanup failed"))?;
@@ -811,8 +821,9 @@ async fn validate_inventory_document(
 /// Follow only frame-tree claims and pierced-DOM owners of this tab. An OOPIF
 /// may be absent from its parent's frame tree while its DOM owner is present.
 /// Initial frame metadata and pierced DOM reads overlap within each exact session.
-/// Independent represented sessions and sensitive controls are observed concurrently,
-/// with frame/loader/parent/member/backend bindings rechecked before success.
+/// Each bound document starts its control reads while deeper represented documents
+/// are still being discovered. Complete coverage and final frame/loader/parent/member/
+/// backend validation remain required before any observation or output is published.
 /// Volatile metadata and sibling ordering are not identity. Changed observations
 /// are discarded for whole-batch reinventory by the deadline-owning caller.
 /// Renderer groups register connection-owned cancellation cleanup before resolve;
@@ -847,25 +858,51 @@ where
     let mut frames = HashMap::new();
     let mut covered = HashMap::new();
     let mut owners = HashSet::new();
-    let mut controls = Vec::new();
+    let mut control_reads = FuturesUnordered::new();
+    let mut control_results = Vec::new();
+    let mut object_groups = Vec::new();
     let mut sessions = FuturesUnordered::new();
     sessions.push(inventory_document(client, top_session.to_owned(), None));
     let mut documents = Vec::new();
     let mut visited = HashSet::from([top_session.to_owned()]);
-    while let Some(document) = sessions.next().await {
-        let document = document?;
+    while !sessions.is_empty() {
+        let document = tokio::select! {
+            document = sessions.next() => document.expect("pending document")?,
+            values = control_reads.next(), if !control_reads.is_empty() => {
+                control_results.push(values.expect("pending control"));
+                continue;
+            }
+        };
         let session = &document.session;
         let root_frame = document.bindings.root.as_str();
         collect_tree_frames(&document.tree, session, iframe_sessions, &mut frames)?;
         covered.insert(root_frame.to_owned(), session.clone());
         collect_document_frames(&document.root, session, &mut covered, &mut owners);
-        collect_nodes(&document.root, session, &mut controls, &mut HashSet::new());
         for frame in frames.keys().chain(owners.iter()) {
             if let Some(sid) = iframe_sessions.get(frame) {
                 if visited.insert(sid.clone()) {
                     sessions.push(inventory_document(client, sid.clone(), Some(frame.clone())));
                 }
             }
+        }
+        let mut controls = Vec::new();
+        collect_nodes(&document.root, session, &mut controls, &mut HashSet::new());
+        if !controls.is_empty() {
+            let group = client
+                .object_group(vec![session.clone()])
+                .await
+                .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
+            for control in controls {
+                let name = group.name.clone();
+                control_reads.push(async move {
+                    let values = client
+                        .observation_progress
+                        .track(Phase::Controls, inventory_control(client, &control, &name))
+                        .await;
+                    (control, values)
+                });
+            }
+            object_groups.push(group);
         }
         documents.push(document);
     }
@@ -896,14 +933,6 @@ where
             .collect(),
         ..Observation::default()
     };
-    let control_sessions: HashSet<_> = controls
-        .iter()
-        .map(|control| control.session.clone())
-        .collect();
-    let object_group = client
-        .object_group(control_sessions.into_iter().collect())
-        .await
-        .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     let mut context = InventoryContext {
         roots: documents
             .iter()
@@ -937,16 +966,9 @@ where
     for document in &documents {
         collect_snapshot_context(&document.root, &document.session, &mut context, None);
     }
-    let (values, collected) = tokio::join!(
-        futures_util::future::join_all(controls.iter().map(|control| {
-            client.observation_progress.track(
-                Phase::Controls,
-                inventory_control(client, control, &object_group.name),
-            )
-        })),
-        collect(context),
-    );
-    for (control, values) in controls.iter().zip(values) {
+    let (values, collected) = tokio::join!(control_reads.collect::<Vec<_>>(), collect(context),);
+    control_results.extend(values);
+    for (control, values) in control_results {
         let redacted = marker(control.kind);
         observation
             .controls
@@ -968,7 +990,9 @@ where
     {
         validation?;
     }
-    object_group.finish();
+    for group in object_groups {
+        group.finish();
+    }
     client
         .observation_progress
         .track(Phase::ObjectCleanup, client.settle_object_cleanup())
@@ -1235,8 +1259,11 @@ mod tests {
             while let Ok(command) = fixture.commands.try_recv() {
                 let method = command["method"].as_str().unwrap();
                 assert!(!method.starts_with("Input.") && method != "Page.navigate");
-                if matches!(case, "coverage" | "session" | "document" | "unreadable") {
+                if matches!(case, "coverage" | "document" | "unreadable") {
                     assert_ne!(method, "Runtime.callFunctionOn");
+                }
+                if matches!(method, "DOM.resolveNode" | "Runtime.callFunctionOn") {
+                    assert_eq!(command["sessionId"], session);
                 }
             }
             client.close().await;

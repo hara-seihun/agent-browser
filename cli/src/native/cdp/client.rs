@@ -507,19 +507,28 @@ impl CdpClient {
         self.close_complete.store(true, Ordering::SeqCst);
     }
 
-    /// Register cleanup before resolving any renderer handles. Cancellation drops
-    /// only the signal guard; the connection retains the bounded cleanup task.
+    /// Register each concurrent observation group before resolving its handles.
+    /// The observer settles prior cleanup before starting a batch; registration
+    /// must not wait for unfinished groups belonging to that same batch.
+    /// Cancellation drops only the signal; the connection owns bounded cleanup.
     pub(crate) async fn object_group(
         self: &Arc<Self>,
         sessions: Vec<String>,
     ) -> Result<RemoteObjectGroup, String> {
         self.ensure_open()?;
-        self.settle_object_cleanup().await?;
         let id = self.next_object_group.fetch_add(1, Ordering::SeqCst);
         let group = format!("agent-browser-sensitive-{id}");
         let (completion, cancelled) = oneshot::channel();
         let mut groups = self.object_groups.lock().await;
         self.ensure_open()?;
+        if groups
+            .values()
+            .any(|cleanup| matches!(cleanup.state, ObjectCleanupState::Failed))
+        {
+            return Err(
+                "Sensitive object cleanup unavailable; close the browser connection".into(),
+            );
+        }
         let client = self.clone();
         let cleanup_group = group.clone();
         let cleanup_sessions = sessions.clone();
