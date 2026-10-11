@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use std::collections::HashMap;
 
@@ -98,7 +99,7 @@ impl Serialize for ScreenshotAnnotation {
 /// Captures a screenshot via CDP and optionally overlays numbered annotations
 /// that mirror the Node.js screenshot `annotate` mode.
 pub async fn take_screenshot(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,

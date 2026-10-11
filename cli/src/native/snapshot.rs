@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -223,7 +224,7 @@ impl RoleNameTracker {
 }
 
 pub async fn take_snapshot(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
