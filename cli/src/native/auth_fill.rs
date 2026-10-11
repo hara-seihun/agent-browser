@@ -102,7 +102,7 @@ async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String>
         .send_command(
             "Target.getTargetInfo",
             Some(json!({"targetId": req.target})),
-            Some(&session),
+            None,
         )
         .await
         .map_err(|_| BINDING)?;
@@ -116,11 +116,39 @@ async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String>
         .map_err(|_| BINDING)?;
     let tree = live.get("frameTree").ok_or(BINDING)?;
     let root = tree.get("frame").ok_or(BINDING)?;
-    let frame = if req.frame == "main" {
-        root
+    let (frame_session, frame_value) = if req.frame == "main" {
+        (None, root.clone())
     } else {
-        find_frame(tree, &req.frame).ok_or(BINDING)?
+        let (_, frames) =
+            super::a11y::collect_frame_sessions(&mgr.client, &session, &state.iframe_sessions)
+                .await
+                .map_err(|_| BINDING)?;
+        let live_frame = frames
+            .iter()
+            .find(|frame| frame.frame_id == req.frame)
+            .ok_or(BINDING)?;
+        if let Some(sid) = state.iframe_sessions.get(&req.frame) {
+            if live_frame.session_id != *sid {
+                return Err(BINDING.into());
+            }
+            let owned = mgr
+                .client
+                .send_command_no_params("Page.getFrameTree", Some(sid))
+                .await
+                .map_err(|_| BINDING)?;
+            let frame = owned
+                .get("frameTree")
+                .and_then(|tree| tree.get("frame"))
+                .ok_or(BINDING)?;
+            (Some(sid.clone()), frame.clone())
+        } else {
+            if live_frame.session_id != session {
+                return Err(BINDING.into());
+            }
+            (None, find_frame(tree, &req.frame).ok_or(BINDING)?.clone())
+        }
     };
+    let frame = &frame_value;
     let frame_id = frame
         .get("id")
         .and_then(Value::as_str)
@@ -132,11 +160,9 @@ async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String>
         .filter(|v| !v.is_empty())
         .ok_or(BINDING)?;
     let url = frame.get("url").and_then(Value::as_str).ok_or(BINDING)?;
-    let frame_session = if req.frame == "main" {
-        None
-    } else {
-        state.iframe_sessions.get(frame_id).cloned()
-    };
+    if req.frame != "main" && frame_id != req.frame {
+        return Err(BINDING.into());
+    }
     if let Some(sid) = &frame_session {
         // A cached OOPIF session is insufficient: it must still own this frame
         // in the active page's live tree, with the same committed document.
