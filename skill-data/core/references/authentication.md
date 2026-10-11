@@ -452,3 +452,5 @@ Select the exact intended tab/frame first (`frame main` explicitly for the top d
 Linux nonroot daemon only. The absolute path must contain no symlinks or dot/dot-dot components and have an existing exact0700 parent owned by the daemon UID. Exclusive atomic publication creates a new0600 file; existing leaves, including symlinks, refuse. Receipt data is only `path` and `byteCount`, not a value/hash. The deadline and caller-disconnect contract matches private fill, with1..300000ms total `--timeout` (initial180000ms unless configured) and ten-second IPC margin. MCP `agent_browser_auth_export` uses `exportTimeoutMs` plus outer `timeoutMs`.
 
 Lost success replies and `auth_export_commit_uncertain` may leave a published file. Reconcile only existence/metadata at the requested path, never replay or read the value into model-visible output. Transfer or consume the credential through its owning private service.
+
+Exported text-only fields protect their AX names and descendants before snapshot text aggregation, including one/two-character values. Scoped short-value protection does not register global fragments or mask ordinary input labels.

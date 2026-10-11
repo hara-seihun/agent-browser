@@ -245,6 +245,7 @@ pub async fn take_snapshot(
         frame_id,
         iframe_sessions,
         &HashMap::new(),
+        &std::collections::HashSet::new(),
     )
     .await
 }
@@ -257,6 +258,7 @@ pub(crate) async fn take_snapshot_with_controls(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
     private_controls: &HashMap<(String, i64), String>,
+    private_text_nodes: &std::collections::HashSet<(String, i64)>,
 ) -> Result<String, super::sensitive::InventoryError> {
     let (mut observation, batch) =
         super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
@@ -268,6 +270,9 @@ pub(crate) async fn take_snapshot_with_controls(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
+    observation
+        .private_text_nodes
+        .extend(private_text_nodes.iter().cloned());
     let root = frame_id.unwrap_or(&batch.context.top_frame);
     let mut candidate_refs = ref_map.clone();
     let output = render_snapshot_frame(
@@ -430,7 +435,9 @@ fn render_snapshot_frame(
     } else {
         None
     };
-    let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
+    let protected_nodes =
+        protect_private_text_nodes(&ax_tree.nodes, observation, effective_session_id);
+    let (mut tree_nodes, root_indices) = build_tree(&protected_nodes);
     for node in &mut tree_nodes {
         node.name = observation.protect_text(&node.name);
         node.value_text = node
@@ -913,6 +920,61 @@ fn promote_hidden_inputs(
             }
         }
     }
+}
+
+/// Protect source AX names before tree aggregation can merge text-node identity.
+fn protect_private_text_nodes(
+    nodes: &[AXNode],
+    observation: &super::sensitive::Observation,
+    session: &str,
+) -> Vec<AXNode> {
+    let indices: HashMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.node_id.as_str(), i))
+        .collect();
+    let mut pending: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            n.backend_d_o_m_node_id
+                .filter(|backend| {
+                    observation
+                        .private_text_nodes
+                        .contains(&(session.to_owned(), *backend))
+                })
+                .map(|_| i)
+        })
+        .collect();
+    let mut protected = std::collections::HashSet::new();
+    while let Some(i) = pending.pop() {
+        if !protected.insert(i) {
+            continue;
+        }
+        if let Some(children) = &nodes[i].child_ids {
+            pending.extend(
+                children
+                    .iter()
+                    .filter_map(|id| indices.get(id.as_str()).copied()),
+            );
+        }
+    }
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let mut node = node.clone();
+            if protected.contains(&i) {
+                let redacted = AXValue {
+                    value_type: "string".into(),
+                    value: Some(Value::String(super::sensitive::marker("credential"))),
+                };
+                node.name = Some(redacted.clone());
+                node.value = Some(redacted);
+            }
+            node
+        })
+        .collect()
 }
 
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
@@ -1428,6 +1490,33 @@ mod tests {
         assert!(set.contains("example link"));
         assert!(set.contains("submit"));
         assert!(!set.contains("other text"));
+    }
+
+    #[test]
+    fn private_export_text_names_protected_before_aggregation_keep_input_labels() {
+        let nodes: Vec<AXNode> = serde_json::from_value(serde_json::json!([
+            {"nodeId":"root","role":{"type":"string","value":"RootWebArea"},"name":{"type":"string","value":"Public title"},"childIds":["input","leaf"]},
+            {"nodeId":"input","backendDOMNodeId":10,"role":{"type":"string","value":"textbox"},"name":{"type":"string","value":"Public input label"},"value":{"type":"string","value":"synthetic-full-value"}},
+            {"nodeId":"leaf","backendDOMNodeId":20,"role":{"type":"string","value":"status"},"name":{"type":"string","value":"界"},"childIds":["text"]},
+            {"nodeId":"text","backendDOMNodeId":21,"role":{"type":"string","value":"StaticText"},"name":{"type":"string","value":"界"}}
+        ])).unwrap();
+        let mut known = super::super::sensitive::Observation::default();
+        known.remember_private_value("frame", 10, "credential", "synthetic-full-value");
+        known.remember_private_text("frame", 20, "界");
+        let sanitized = protect_private_text_nodes(&nodes, &known, "frame");
+        assert_eq!(extract_ax_string(&sanitized[0].name), "Public title");
+        assert_eq!(extract_ax_string(&sanitized[1].name), "Public input label");
+        assert_eq!(
+            extract_ax_string(&sanitized[2].name),
+            "[redacted: credential]"
+        );
+        assert_eq!(
+            extract_ax_string(&sanitized[3].name),
+            "[redacted: credential]"
+        );
+        let (tree, _) = build_tree(&sanitized);
+        assert!(tree.iter().all(|node| !node.name.contains('界')));
+        assert_eq!(known.secret_count(), 1);
     }
 
     #[test]

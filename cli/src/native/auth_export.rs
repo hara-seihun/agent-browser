@@ -106,7 +106,7 @@ pub async fn handle_auth_export(
     let described = client
         .send_command(
             "DOM.describeNode",
-            Some(json!({"objectId":object})),
+            Some(json!({"objectId":object,"depth":1})),
             Some(&session),
         )
         .await
@@ -115,6 +115,25 @@ pub async fn handle_auth_export(
         .as_i64()
         .filter(|id| *id > 0)
         .ok_or(PAGE)?;
+    let is_text = match described["node"]["nodeName"].as_str().ok_or(PAGE)? {
+        "INPUT" | "TEXTAREA" => false,
+        _ => true,
+    };
+    let mut text_backends = vec![backend];
+    if is_text {
+        if let Some(children) = described["node"]["children"].as_array() {
+            for child in children {
+                if child["nodeType"] == 3 {
+                    text_backends.push(
+                        child["backendNodeId"]
+                            .as_i64()
+                            .filter(|id| *id > 0)
+                            .ok_or(PAGE)?,
+                    );
+                }
+            }
+        }
+    }
     if bind_location(state, &location).await.map_err(|_| BINDING)? != bound {
         return Err(BINDING.into());
     }
@@ -137,11 +156,17 @@ pub async fn handle_auth_export(
     // Even an unexpected page mutation after the read cannot turn the returned
     // private bytes into later normal output: register before final validation.
     if let Some(value) = value {
-        state
+        let known = state
             .sensitive_observations
             .entry(bound.session.clone())
-            .or_default()
-            .remember_private_value(&session, backend, "credential", value);
+            .or_default();
+        if is_text {
+            for backend in text_backends {
+                known.remember_private_text(&session, backend, value);
+            }
+        } else {
+            known.remember_private_value(&session, backend, "credential", value);
+        }
     }
     match result["status"].as_str() {
         Some("changed") => return Err(BINDING.into()),

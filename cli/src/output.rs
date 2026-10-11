@@ -2767,6 +2767,8 @@ Private export:
   owned by the daemon UID with exact0700 permissions. New file is exclusive0600.
   Receipt contains only path and byteCount; never prints or hashes the value.
   Stop captures first. Values are registered for scoped and global redaction.
+  Text-only field names/descendants protected before snapshot text aggregation;
+  short values stay scoped and ordinary input labels remain unchanged.
   Same total deadline/IPC margin as private fill; no overwrite or replay.
   Lost response/commit uncertainty: inspect path existence without reading value.
   MCP agent_browser_auth_export uses exportTimeoutMs plus outer timeoutMs.

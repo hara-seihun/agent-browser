@@ -6065,9 +6065,9 @@ async fn protected_snapshot(
 ) -> Result<(String, RefMap), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let progress = state.protected_observation_progress();
-    let private_controls = match state.sensitive_observations.get(session) {
-        Some(known) => known.controls.clone(),
-        None => HashMap::new(),
+    let (private_controls, private_text_nodes) = match state.sensitive_observations.get(session) {
+        Some(known) => (known.controls.clone(), known.private_text_nodes.clone()),
+        None => (HashMap::new(), HashSet::new()),
     };
     protected_inventory_before(deadline, &progress, async {
         loop {
@@ -6094,6 +6094,7 @@ async fn protected_snapshot(
                 frame,
                 &state.iframe_sessions,
                 &private_controls,
+                &private_text_nodes,
             )
             .await
             {

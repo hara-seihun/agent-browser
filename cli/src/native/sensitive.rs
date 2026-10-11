@@ -220,6 +220,7 @@ pub fn guarded_eval(script: &str) -> String {
 pub struct Observation {
     pub(crate) frame_sessions: HashSet<String>,
     pub controls: HashMap<(String, i64), String>,
+    pub(crate) private_text_nodes: HashSet<(String, i64)>,
     secrets: Vec<(String, String)>,
 }
 
@@ -238,6 +239,13 @@ impl Observation {
                 .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
             self.secrets.dedup_by(|a, b| a.0 == b.0);
         }
+    }
+
+    /// Text-only exported fields protect AX names/descendants as well as values.
+    pub(crate) fn remember_private_text(&mut self, session: &str, backend: i64, value: &str) {
+        self.remember_private_value(session, backend, "credential", value);
+        self.private_text_nodes
+            .insert((session.to_owned(), backend));
     }
 
     /// Retires only global fragments; scoped control protection is unchanged.
@@ -309,6 +317,7 @@ impl Observation {
     pub fn merge(&mut self, other: Self) {
         self.frame_sessions = other.frame_sessions;
         self.controls.extend(other.controls);
+        self.private_text_nodes.extend(other.private_text_nodes);
         self.secrets.extend(other.secrets);
         self.prune_secret_fragments();
         self.secrets
@@ -1524,6 +1533,7 @@ mod tests {
         let obs = Observation {
             frame_sessions: HashSet::new(),
             controls: HashMap::new(),
+            private_text_nodes: HashSet::new(),
             secrets: vec![
                 ("4242424242424242".into(), marker("cc-number")),
                 ("12".into(), marker("cc-exp-month")),

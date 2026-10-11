@@ -199,6 +199,16 @@ async fn private_export_actual_chrome_exact_field_and_refusals() {
                 !String::from_utf8_lossy(&output.stderr).contains(&marker),
                 "private value escaped into fixture stderr"
             );
+            for short in ["Ж", "ƛϞ"] {
+                assert!(
+                    !String::from_utf8_lossy(&output.stdout).contains(short),
+                    "short private leaf escaped into fixture stdout"
+                );
+                assert!(
+                    !String::from_utf8_lossy(&output.stderr).contains(short),
+                    "short private leaf escaped into fixture stderr"
+                );
+            }
             assert!(output.status.success(), "private Chrome fixture child failed; inspect static typed test failure without dumping private output");
             return;
         }
@@ -208,7 +218,7 @@ async fn private_export_actual_chrome_exact_field_and_refusals() {
         crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
     let dir = private_dir();
     let marker = fs::read_to_string(child_dir.join("seed")).unwrap();
-    let body = format!("<title>Synthetic export fixture</title><textarea id='private' readonly>{marker}</textarea><input id='input' readonly value='synthetic-input'><output id='leaf'>synthetic-leaf</output><input id='editable' value='not-exportable'><div id='container'><span>not-a-leaf</span></div><textarea class='duplicate' readonly>first</textarea><textarea class='duplicate' readonly>second</textarea><textarea id='hidden' hidden readonly>hidden</textarea>");
+    let body = format!("<title>Synthetic export fixture</title><textarea id='private' readonly>{marker}</textarea><label for='input'>Public input label</label><input id='input' readonly value='synthetic-input'><output id='leaf'>synthetic-leaf</output><output id='short-one'>Ж</output><output id='short-two'>ƛϞ</output><input id='editable' value='not-exportable'><div id='container'><span>not-a-leaf</span></div><textarea class='duplicate' readonly>first</textarea><textarea class='duplicate' readonly>second</textarea><textarea id='hidden' hidden readonly>hidden</textarea>");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let body = format!(
@@ -327,6 +337,106 @@ async fn private_export_actual_chrome_exact_field_and_refusals() {
         fs::read_dir(dir.path()).unwrap().count() == 4,
         "binding refusal leaked staging file"
     );
+    let before_short = execute_command(
+        &json!({"id":"before-short", "action":"snapshot", "interactive":false}),
+        &mut state,
+    )
+    .await;
+    assert!(
+        before_short["success"] == true,
+        "full snapshot before short export failed"
+    );
+    let public_ref_before = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.role == "textbox" && entry.name == "Public input label")
+        .expect("public input ref missing before short export");
+    let session = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_session_id()
+        .unwrap()
+        .to_owned();
+    let retained_before = state.sensitive_observations[&session].secret_count();
+    for (selector, expected) in [("#short-one", "Ж"), ("#short-two", "ƛϞ")] {
+        let output = dir.path().join(selector.trim_start_matches('#'));
+        let mut command = request.clone();
+        command["selector"] = json!(selector);
+        command["output"] = json!(path_string(&output));
+        let receipt = handle_auth_export(&command, &mut state, deadline())
+            .await
+            .unwrap();
+        receipt_contract(&receipt, &output, expected);
+        for (action, key) in [
+            ("gettext", "text"),
+            ("innertext", "text"),
+            ("innerhtml", "html"),
+        ] {
+            let getter = execute_command(
+                &json!({"id":"short-get", "action":action, "selector":selector}),
+                &mut state,
+            )
+            .await;
+            assert!(getter["success"] == true, "short leaf scoped getter failed");
+            assert!(
+                getter["data"][key] == "[redacted: credential]",
+                "short leaf scoped getter did not redact"
+            );
+            assert!(
+                !getter.to_string().contains(expected),
+                "short leaf escaped through scoped getter"
+            );
+        }
+    }
+    assert!(
+        state.sensitive_observations[&session].secret_count() == retained_before,
+        "short leaves poisoned global secret matching"
+    );
+    let after_short = execute_command(
+        &json!({"id":"after-short", "action":"snapshot", "interactive":false}),
+        &mut state,
+    )
+    .await;
+    assert!(
+        after_short["success"] == true,
+        "full snapshot after short export failed"
+    );
+    for short in ["Ж", "ƛϞ"] {
+        assert!(
+            !after_short.to_string().contains(short),
+            "short private leaf escaped through AX name or StaticText"
+        );
+        assert!(
+            state
+                .ref_map
+                .entries_sorted()
+                .iter()
+                .all(|(_, entry)| !entry.name.contains(short)),
+            "short private leaf escaped through ref name"
+        );
+    }
+    let public_ref_after = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.role == "textbox" && entry.name == "Public input label")
+        .expect("public input label redacted by short export");
+    assert!(
+        public_ref_before.0 == public_ref_after.0
+            && public_ref_before.1.backend_node_id == public_ref_after.1.backend_node_id,
+        "public input ref identity changed during short export"
+    );
+    let title = execute_command(&json!({"id":"title", "action":"title"}), &mut state).await;
+    assert!(
+        title["success"] == true && title["data"]["title"] == "Synthetic export fixture",
+        "short export poisoned public page title"
+    );
+    assert!(
+        fs::read_dir(dir.path()).unwrap().count() == 6,
+        "short exports leaked staging files"
+    );
     let selected = execute_command(
         &json!({"id":"child", "action":"frame", "selector":"#child-frame"}),
         &mut state,
@@ -357,7 +467,7 @@ async fn private_export_actual_chrome_exact_field_and_refusals() {
         "child value escaped through ordinary getter"
     );
     assert!(
-        fs::read_dir(dir.path()).unwrap().count() == 5,
+        fs::read_dir(dir.path()).unwrap().count() == 7,
         "child export leaked staging file"
     );
     close_current_browser(&mut state).await.unwrap();
@@ -433,7 +543,9 @@ impl CdpFixture {
                     "Runtime.evaluate" => {
                         json!({"result":{"objectId":"synthetic-field", "type":"object"}})
                     }
-                    "DOM.describeNode" => json!({"node":{"backendNodeId":71}}),
+                    "DOM.describeNode" => {
+                        json!({"node":{"backendNodeId":71,"nodeName":"INPUT","nodeType":1}})
+                    }
                     "Runtime.callFunctionOn"
                         if command["params"]["functionDeclaration"]
                             .as_str()
