@@ -2466,6 +2466,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "auth_show"
             | "auth_delete"
             | "auth_list"
+            | "auth_fill"
             | "confirm"
             | "deny"
             | "state_list"
@@ -2484,7 +2485,7 @@ fn skip_launch_action(action: &str) -> bool {
 }
 
 fn should_validate_restore_after_action(action: &str) -> bool {
-    !matches!(action, "launch" | "session_info" | "close")
+    !matches!(action, "launch" | "session_info" | "close" | "auth_fill")
 }
 
 fn policy_actions_for_command(
@@ -2499,7 +2500,10 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
-    if action == "auth_login" {
+    if matches!(action, "auth_login" | "auth_fill") {
+        if action == "auth_fill" {
+            actions.push("fill".to_string());
+        }
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
             append_credential_policy_action_for(&mut actions, provider, &plugins);
@@ -2537,7 +2541,8 @@ fn policy_actions_for_command(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    if cmd.get("action").and_then(Value::as_str) != Some("auth_login") {
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    if !matches!(action, "auth_login" | "auth_fill") {
         return Box::pin(execute_command_inner(cmd, state, None)).await;
     }
     let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
@@ -2548,7 +2553,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     else {
         return error_response(
             id,
-            "auth_login_timeout_required: positive timeout up to 300000ms is required",
+            &format!("{action}_timeout_required: positive timeout up to 300000ms is required"),
         );
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
@@ -2560,8 +2565,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     {
         Ok(response) => response,
         Err(_) => {
-            let mut response = error_response(id, "auth_login_timeout: login deadline expired; dispatched effects may still settle; outcome unknown; not replayed");
-            response["code"] = json!("auth_login_timeout");
+            let mut response = error_response(id, &format!("{action}_timeout: credential operation deadline expired; dispatched effects may still settle; outcome unknown; not replayed"));
+            response["code"] = json!(format!("{action}_timeout"));
             response
         }
     }
@@ -2582,11 +2587,12 @@ async fn execute_command_inner(
         });
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
-    let auth_login_no_navigate = action == "auth_login"
-        && cmd
-            .get("noNavigate")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+    let auth_login_no_navigate = action == "auth_fill"
+        || (action == "auth_login"
+            && cmd
+                .get("noNavigate")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false));
     let id = cmd
         .get("id")
         .and_then(|v| v.as_str())
@@ -2940,6 +2946,7 @@ async fn execute_command_inner(
                         | "tab_switch"
                         | "tab_new"
                         | "session_info"
+                        | "auth_fill"
                         | "session_list"
                         | "stream_disable"
                 ) =>
@@ -3150,6 +3157,14 @@ async fn execute_command_inner(
         "credentials" => handle_http_credentials(cmd, state).await,
         "emulatemedia" => handle_set_media(cmd, state).await,
         "auth_save" => handle_auth_save(cmd).await,
+        "auth_fill" => {
+            super::auth_fill::handle_auth_fill(
+                cmd,
+                state,
+                auth_deadline.expect("private fill deadline established at boundary"),
+            )
+            .await
+        }
         "auth_login" => {
             handle_auth_login(
                 cmd,
@@ -4694,21 +4709,7 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
     let _ = auto_save_restore_state(state).await;
 }
 
-pub(crate) async fn auto_save_restore_state(
-    state: &mut DaemonState,
-) -> Result<Option<String>, String> {
-    if state.session_name.is_some() {
-        if let Some(mgr) = state.browser.as_ref() {
-            let session = mgr.active_session_id()?.to_string();
-            let current =
-                super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
-            state
-                .sensitive_observations
-                .entry(session)
-                .or_default()
-                .merge(current);
-        }
-    }
+fn require_restore_export_allowed(state: &mut DaemonState) -> Result<(), String> {
     if state
         .sensitive_observations
         .values()
@@ -4721,6 +4722,26 @@ pub(crate) async fn auto_save_restore_state(
             super::sensitive::UNSUPPORTED
         ));
     }
+    Ok(())
+}
+
+pub(crate) async fn auto_save_restore_state(
+    state: &mut DaemonState,
+) -> Result<Option<String>, String> {
+    require_restore_export_allowed(state)?;
+    if state.session_name.is_some() {
+        if let Some(mgr) = state.browser.as_ref() {
+            let session = mgr.active_session_id()?.to_string();
+            let current =
+                super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+            state
+                .sensitive_observations
+                .entry(session)
+                .or_default()
+                .merge(current);
+        }
+    }
+    require_restore_export_allowed(state)?;
     validate_restore_if_pending(state).await;
 
     let Some(session_name) = state.session_name.clone() else {
@@ -9584,7 +9605,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .unwrap_or(&ref_id);
 
             state.active_frame_id = Some(frame_id.to_string());
-            return Ok(json!({ "frame": label }));
+            return Ok(json!({ "frame": label, "frameId": frame_id }));
         }
 
         // CSS selector path. Resolve the element itself and read the frame id
@@ -9658,22 +9679,22 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             .map(|v| v.to_string());
 
         if let Some(frame_id) = frame_id {
-            state.active_frame_id = Some(frame_id);
-            return Ok(json!({ "frame": label }));
+            state.active_frame_id = Some(frame_id.clone());
+            return Ok(json!({ "frame": label, "frameId": frame_id }));
         }
 
         // Same-process frames still resolve through the tree when the node
         // carries no frame id.
         if let Some(frame_id) = find_frame(frame_tree, Some(&label), None) {
-            state.active_frame_id = Some(frame_id);
-            return Ok(json!({ "frame": label }));
+            state.active_frame_id = Some(frame_id.clone());
+            return Ok(json!({ "frame": label, "frameId": frame_id }));
         }
     }
 
     if let Some(frame_id) = find_frame(frame_tree, name, url) {
         let label = name.or(url).unwrap_or("frame");
-        state.active_frame_id = Some(frame_id);
-        return Ok(json!({ "frame": label }));
+        state.active_frame_id = Some(frame_id.clone());
+        return Ok(json!({ "frame": label, "frameId": frame_id }));
     }
 
     Err("Frame not found".to_string())
@@ -9681,7 +9702,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
     state.active_frame_id = None;
-    Ok(json!({ "frame": "main" }))
+    Ok(json!({ "frame": "main", "frameId": "main" }))
 }
 
 // ---------------------------------------------------------------------------
@@ -13875,6 +13896,33 @@ mod tests {
         maybe_autosave_restore_state(&mut state, 30_000).await;
         assert!(state.last_autosave_attempt.is_none());
         assert_eq!(state.restore_save_status, "not_attempted");
+    }
+
+    #[tokio::test]
+    async fn test_sensitive_restore_refusal_precedes_browser_observation() {
+        let mut state = DaemonState::new();
+        state.session_name = Some("synthetic-payment".into());
+        state
+            .sensitive_observations
+            .entry("synthetic-top".into())
+            .or_default()
+            .remember_private_value(
+                "synthetic-frame",
+                1,
+                "credential",
+                "Synthetic-private-value",
+            );
+        let refusal = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            auto_save_restore_state(&mut state),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(refusal.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(!refusal.contains("Synthetic-private-value"));
+        assert_eq!(state.restore_save_status, "sensitive_output_unsupported");
+        assert!(state.restore_saved_path.is_none());
     }
 
     #[tokio::test]

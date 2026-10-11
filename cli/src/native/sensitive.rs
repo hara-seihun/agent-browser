@@ -219,6 +219,18 @@ impl Observation {
         !self.controls.is_empty()
     }
 
+    pub fn remember_private_value(&mut self, session: &str, backend: i64, kind: &str, value: &str) {
+        let redacted = marker(kind);
+        self.controls
+            .insert((session.to_owned(), backend), redacted.clone());
+        if !value.is_empty() {
+            self.secrets.push((value.to_owned(), redacted));
+            self.secrets
+                .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
+            self.secrets.dedup_by(|a, b| a.0 == b.0);
+        }
+    }
+
     pub fn protect_text(&self, text: &str) -> String {
         // Single pass over the ORIGINAL string: replacement markers are never
         // themselves re-redacted (important for short expiry and CVC values).
@@ -228,7 +240,7 @@ impl Observation {
             if text[start..].starts_with("[redacted: ") {
                 if let Some(end) = text[start..].find(']') {
                     let kind = &text[start + 11..start + end];
-                    if AUTOCOMPLETE.iter().any(|(_, k)| *k == kind) {
+                    if kind == "credential" || AUTOCOMPLETE.iter().any(|(_, k)| *k == kind) {
                         out.push_str(&text[start..start + end + 1]);
                         start += end + 1;
                         continue;
@@ -325,27 +337,68 @@ fn collect_nodes(
     }
 }
 
+fn collect_document_frames(
+    node: &Value,
+    session: &str,
+    frames: &mut HashMap<String, String>,
+    owners: &mut HashSet<String>,
+) {
+    if matches!(
+        node.get("nodeName").and_then(Value::as_str),
+        Some("IFRAME" | "FRAME")
+    ) {
+        if let Some(frame) = node.get("frameId").and_then(Value::as_str) {
+            owners.insert(frame.to_owned());
+        }
+    }
+    if let Some(document) = node.get("contentDocument") {
+        if let Some(frame) = document
+            .get("frameId")
+            .or_else(|| node.get("frameId"))
+            .and_then(Value::as_str)
+        {
+            frames.insert(frame.to_owned(), session.to_owned());
+        }
+        collect_document_frames(document, session, frames, owners);
+    }
+    for key in ["children", "shadowRoots", "pseudoElements"] {
+        if let Some(children) = node.get(key).and_then(Value::as_array) {
+            for child in children {
+                collect_document_frames(child, session, frames, owners);
+            }
+        }
+    }
+}
+
 /// Fail closed on incomplete frame inventory or an unreadable sensitive control.
-/// CDP's pierced DOM includes closed shadow roots and same-process documents;
-/// target-local DOM queries cover cross-origin out-of-process iframes.
+/// Validate document coverage through pierced DOM, without executing renderer
+/// JavaScript or creating worlds in newly attached, debugger-paused frames.
 pub async fn observe(
     client: &CdpClient,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, String> {
-    let (_, frames) = super::a11y::collect_frame_sessions(client, top_session, iframe_sessions)
-        .await
-        .map_err(|_| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
-    let mut sessions = HashSet::new();
+    let (top_frame, frames) =
+        super::a11y::collect_frame_sessions(client, top_session, iframe_sessions)
+            .await
+            .map_err(|_| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
+    let mut sessions = HashMap::from([(top_session.to_owned(), top_frame)]);
     for frame in &frames {
-        // Validates the frame/session association even for children omitted by
-        // an unattached OOPIF. Failure is not permission to omit that frame.
-        client.send_command("Page.createIsolatedWorld", Some(json!({ "frameId": frame.frame_id, "worldName": "agent-browser-sensitive-observation" })), Some(&frame.session_id)).await
-            .map_err(|_| format!("{UNSUPPORTED}: frame observation unavailable"))?;
-        sessions.insert(frame.session_id.clone());
+        if iframe_sessions.get(&frame.frame_id) == Some(&frame.session_id) {
+            sessions.insert(frame.session_id.clone(), frame.frame_id.clone());
+        }
     }
+    let mut covered = HashMap::new();
+    let mut owners = HashSet::new();
     let mut controls = Vec::new();
-    for session in sessions {
+    for (session, root_frame) in sessions {
+        let live = client
+            .send_command_no_params("Page.getFrameTree", Some(&session))
+            .await
+            .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
+        if live["frameTree"]["frame"]["id"].as_str() != Some(root_frame.as_str()) {
+            return Err(format!("{UNSUPPORTED}: frame session association changed"));
+        }
         let document = client
             .send_command(
                 "DOM.getDocument",
@@ -357,7 +410,18 @@ pub async fn observe(
         let root = document
             .get("root")
             .ok_or_else(|| format!("{UNSUPPORTED}: DOM root unavailable"))?;
+        covered.insert(root_frame, session.clone());
+        collect_document_frames(root, &session, &mut covered, &mut owners);
         collect_nodes(root, &session, &mut controls, &mut HashSet::new());
+    }
+    if frames
+        .iter()
+        .any(|frame| covered.get(&frame.frame_id) != Some(&frame.session_id))
+        || owners.iter().any(|frame| !covered.contains_key(frame))
+    {
+        return Err(format!(
+            "{UNSUPPORTED}: frame document coverage unavailable"
+        ));
     }
     let mut observation = Observation::default();
     for control in controls {
@@ -485,6 +549,117 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn payment_inventory_needs_no_isolated_world() {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut world_requests = 0;
+            while let Some(Ok(message)) = socket.next().await {
+                if message.is_close() {
+                    break;
+                }
+                if !message.is_text() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                let session = request["sessionId"].as_str().unwrap_or("");
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" if session == "top-session" => {
+                        json!({"frameTree":{"frame":{"id":"top"},"childFrames":[{"frame":{"id":"payment", "parentId":"top"}}]}})
+                    }
+                    "Page.getFrameTree" => {
+                        json!({"frameTree":{"frame":{"id":"payment", "parentId":"top"}}})
+                    }
+                    "DOM.getDocument" if session == "top-session" => {
+                        json!({"root":{"nodeName":"#document", "children":[{"nodeName":"IFRAME", "frameId":"payment"}]}})
+                    }
+                    "DOM.getDocument" => {
+                        json!({"root":{"nodeName":"#document", "children":[{"nodeName":"INPUT", "backendNodeId":1, "attributes":["autocomplete","cc-number"]}]}})
+                    }
+                    "DOM.resolveNode" => json!({"object":{"objectId":"synthetic-card"}}),
+                    "Runtime.callFunctionOn" => {
+                        json!({"result":{"value":["4242424242424242", "", ""]}})
+                    }
+                    "Runtime.releaseObject" => json!({}),
+                    "Page.createIsolatedWorld" => {
+                        world_requests += 1;
+                        let reply = json!({"id":request["id"], "error":{"code":-32000,"message":"Frame observation unavailable while target transitions"}});
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                reply.to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        continue;
+                    }
+                    method => panic!("Unexpected observation command {method}"),
+                };
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"id":request["id"], "result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            world_requests
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let observed = observe(
+            &client,
+            "top-session",
+            &HashMap::from([("payment".into(), "payment-session".into())]),
+        )
+        .await
+        .unwrap();
+        assert!(observed.has_sensitive());
+        assert_eq!(
+            observed.protect_text("4242424242424242"),
+            "[redacted: cc-number]"
+        );
+        client.close().await;
+        assert_eq!(server.await.unwrap(), 0);
+    }
+
+    #[test]
+    fn private_values_are_sticky_and_marker_safe() {
+        let mut observed = Observation::default();
+        observed.remember_private_value("frame-session", 17, "credential", "Synthetic-123");
+        assert!(observed.has_sensitive());
+        assert_eq!(
+            observed.controls[&("frame-session".into(), 17)],
+            "[redacted: credential]"
+        );
+        assert_eq!(
+            observed.protect_text("Synthetic-123 [redacted: credential]"),
+            "[redacted: credential] [redacted: credential]"
+        );
+    }
+
+    #[test]
+    fn pierced_document_coverage_keeps_unattached_frames_uncovered() {
+        let node = json!({"children":[
+            {"nodeName":"IFRAME", "frameId":"same", "contentDocument":{"frameId":"same", "children":[
+                {"nodeName":"IFRAME", "frameId":"remote"}
+            ]}},
+            {"nodeName":"FRAME", "frameId":"other", "contentDocument":{"children":[]}}
+        ]});
+        let mut covered = HashMap::new();
+        let mut owners = HashSet::new();
+        collect_document_frames(&node, "top-session", &mut covered, &mut owners);
+        assert_eq!(covered["same"], "top-session");
+        assert_eq!(covered["other"], "top-session");
+        assert!(owners.contains("remote"));
+        assert!(!covered.contains_key("remote"));
+    }
+
     #[test]
     fn sensitive_classifier_and_markers() {
         for (token, kind) in AUTOCOMPLETE {

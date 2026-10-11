@@ -556,7 +556,7 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = if action == "auth_login" {
+                let response = if matches!(action.as_str(), "auth_login" | "auth_fill") {
                     let command = dispatch_command(&cmd, &state, &idle_activity);
                     tokio::pin!(command);
                     tokio::select! {
