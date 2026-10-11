@@ -1686,6 +1686,10 @@ XPath, or an element reference from snapshot (e.g., @e1).
 
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
+Native disabled controls (including inherited disabled and aria-disabled=true)
+return JSON code click_disabled and data.effectDispatched=false before pointer
+input or new-tab creation. Direct, ref and semantic clicks share this check.
+Gesture success does not confirm a provider effect; never replay uncertainty.
 
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
@@ -1712,6 +1716,8 @@ Usage: agent-browser dblclick <selector>
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
+Native disabled controls refuse with click_disabled and effectDispatched=false
+before pointer input, using the same admission as click.
 
 Global Options:
   --json               Output as JSON

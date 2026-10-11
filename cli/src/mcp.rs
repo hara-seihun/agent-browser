@@ -856,7 +856,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector.",
+            "Click an element by @ref or CSS selector. Native disabled controls (including inherited disabled and aria-disabled=true) return click_disabled with effectDispatched=false before pointer dispatch or new-tab creation. A dispatched gesture is not provider-effect confirmation; uncertain effects are not replayed.",
             json!({
                 "selector": selector_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." }
@@ -4758,7 +4758,7 @@ mod tests {
     }
 
     #[test]
-    fn click_command_args_include_new_tab() {
+    fn disabled_click_mcp_uses_canonical_parser_and_admission_contract() {
         let args = click_command_args(&json!({
             "selector": "@e1",
             "newTab": true,
@@ -4766,6 +4766,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+        let cmd = crate::commands::parse_command(&args, &crate::flags::parse_flags(&[])).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["newTab"], true);
+        let definitions = tools();
+        let click = definitions
+            .iter()
+            .find(|tool| tool["name"] == TOOL_CLICK)
+            .unwrap();
+        let description = click["description"].as_str().unwrap();
+        assert!(description.contains("click_disabled"));
+        assert!(description.contains("effectDispatched=false"));
     }
 
     #[test]

@@ -6300,6 +6300,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.iframe_sessions,
         )
         .await?;
+        interaction::require_click_enabled(&mgr.client, &effective_session_id, &object_id).await?;
         let call_params = json!({
             "objectId": object_id,
             "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
@@ -6336,6 +6337,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         // `tab new`, so it must use the same pre-navigation setup path.
         let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
+        interaction::require_click_enabled(&mgr.client, &effective_session_id, &object_id).await?;
         state.ref_map.clear();
         state.active_iframe_sessions.clear();
         state.active_frame_id = None;
@@ -13532,7 +13534,10 @@ fn error_response(id: &str, error: &str) -> Value {
     });
     // Machine-readable code for "the bound tab no longer exists" so scripts
     // using --json can match on it instead of parsing the message.
-    if let Some(code) = interaction::fill_error_code(error) {
+    if error.starts_with("click_disabled: ") {
+        resp["code"] = json!("click_disabled");
+        resp["data"] = json!({"effectDispatched":false});
+    } else if let Some(code) = interaction::fill_error_code(error) {
         resp["code"] = json!(code);
     } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
@@ -13568,6 +13573,15 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_click_response_is_pre_effect_not_generic_gesture_failure() {
+        let refusal = super::error_response("fixture", "click_disabled: target or containing control is disabled; no pointer events dispatched");
+        assert_eq!(refusal["code"], "click_disabled");
+        assert_eq!(refusal["data"]["effectDispatched"], false);
+        let unknown = super::error_response("fixture", "pointer release failed after dispatch");
+        assert!(unknown.get("data").is_none());
+        assert!(unknown.get("code").is_none());
+    }
     use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;

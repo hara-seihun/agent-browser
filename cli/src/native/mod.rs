@@ -19,6 +19,8 @@ pub mod cookies;
 pub mod daemon;
 #[allow(dead_code)]
 pub mod diff;
+#[cfg(test)]
+mod disabled_click_tests;
 #[allow(dead_code)]
 pub mod element;
 #[allow(dead_code)]

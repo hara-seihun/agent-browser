@@ -34,6 +34,15 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
+    let (object, object_session) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    require_click_enabled(client, &object_session, &object).await?;
     let (x, y, effective_session_id) = resolve_element_center(
         client,
         session_id,
@@ -42,6 +51,28 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
+    if effective_session_id != object_session {
+        return Err("click_target_changed: pinned click frame changed before dispatch".into());
+    }
+    let (current, current_session) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    if current_session != object_session {
+        return Err("click_target_changed: pinned click frame changed before dispatch".into());
+    }
+    require_click_enabled(client, &current_session, &current).await?;
+    let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId":object, "functionDeclaration":"function(current) { return this.isConnected && this === current; }",
+        "arguments":[{"objectId":current}], "returnByValue":true
+    })), Some(&object_session)).await.map_err(|_| "click_state_unavailable: click identity unavailable before dispatch")?;
+    if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
+        return Err("click_target_changed: pinned click element changed before dispatch".into());
+    }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
@@ -55,6 +86,37 @@ pub async fn click(
         click_count,
     )
     .await
+}
+
+/// Known disabled controls refuse before any pointer event. This is not a claim
+/// that a later dispatched gesture produced a provider effect; no click is replayed.
+pub(crate) async fn require_click_enabled(
+    client: &CdpClient,
+    session: &str,
+    object: &str,
+) -> Result<(), String> {
+    let result=client.send_command("Runtime.callFunctionOn",Some(serde_json::json!({
+        "objectId":object,
+        "functionDeclaration":r#"function() {
+            if (!this.isConnected) return 'changed';
+            for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
+                if (node.matches(':disabled') || (node.getAttribute('aria-disabled') || '').trim().toLowerCase()==='true') return 'disabled';
+            }
+            return 'enabled';
+        }"#,
+        "returnByValue":true
+    })),Some(session)).await.map_err(|_| "click_state_unavailable: click enabled state unavailable before dispatch")?;
+    if result.get("exceptionDetails").is_some() {
+        return Err(
+            "click_state_unavailable: click enabled state unavailable before dispatch".into(),
+        );
+    }
+    match result["result"]["value"].as_str() {
+        Some("enabled") => Ok(()),
+        Some("disabled") => Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
+        Some("changed") => Err("click_target_changed: pinned click target detached before dispatch".into()),
+        _ => Err("click_state_unavailable: click enabled state unavailable before dispatch".into()),
+    }
 }
 
 pub async fn dblclick(

@@ -555,3 +555,7 @@ That pulls in:
 - `references/proxy-support.md`: proxy configuration and CA certificates for HTTPS interception proxies
 - `references/webgpu.md` — screenshots/video of WebGPU pages (three.js, Babylon.js), Linux/CI setup
 - `templates/*` — starter shell scripts for auth, capture, form automation
+
+## Disabled click admission
+
+Native direct/ref/semantic clicks, double-clicks and `--new-tab` refuse disabled controls before pointer input or tab creation. Inherited HTML disabled and `aria-disabled=true` on the target or an ancestor return JSON `code: "click_disabled"` and `data.effectDispatched: false`. Repair the missing form prerequisite and take a fresh snapshot. Gesture success is not provider-effect confirmation; uncertain dispatched effects are never replayed.

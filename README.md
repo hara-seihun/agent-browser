@@ -92,6 +92,8 @@ agent-browser screenshot page.png
 agent-browser close
 ```
 
+Native direct/ref/semantic clicks and double-clicks refuse disabled controls before pointer input, including inherited HTML disabled and `aria-disabled=true` on the target or an ancestor. JSON returns `code: "click_disabled"` and `data.effectDispatched: false`; disabled `--new-tab` links also refuse before tab creation. Gesture success is not provider-effect confirmation, and uncertain dispatched effects are never replayed.
+
 Clicks fail early when another element covers the target's click point, for example a consent banner or modal. Dismiss or interact with the reported covering element, then take a fresh snapshot before retrying the original ref.
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.

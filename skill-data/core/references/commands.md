@@ -84,6 +84,8 @@ agent-browser upload @e1 file.pdf # Upload files
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
+Native direct/ref/semantic clicks, double-clicks and `--new-tab` refuse disabled controls before pointer input or tab creation. Inherited HTML disabled and `aria-disabled=true` on the target or an ancestor return JSON `code: "click_disabled"` and `data.effectDispatched: false`. Gesture success is not provider-effect confirmation; uncertain dispatched effects are never replayed.
+
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action.
 
 ## Get Information
