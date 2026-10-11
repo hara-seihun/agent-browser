@@ -15193,6 +15193,12 @@ mod tests {
                 "DOM.enable",
                 "Accessibility.enable",
                 "Runtime.runIfWaitingForDebugger",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(10));
+            }
+            for method in [
                 "Accessibility.getFullAXTree",
                 "Runtime.evaluate",
                 "DOM.querySelector",
@@ -15200,7 +15206,7 @@ mod tests {
             ] {
                 inventory
                     .reply_delays
-                    .insert(method.into(), std::time::Duration::from_millis(10));
+                    .insert(method.into(), std::time::Duration::from_millis(100));
             }
         }
         state.browser = Some(fixture.manager);
