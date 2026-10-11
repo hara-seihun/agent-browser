@@ -572,6 +572,8 @@ pub struct DaemonState {
     pub session_id: String,
     /// Per-target, in-memory form observations. Never included in saved state.
     pub sensitive_observations: HashMap<String, super::sensitive::Observation>,
+    /// Connection-shared numeric progress survives cancellation of observer work.
+    observation_progress: super::observation_progress::ObservationProgress,
     /// Targets explicitly armed with a tab capsule. Contains no credential values.
     pub tab_state_targets: HashSet<String>,
     pub tracing_state: TracingState,
@@ -725,6 +727,7 @@ impl DaemonState {
             last_autosave_attempt: None,
             session_id,
             sensitive_observations: HashMap::new(),
+            observation_progress: super::observation_progress::ObservationProgress::default(),
             tab_state_targets: HashSet::new(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
@@ -1243,8 +1246,10 @@ impl DaemonState {
         }
 
         self.harvest_iframe_attachments().await?;
+        let progress = self.protected_observation_progress();
         protected_inventory_before(
             std::time::Instant::now() + std::time::Duration::from_secs(2),
+            &progress,
             self.prepare_pending_iframes(),
         )
         .await?;
@@ -1533,6 +1538,15 @@ impl DaemonState {
         Ok(())
     }
 
+    fn protected_observation_progress(
+        &mut self,
+    ) -> super::observation_progress::ObservationProgress {
+        if let Some(mgr) = &self.browser {
+            self.observation_progress = mgr.client.observation_progress.clone();
+        }
+        self.observation_progress.clone()
+    }
+
     fn retain_iframe_attachment(&mut self, frame: &str, session: &str) {
         if self.iframe_sessions.get(frame).map(String::as_str) != Some(session) {
             self.iframe_sessions
@@ -1546,7 +1560,13 @@ impl DaemonState {
             .pending_iframe_attachments
             .get_mut(frame)
             .ok_or("Missing owned iframe attachment")?;
-        let result = (&mut attachment.task).await;
+        let result = self
+            .observation_progress
+            .track(
+                super::observation_progress::Phase::RecoveryAttach,
+                &mut attachment.task,
+            )
+            .await;
         self.pending_iframe_attachments.remove(frame);
         let attach = result
             .map_err(|_| {
@@ -1592,26 +1612,29 @@ impl DaemonState {
         let outcomes = futures_util::future::join_all(pending.into_iter().map(|session| {
             let filter = filter.as_ref();
             async move {
-                let setup: Result<(), String> = async {
-                    mgr.prepare_iframe_domains_pub(&session).await?;
-                    mgr.client
-                        .send_command_no_params("DOM.enable", Some(&session))
-                        .await?;
-                    mgr.client
-                        .send_command_no_params("Accessibility.enable", Some(&session))
-                        .await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            &session,
-                            filter,
-                            has_proxy_creds,
-                        )
-                        .await?;
-                    }
-                    mgr.resume_if_waiting_pub(&session).await
-                }
-                .await;
+                let setup: Result<(), String> = mgr
+                    .client
+                    .observation_progress
+                    .track(super::observation_progress::Phase::FrameSetup, async {
+                        mgr.prepare_iframe_domains_pub(&session).await?;
+                        mgr.client
+                            .send_command_no_params("DOM.enable", Some(&session))
+                            .await?;
+                        mgr.client
+                            .send_command_no_params("Accessibility.enable", Some(&session))
+                            .await?;
+                        if controls_active {
+                            install_network_controls_for_session(
+                                &mgr.client,
+                                &session,
+                                filter,
+                                has_proxy_creds,
+                            )
+                            .await?;
+                        }
+                        mgr.resume_if_waiting_pub(&session).await
+                    })
+                    .await;
                 (session, setup)
             }
         }))
@@ -4821,16 +4844,13 @@ async fn observe_sensitive_tab(
 
 async fn protected_inventory_before<T>(
     deadline: std::time::Instant,
+    progress: &super::observation_progress::ObservationProgress,
     operation: impl std::future::Future<Output = Result<T, String>>,
 ) -> Result<T, String> {
-    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
+    progress
+        .before(deadline, operation)
         .await
-        .map_err(|_| {
-            format!(
-                "{}: frame observation deadline elapsed",
-                super::sensitive::UNSUPPORTED
-            )
-        })?
+        .map_err(super::observation_progress::DeadlineDiagnostic::into_message)?
 }
 
 async fn observe_sensitive_tab_until(
@@ -4838,7 +4858,8 @@ async fn observe_sensitive_tab_until(
     session: &str,
     deadline: std::time::Instant,
 ) -> Result<super::sensitive::Observation, String> {
-    protected_inventory_before(deadline, reconcile_sensitive_tab(state, session)).await
+    let progress = state.protected_observation_progress();
+    protected_inventory_before(deadline, &progress, reconcile_sensitive_tab(state, session)).await
 }
 
 async fn reconcile_sensitive_tab(
@@ -4846,7 +4867,14 @@ async fn reconcile_sensitive_tab(
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
     loop {
-        state.harvest_iframe_attachments().await?;
+        state
+            .observation_progress
+            .clone()
+            .track(
+                super::observation_progress::Phase::AttachmentHarvest,
+                state.harvest_iframe_attachments(),
+            )
+            .await?;
         state.prepare_pending_iframes().await?;
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         if mgr.active_session_id()? != session {
@@ -4865,7 +4893,14 @@ async fn reconcile_sensitive_tab(
                 }
                 Err(super::sensitive::InventoryError::Coverage(gap)) => gap,
                 Err(super::sensitive::InventoryError::Changed(_)) => {
-                    state.drain_cdp_events_background().await?;
+                    state
+                        .observation_progress
+                        .clone()
+                        .track(
+                            super::observation_progress::Phase::DrainEvents,
+                            state.drain_cdp_events_background(),
+                        )
+                        .await?;
                     tokio::task::yield_now().await;
                     continue;
                 }
@@ -4874,7 +4909,12 @@ async fn reconcile_sensitive_tab(
         let represented = gap.unattached_frames();
         let live: GetTargetsResult = mgr
             .client
-            .send_command_typed("Target.getTargets", &json!({}), None)
+            .observation_progress
+            .track(
+                super::observation_progress::Phase::RecoveryTargets,
+                mgr.client
+                    .send_command_typed("Target.getTargets", &json!({}), None),
+            )
             .await
             .map_err(|_| {
                 format!(
@@ -4930,7 +4970,14 @@ async fn reconcile_sensitive_tab(
         state.prepare_pending_iframes().await?;
         // Dynamic children may appear during setup. Complete reinventory, not
         // an input replay, is the only transition to admitted observation.
-        state.drain_cdp_events_background().await?;
+        state
+            .observation_progress
+            .clone()
+            .track(
+                super::observation_progress::Phase::DrainEvents,
+                state.drain_cdp_events_background(),
+            )
+            .await?;
         tokio::task::yield_now().await;
     }
 }
@@ -5981,9 +6028,15 @@ async fn protected_snapshot(
     frame: Option<&str>,
 ) -> Result<(String, RefMap), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    protected_inventory_before(deadline, async {
+    let progress = state.protected_observation_progress();
+    protected_inventory_before(deadline, &progress, async {
         loop {
-            state.harvest_iframe_attachments().await?;
+            progress
+                .track(
+                    super::observation_progress::Phase::AttachmentHarvest,
+                    state.harvest_iframe_attachments(),
+                )
+                .await?;
             state.prepare_pending_iframes().await?;
             let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
             if mgr.active_session_id()? != session {
@@ -6008,7 +6061,12 @@ async fn protected_snapshot(
                     observe_sensitive_tab_until(state, session, deadline).await?;
                 }
                 Err(super::sensitive::InventoryError::Changed(_)) => {
-                    state.drain_cdp_events_background().await?;
+                    progress
+                        .track(
+                            super::observation_progress::Phase::DrainEvents,
+                            state.drain_cdp_events_background(),
+                        )
+                        .await?;
                 }
                 Err(error) => return Err(error.into_message()),
             }
@@ -14465,7 +14523,24 @@ mod tests {
         inventory: &mut super::super::lifecycle_fixture::FrameInventory,
         state: &mut DaemonState,
     ) {
-        for n in 0..=25 {
+        configure_snapshot_fixture_graph(inventory, state, 25, |n| {
+            if n == 0 {
+                (1..=20).collect()
+            } else if n <= 5 {
+                vec![n + 20]
+            } else {
+                vec![]
+            }
+        });
+    }
+
+    fn configure_snapshot_fixture_graph(
+        inventory: &mut super::super::lifecycle_fixture::FrameInventory,
+        state: &mut DaemonState,
+        last_frame: usize,
+        children: impl Fn(usize) -> Vec<usize>,
+    ) {
+        for n in 0..=last_frame {
             let frame = if n == 0 {
                 "synthetic-top".to_owned()
             } else {
@@ -14482,13 +14557,7 @@ mod tests {
                     .insert(session.clone(), frame.clone());
                 state.iframe_sessions.insert(frame.clone(), session.clone());
             }
-            let children: Vec<usize> = if n == 0 {
-                (1..=20).collect()
-            } else if n <= 5 {
-                vec![n + 20]
-            } else {
-                vec![]
-            };
+            let children = children(n);
             let mut dom = protected_inventory_controls();
             dom.push(json!({"nodeName":"A","backendNodeId":300,"attributes":["href","../pay"]}));
             dom.push(json!({"nodeName":"DIV","backendNodeId":400}));
@@ -14665,6 +14734,341 @@ mod tests {
         }
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_four_waves_cold_setup_full_snapshot_fit_total_deadline() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            // The measured remote graph has four dependent document waves:
+            // one top document, thirteen children, two grandchildren, two leaves.
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 17, |n| match n {
+                0 => (1..=13).collect(),
+                1 => vec![14, 15],
+                14 => vec![16, 17],
+                _ => vec![],
+            });
+            for method in ["Page.getFrameTree", "DOM.getDocument"] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(280));
+            }
+            for method in [
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "Target.setAutoAttach",
+                "DOM.enable",
+                "Accessibility.enable",
+                "Runtime.runIfWaitingForDebugger",
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+                "Accessibility.getFullAXTree",
+                "Runtime.evaluate",
+                "DOM.querySelector",
+                "DOM.describeNode",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(10));
+            }
+        }
+        state.pending_iframe_setup = state
+            .iframe_sessions
+            .values()
+            .filter(|sid| sid.as_str() != "unrepresented-session")
+            .cloned()
+            .collect();
+        state.browser = Some(fixture.manager);
+        let start = std::time::Instant::now();
+        let (tree, refs) = protected_snapshot(
+            &mut state,
+            &session,
+            &SnapshotOptions {
+                urls: true,
+                ..SnapshotOptions::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // Serial initial reads alone would cost 4 * 2 * 280ms, before setup,
+        // controls, AX/cursor projection or final validation. This is not a
+        // fixture that also passes when the initial pair is serialized.
+        assert!(state.pending_iframe_setup.is_empty());
+        assert!(!tree.contains("Synthetic-"));
+        assert_eq!(tree.matches("[redacted: cc-number]").count(), 18);
+        assert_eq!(tree.matches("cursor:pointer").count(), 18);
+        assert_eq!(tree.matches("https://fixture.invalid/pay").count(), 18);
+        for n in 1..=17 {
+            for kind in ["cc-number", "cc-exp", "cc-csc"] {
+                let name = format!("frame-{n}-{kind}");
+                let entries = refs.entries_sorted();
+                let entry = &entries
+                    .iter()
+                    .find(|(_, entry)| entry.name == name)
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    entry.frame_id.as_deref(),
+                    Some(format!("frame-{n}").as_str())
+                );
+            }
+        }
+        let mut counts = HashMap::<(String, String), usize>::new();
+        let mut deep = 0;
+        let mut shallow = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            let sid = command["sessionId"].as_str().unwrap_or("");
+            assert_ne!(sid, "unrepresented-session");
+            assert!(
+                !method.starts_with("Input.")
+                    && !matches!(
+                        method,
+                        "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                    )
+            );
+            *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
+            if method == "DOM.getDocument" {
+                if command["params"]["depth"] == -1 {
+                    deep += 1;
+                } else {
+                    shallow += 1;
+                }
+            }
+        }
+        assert_eq!((deep, shallow), (18, 18));
+        for n in 1..=17 {
+            let sid = format!("session-{n}");
+            for method in [
+                "DOM.enable",
+                "Accessibility.enable",
+                "Runtime.runIfWaitingForDebugger",
+            ] {
+                assert_eq!(counts[&(sid.clone(), method.into())], 1);
+            }
+        }
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert_eq!(client.object_cleanup_len().await, 0);
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_initial_pair_dispatch_and_cancel_before_either_reply() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.hold_method = Some("Page.getFrameTree".into());
+            inventory
+                .reply_delays
+                .insert("DOM.getDocument".into(), std::time::Duration::from_secs(1));
+            inventory.documents.insert(
+                "synthetic-top".into(),
+                json!({"root":{
+                    "nodeName":"#document", "children":protected_inventory_controls()
+                }}),
+            );
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let observer = tokio::spawn(async move {
+            let error = observe_sensitive_tab_until(
+                &mut state,
+                &session,
+                std::time::Instant::now() + std::time::Duration::from_millis(200),
+            )
+            .await
+            .err()
+            .unwrap();
+            (state, error)
+        });
+        let pair = tokio::time::timeout(std::time::Duration::from_millis(150), async {
+            let first = fixture.commands.recv().await.unwrap();
+            let second = fixture.commands.recv().await.unwrap();
+            [first, second]
+        })
+        .await
+        .expect("both initial requests must dispatch before either reply");
+        assert_eq!(
+            pair.iter()
+                .map(|c| c["method"].as_str().unwrap())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["Page.getFrameTree", "DOM.getDocument"])
+        );
+        for command in &pair {
+            assert_eq!(command["sessionId"], "synthetic-session");
+        }
+        let dom = pair
+            .iter()
+            .find(|c| c["method"] == "DOM.getDocument")
+            .unwrap();
+        assert_eq!(dom["params"], json!({"depth":-1,"pierce":true}));
+        assert_eq!(client.pending_len().await, 2);
+        let (state, error) = observer.await.unwrap();
+        assert!(error.contains("deadline elapsed"));
+        assert!(state.active_iframe_sessions.is_empty());
+        assert!(state.sensitive_observations.is_empty());
+        tokio::task::yield_now().await;
+        assert_eq!(client.pending_len().await, 0);
+        assert_eq!(client.object_cleanup_len().await, 0);
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert!(
+            fixture.commands.try_recv().is_err(),
+            "cancellation must dispatch no control reads"
+        );
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_deadline_diagnostics_classify_held_phases_without_data() {
+        for (held, expected_phase, setup, shallow) in [
+            ("DOM.getDocument", "initial_document", false, false),
+            ("Runtime.callFunctionOn", "controls", false, false),
+            ("Accessibility.getFullAXTree", "ax_tree", false, false),
+            ("Runtime.evaluate", "cursor_projection", false, false),
+            ("", "final_validation", false, true),
+            ("DOM.enable", "frame_setup", true, false),
+        ] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                    if n == 0 {
+                        vec![1]
+                    } else {
+                        vec![]
+                    }
+                });
+                inventory.hold_method = if shallow { None } else { Some(held.into()) };
+                inventory.hold_shallow_document = shallow;
+                for method in ["Page.getFrameTree", "DOM.getDocument"] {
+                    inventory
+                        .reply_delays
+                        .insert(method.into(), std::time::Duration::from_millis(20));
+                }
+            }
+            if setup {
+                state.pending_iframe_setup.insert("session-1".into());
+            }
+            state.browser = Some(fixture.manager);
+            let progress = state.protected_observation_progress();
+            let start = std::time::Instant::now();
+            let error = protected_inventory_before(
+                start + std::time::Duration::from_millis(200),
+                &progress,
+                protected_snapshot(&mut state, &session, &SnapshotOptions::default(), None),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(start.elapsed() < std::time::Duration::from_millis(600));
+            assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+            let diagnostic: Value =
+                serde_json::from_str(error.split_once("deadline elapsed: ").unwrap().1).unwrap();
+            assert_eq!(diagnostic["budgetMs"], 200);
+            let phases = diagnostic["phases"].as_array().unwrap();
+            let phase = phases
+                .iter()
+                .find(|p| p["phase"] == expected_phase)
+                .unwrap();
+            assert!(
+                phase["inFlight"].as_u64().unwrap() > 0,
+                "{expected_phase}: {error}"
+            );
+            assert!(phase["activeMaxMs"].as_u64().unwrap() > 0);
+            assert_eq!(phase["completed"], 0);
+            if expected_phase == "initial_document" {
+                assert_eq!(diagnostic["attempts"], 1);
+                assert!(!phases.iter().any(|p| p["phase"] == "controls"));
+                assert!(phases
+                    .iter()
+                    .any(|p| p["phase"] == "initial_frame_tree" && p["completed"] == 1));
+            }
+            if expected_phase == "controls" {
+                assert_eq!(phase["inFlight"], 6);
+                assert!(phases
+                    .iter()
+                    .any(|p| p["phase"] == "ax_tree" && p["completed"] == 2));
+                assert!(phases
+                    .iter()
+                    .any(|p| p["phase"] == "cursor_projection" && p["completed"] == 2));
+            }
+            assert_eq!(
+                diagnostic
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>(),
+                HashSet::from(["budgetMs", "elapsedMs", "attempts", "phases"])
+            );
+            for phase in phases {
+                assert_eq!(
+                    phase
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<HashSet<_>>(),
+                    HashSet::from([
+                        "phase",
+                        "started",
+                        "completed",
+                        "cancelled",
+                        "inFlight",
+                        "activeMaxMs",
+                        "totalMs",
+                        "maxMs"
+                    ])
+                );
+                for (key, value) in phase.as_object().unwrap() {
+                    if key != "phase" {
+                        assert!(value.is_number());
+                    }
+                }
+            }
+            for private in [
+                "Synthetic-",
+                "synthetic-session",
+                "session-1",
+                "frame-1",
+                "https://",
+                "fixture.invalid",
+                "backendNodeId",
+            ] {
+                assert!(!error.contains(private), "diagnostic leaked {private}");
+            }
+            assert!(state.ref_map.entries_sorted().is_empty());
+            client.settle_object_cleanup().await.unwrap();
+            tokio::task::yield_now().await;
+            assert_eq!(client.pending_len().await, 0);
+            assert_eq!(client.object_cleanup_len().await, 0);
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap();
+                assert!(!method.starts_with("Input.") && method != "Page.navigate");
+                if setup || expected_phase == "initial_document" {
+                    assert_ne!(method, "Runtime.callFunctionOn");
+                }
+            }
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[tokio::test]

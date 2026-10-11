@@ -2106,14 +2106,14 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Initial frame-tree and pierced DOM requests overlap within each exact represented session. Deadline errors append safe phase diagnostic JSON with the original budget, elapsed time, attempts and concurrent phase counts/timings, without DOM, URLs, target/frame/session IDs or control values. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
             return "Always refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes, even on benign tabs. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
         }
         if crate::native::sensitive::guarded(action, &json!({})) {
-            return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+            return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. Deadline errors preserve safe phase diagnostic JSON with numeric counts/timings and no DOM, URLs, IDs or control values. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
         }
     }
     "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities."
@@ -5199,6 +5199,8 @@ mod tests {
                 assert!(description.contains("re-inventoried inside the original deadline"));
                 assert!(description.contains("post-capture guards never retry"));
                 assert!(description.contains("retain typed coverage gaps"));
+                assert!(description.contains("Initial frame-tree and pierced DOM requests overlap"));
+                assert!(description.contains("safe phase diagnostic JSON"));
                 assert!(description.contains("connection-owned cleanup with a 500ms bound"));
             }
             if let Some(action) = sensitive_tool_action(name) {
@@ -5255,6 +5257,35 @@ mod tests {
             .unwrap()
             .contains("SENSITIVE_OUTPUT_UNSUPPORTED"));
         assert_eq!(result["structuredContent"]["response"], response);
+    }
+
+    #[tokio::test]
+    async fn sensitive_deadline_diagnostic_survives_canonical_mcp_rendering() {
+        use crate::native::observation_progress::{ObservationProgress, Phase};
+        let progress = ObservationProgress::default();
+        let error = progress
+            .before(
+                std::time::Instant::now() + std::time::Duration::from_millis(5),
+                progress.track(Phase::InitialDocument, std::future::pending::<()>()),
+            )
+            .await
+            .unwrap_err()
+            .into_message();
+        let response = json!({"success":false,"error":error});
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(1),
+            stdout: response.to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["response"], response);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("initial_document"));
+        let diagnostic: Value =
+            serde_json::from_str(error.split_once("deadline elapsed: ").unwrap().1).unwrap();
+        assert_eq!(diagnostic["phases"][0]["inFlight"], 1);
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub(crate) struct FrameInventory {
     frame_tree_reads: HashMap<String, usize>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
+    pub hold_shallow_document: bool,
     pub reply_delays: HashMap<String, std::time::Duration>,
     pub changed_documents: HashSet<String>,
     pub replace_documents_once: HashSet<String>,
@@ -304,7 +305,11 @@ impl SyntheticCdp {
                             } else {
                                 vec![]
                             };
-                            if inventory.hold_method.as_deref() == Some(method) {
+                            if inventory.hold_method.as_deref() == Some(method)
+                                || (inventory.hold_shallow_document
+                                    && method == "DOM.getDocument"
+                                    && command["params"]["depth"] == 0)
+                            {
                                 inventory.held.push(response);
                                 (None, released, delay)
                             } else {

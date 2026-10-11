@@ -281,10 +281,14 @@ async fn collect_snapshot_batch(
     let ax = async {
         futures_util::future::join_all(frames.iter().map(|(frame, session)| async move {
             let tree: GetFullAXTreeResult = client
-                .send_command_typed(
-                    "Accessibility.getFullAXTree",
-                    &serde_json::json!({"frameId": frame}),
-                    Some(session),
+                .observation_progress
+                .track(
+                    super::observation_progress::Phase::AxTree,
+                    client.send_command_typed(
+                        "Accessibility.getFullAXTree",
+                        &serde_json::json!({"frameId": frame}),
+                        Some(session),
+                    ),
                 )
                 .await?;
             Ok::<_, String>((frame.to_string(), tree))
@@ -296,60 +300,70 @@ async fn collect_snapshot_batch(
     let cursor_context = &context;
     let cursor = async {
         futures_util::future::join_all(sessions.iter().map(|session| async move {
-            let elements = find_cursor_interactive_elements(
-                client,
-                session,
-                cursor_context.root_node(session).ok(),
-            )
-            .await?;
+            let elements = client
+                .observation_progress
+                .track(
+                    super::observation_progress::Phase::CursorProjection,
+                    find_cursor_interactive_elements(
+                        client,
+                        session,
+                        cursor_context.root_node(session).ok(),
+                    ),
+                )
+                .await?;
             Ok::<_, String>((session.to_string(), elements))
         }))
         .await
         .into_iter()
         .collect::<Result<HashMap<_, _>, _>>()
     };
-    let selector = async {
-        let session_id = selected_session.as_str();
-        let selector_backend_ids: Option<std::collections::HashSet<i64>> =
-            if let Some(ref selector) = options.selector {
-                let selected = client.send_command(
+    let selector = client.observation_progress.track(
+        super::observation_progress::Phase::SelectorProjection,
+        async {
+            let session_id = selected_session.as_str();
+            let selector_backend_ids: Option<std::collections::HashSet<i64>> =
+                if let Some(ref selector) = options.selector {
+                    let selected = client.send_command(
                 "DOM.querySelector",
                 Some(serde_json::json!({"nodeId":context.frame_node(root)?,"selector":selector})),
                 Some(session_id),
             ).await?;
-                let node_id = selected["nodeId"]
-                    .as_i64()
-                    .filter(|id| *id > 0)
-                    .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
-                let describe: Value = client
-                    .send_command(
-                        "DOM.describeNode",
-                        Some(serde_json::json!({ "nodeId": node_id, "depth": -1 })),
-                        Some(session_id),
-                    )
-                    .await?;
+                    let node_id = selected["nodeId"]
+                        .as_i64()
+                        .filter(|id| *id > 0)
+                        .ok_or_else(|| {
+                            format!("Selector '{}' did not match any element", selector)
+                        })?;
+                    let describe: Value = client
+                        .send_command(
+                            "DOM.describeNode",
+                            Some(serde_json::json!({ "nodeId": node_id, "depth": -1 })),
+                            Some(session_id),
+                        )
+                        .await?;
 
-                let root_node = describe.get("node").ok_or_else(|| {
-                    format!("Could not resolve DOM node for selector '{}'", selector)
-                })?;
+                    let root_node = describe.get("node").ok_or_else(|| {
+                        format!("Could not resolve DOM node for selector '{}'", selector)
+                    })?;
 
-                let mut ids = std::collections::HashSet::new();
-                collect_backend_node_ids(root_node, &mut ids);
+                    let mut ids = std::collections::HashSet::new();
+                    collect_backend_node_ids(root_node, &mut ids);
 
-                if ids.is_empty() {
-                    return Err(format!(
-                        "Could not resolve backendNodeId for selector '{}'",
-                        selector
-                    ));
-                }
+                    if ids.is_empty() {
+                        return Err(format!(
+                            "Could not resolve backendNodeId for selector '{}'",
+                            selector
+                        ));
+                    }
 
-                Some(ids)
-            } else {
-                None
-            };
+                    Some(ids)
+                } else {
+                    None
+                };
 
-        Ok::<_, String>(selector_backend_ids)
-    };
+            Ok::<_, String>(selector_backend_ids)
+        },
+    );
     let (projections, cursor, selector_backend_ids) = tokio::join!(ax, cursor, selector);
     let selected_frame = root.to_owned();
     Ok(SnapshotBatch {

@@ -8,6 +8,7 @@ use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
 use super::cdp::client::CdpClient;
+use super::observation_progress::{DeadlineDiagnostic, Phase};
 
 pub const UNSUPPORTED: &str = "SENSITIVE_OUTPUT_UNSUPPORTED";
 
@@ -402,6 +403,7 @@ pub(crate) enum InventoryError {
     Unavailable(String),
     Coverage(CoverageGap),
     Changed(DocumentChange),
+    Deadline(DeadlineDiagnostic),
 }
 
 #[derive(Debug)]
@@ -420,6 +422,7 @@ impl InventoryError {
     pub(crate) fn into_message(self) -> String {
         match self {
             Self::Unavailable(message) => message,
+            Self::Deadline(diagnostic) => diagnostic.into_message(),
             Self::Changed(change) => format!(
                 "{UNSUPPORTED}: observed document changed: {}",
                 match change {
@@ -575,19 +578,24 @@ where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            match observe_inventory_with(client, top_session, iframe_sessions, &mut collect).await {
-                Ok(observed) => return Ok(observed),
-                Err(InventoryError::Changed(_)) => tokio::task::yield_now().await,
-                Err(error) => return Err(error),
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        InventoryError::Unavailable(format!("{UNSUPPORTED}: frame observation deadline elapsed"))
-    })?
+    client
+        .observation_progress
+        .before(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match observe_inventory_with(client, top_session, iframe_sessions, &mut collect)
+                        .await
+                    {
+                        Ok(observed) => return Ok(observed),
+                        Err(InventoryError::Changed(_)) => tokio::task::yield_now().await,
+                        Err(error) => return Err(error),
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(InventoryError::Deadline)?
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -666,10 +674,23 @@ async fn inventory_document(
     session: String,
     expected_frame: Option<String>,
 ) -> Result<InventoryDocument, InventoryError> {
-    let live = client
-        .send_command_no_params("Page.getFrameTree", Some(&session))
-        .await
-        .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
+    // Both reads bind to this exact session. Final binding/backend validation
+    // rejects transitions crossing their independent response spans.
+    let (live, document) = tokio::join!(
+        client.observation_progress.track(
+            Phase::InitialFrameTree,
+            client.send_command_no_params("Page.getFrameTree", Some(&session))
+        ),
+        client.observation_progress.track(
+            Phase::InitialDocument,
+            client.send_command(
+                "DOM.getDocument",
+                Some(json!({ "depth": -1, "pierce": true })),
+                Some(&session),
+            )
+        )
+    );
+    let live = live.map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
     let bindings = frame_bindings(&live["frameTree"])?;
     let root_frame = bindings.root.as_str();
     if expected_frame
@@ -678,14 +699,7 @@ async fn inventory_document(
     {
         return Err(format!("{UNSUPPORTED}: frame session association changed").into());
     }
-    let document = client
-        .send_command(
-            "DOM.getDocument",
-            Some(json!({ "depth": -1, "pierce": true })),
-            Some(&session),
-        )
-        .await
-        .map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
+    let document = document.map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
     let root = document
         .get("root")
         .filter(|root| root["nodeName"] == "#document")
@@ -796,6 +810,7 @@ async fn validate_inventory_document(
 
 /// Follow only frame-tree claims and pierced-DOM owners of this tab. An OOPIF
 /// may be absent from its parent's frame tree while its DOM owner is present.
+/// Initial frame metadata and pierced DOM reads overlap within each exact session.
 /// Independent represented sessions and sensitive controls are observed concurrently,
 /// with frame/loader/parent/member/backend bindings rechecked before success.
 /// Volatile metadata and sibling ordering are not identity. Changed observations
@@ -823,8 +838,10 @@ where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
+    client.observation_progress.attempt();
     client
-        .settle_object_cleanup()
+        .observation_progress
+        .track(Phase::ObjectCleanup, client.settle_object_cleanup())
         .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     let mut frames = HashMap::new();
@@ -921,11 +938,12 @@ where
         collect_snapshot_context(&document.root, &document.session, &mut context, None);
     }
     let (values, collected) = tokio::join!(
-        futures_util::future::join_all(controls.iter().map(|control| inventory_control(
-            client,
-            control,
-            &object_group.name
-        ))),
+        futures_util::future::join_all(controls.iter().map(|control| {
+            client.observation_progress.track(
+                Phase::Controls,
+                inventory_control(client, control, &object_group.name),
+            )
+        })),
         collect(context),
     );
     for (control, values) in controls.iter().zip(values) {
@@ -940,18 +958,20 @@ where
         }
     }
 
-    for validation in futures_util::future::join_all(
-        documents
-            .iter()
-            .map(|document| validate_inventory_document(client, document)),
-    )
+    for validation in futures_util::future::join_all(documents.iter().map(|document| {
+        client.observation_progress.track(
+            Phase::FinalValidation,
+            validate_inventory_document(client, document),
+        )
+    }))
     .await
     {
         validation?;
     }
     object_group.finish();
     client
-        .settle_object_cleanup()
+        .observation_progress
+        .track(Phase::ObjectCleanup, client.settle_object_cleanup())
         .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     observation
@@ -1112,6 +1132,116 @@ mod tests {
         );
         client.close().await;
         assert_eq!(server.await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn delayed_initial_pair_preserves_coverage_association_and_changed_errors() {
+        use super::super::lifecycle_fixture::SyntheticCdp;
+        for case in [
+            "coverage",
+            "session",
+            "document",
+            "backend",
+            "binding",
+            "unreadable",
+        ] {
+            let mut fixture = SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                inventory.reply_delays.insert(
+                    "Page.getFrameTree".into(),
+                    std::time::Duration::from_millis(30),
+                );
+                inventory.reply_delays.insert(
+                    "DOM.getDocument".into(),
+                    std::time::Duration::from_millis(10),
+                );
+                inventory.documents.insert("synthetic-top".into(), json!({"root":{
+                    "nodeName":"#document", "frameId":"synthetic-top", "backendNodeId":1000,
+                    "children":[{"nodeName":"INPUT","backendNodeId":11,"attributes":["autocomplete","cc-number"]}]
+                }}));
+                match case {
+                    "coverage" => {
+                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"nodeName":"IFRAME","frameId":"missing-frame"}));
+                    }
+                    "session" => {
+                        inventory
+                            .session_roots
+                            .insert("misbound-session".into(), "wrong-frame".into());
+                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"nodeName":"IFRAME","frameId":"expected-frame"}));
+                    }
+                    "document" => {
+                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["frameId"] =
+                            json!("wrong-frame");
+                    }
+                    "backend" => {
+                        inventory.changed_documents.insert("synthetic-top".into());
+                    }
+                    "binding" => {
+                        inventory.changed_frame_trees.insert(
+                            "synthetic-top".into(),
+                            json!({"frameTree":{
+                                "frame":{"id":"synthetic-top","loaderId":"next-document"}
+                            }}),
+                        );
+                    }
+                    "unreadable" => {
+                        inventory.unreadable.insert("synthetic-top".into());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let frames = if case == "session" {
+                HashMap::from([("expected-frame".into(), "misbound-session".into())])
+            } else {
+                HashMap::new()
+            };
+            let error = observe_inventory(&client, &session, &frames)
+                .await
+                .err()
+                .unwrap();
+            match (case, &error) {
+                ("coverage", InventoryError::Coverage(gap)) => {
+                    assert_eq!(gap.missing_owners, ["missing-frame"])
+                }
+                ("backend", InventoryError::Changed(DocumentChange::BackendIdentity)) => (),
+                ("binding", InventoryError::Changed(DocumentChange::FrameBindings)) => (),
+                ("session" | "document" | "unreadable", InventoryError::Unavailable(_)) => (),
+                _ => panic!("unexpected {case} error: {error:?}"),
+            }
+            let message = error.into_message();
+            assert!(!message.contains("Synthetic-"));
+            if case == "session" {
+                assert!(message.contains("frame session association changed"));
+            }
+            if case == "document" {
+                assert!(message.contains("document frame association changed"));
+            }
+            if case == "unreadable" {
+                assert!(message.contains("pierced DOM unavailable"));
+            }
+            client.settle_object_cleanup().await.unwrap();
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+            assert_eq!(client.pending_len().await, 0);
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap();
+                assert!(!method.starts_with("Input.") && method != "Page.navigate");
+                if matches!(case, "coverage" | "session" | "document" | "unreadable") {
+                    assert_ne!(method, "Runtime.callFunctionOn");
+                }
+            }
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[test]

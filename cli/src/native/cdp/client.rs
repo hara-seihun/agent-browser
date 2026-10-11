@@ -200,6 +200,7 @@ pub struct CdpClient {
     private_sessions: PrivateSessions,
     object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
     next_object_group: AtomicU64,
+    pub(crate) observation_progress: super::super::observation_progress::ObservationProgress,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -462,6 +463,8 @@ impl CdpClient {
             private_sessions,
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
+            observation_progress: super::super::observation_progress::ObservationProgress::default(
+            ),
         })
     }
 

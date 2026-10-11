@@ -3801,6 +3801,10 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   controls run concurrently. Frame/loader/parent/member/backend bindings are exact;
   metadata and sibling order are not identity. Changed observations are discarded
   and re-inventoried within that deadline; unknown identities fail closed.
+  Initial frame-tree and pierced DOM reads overlap within each exact session.
+  Deadline errors append safe JSON: original budget, elapsed time, attempts,
+  and phase counts/timings, including all concurrent in-flight phases.
+  No document data, URLs, target/frame/session IDs or control values are included.
   Complete snapshots reuse one inventory: frame AX/cursor/selector reads overlap
   controls, validate once, then render deterministic children and frame-bound refs.
   Pierced owner/link/base-URL data are reused; cursor reads create no attributes.
