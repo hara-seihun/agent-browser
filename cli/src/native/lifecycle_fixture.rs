@@ -23,11 +23,16 @@ pub(crate) struct FrameInventory {
     pub session_roots: HashMap<String, String>,
     pub documents: HashMap<String, Value>,
     pub frame_trees: HashMap<String, Value>,
+    pub changed_frame_trees: HashMap<String, Value>,
+    frame_tree_reads: HashMap<String, usize>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
     pub reply_delays: HashMap<String, std::time::Duration>,
     pub changed_documents: HashSet<String>,
+    pub replace_documents_once: HashSet<String>,
+    document_backends: HashMap<String, i64>,
     pub invalid_control: bool,
+    pub ax_generation_labels: bool,
     pub objects: HashMap<(String, String), String>,
     held: Vec<Value>,
 }
@@ -115,13 +120,19 @@ impl SyntheticCdp {
                                 "Page.getFrameTree" => {
                                     // Kernel can omit the OOPIF from the parent's tree
                                     // and omit parentId from the OOPIF's own root.
-                                    inventory
-                                        .frame_trees
-                                        .get(&root_frame)
-                                        .cloned()
-                                        .unwrap_or_else(
-                                            || json!({"frameTree":{"frame":{"id":root_frame}}}),
-                                        )
+                                    let reads = inventory
+                                        .frame_tree_reads
+                                        .entry(root_frame.clone())
+                                        .or_insert(0);
+                                    *reads += 1;
+                                    let changed = *reads > 1;
+                                    if changed
+                                        && inventory.changed_frame_trees.contains_key(&root_frame)
+                                    {
+                                        inventory.changed_frame_trees[&root_frame].clone()
+                                    } else {
+                                        inventory.frame_trees.get(&root_frame).cloned().unwrap_or_else(|| json!({"frameTree":{"frame":{"id":root_frame,"loaderId":format!("document-{root_frame}")}}}))
+                                    }
                                 }
                                 "DOM.getDocument" => {
                                     let shallow = command["params"]["depth"] == 0;
@@ -129,12 +140,25 @@ impl SyntheticCdp {
                                         server_observations.fetch_add(1, Ordering::SeqCst);
                                     }
                                     if shallow {
-                                        let backend =
-                                            if inventory.changed_documents.contains(&root_frame) {
-                                                1001
-                                            } else {
-                                                1000
-                                            };
+                                        let mut backend = inventory
+                                            .document_backends
+                                            .get(&root_frame)
+                                            .copied()
+                                            .unwrap_or(1000);
+                                        if inventory.replace_documents_once.remove(&root_frame) {
+                                            backend += 1;
+                                            inventory
+                                                .document_backends
+                                                .insert(root_frame.clone(), backend);
+                                            if let Some(document) =
+                                                inventory.documents.get_mut(&root_frame)
+                                            {
+                                                document["root"]["backendNodeId"] = json!(backend);
+                                            }
+                                        }
+                                        if inventory.changed_documents.contains(&root_frame) {
+                                            backend += 1;
+                                        }
                                         json!({"root":{"nodeName":"#document","backendNodeId":backend}})
                                     } else if let Some(document) =
                                         inventory.documents.get(&root_frame)
@@ -189,6 +213,18 @@ impl SyntheticCdp {
                                         json!({"result":{"value":[format!("Synthetic-{}", command["params"]["objectId"].as_str().unwrap()), "", ""]}})
                                     }
                                 }
+                                "Accessibility.getFullAXTree" => {
+                                    if inventory.ax_generation_labels {
+                                        let backend = inventory
+                                            .document_backends
+                                            .get(&root_frame)
+                                            .copied()
+                                            .unwrap_or(1000);
+                                        json!({"nodes":[{"nodeId":"heading","ignored":false,"role":{"type":"role","value":"heading"},"name":{"type":"computedString","value":format!("snapshot-{backend}")},"backendDOMNodeId":1100}]})
+                                    } else {
+                                        json!({"nodes":[]})
+                                    }
+                                }
                                 "Runtime.evaluate" => {
                                     json!({"result": {"type": "number", "value": 1}})
                                 }
@@ -198,7 +234,11 @@ impl SyntheticCdp {
                             if method == "DOM.getDocument"
                                 && result["root"]["backendNodeId"].is_null()
                             {
-                                result["root"]["backendNodeId"] = json!(1000);
+                                result["root"]["backendNodeId"] = json!(inventory
+                                    .document_backends
+                                    .get(&root_frame)
+                                    .copied()
+                                    .unwrap_or(1000));
                             }
                             let delay = inventory
                                 .reply_delays

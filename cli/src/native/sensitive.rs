@@ -1,7 +1,7 @@
 //! Native form-control observation boundary. Known values are retained only in
 //! daemon memory for the tab's protection state, never serialized or saved to disk.
 //! Observation responses are protected before output or artifact publication.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
@@ -401,6 +401,13 @@ impl CoverageGap {
 pub(crate) enum InventoryError {
     Unavailable(String),
     Coverage(CoverageGap),
+    Changed(DocumentChange),
+}
+
+#[derive(Debug)]
+pub(crate) enum DocumentChange {
+    FrameBindings,
+    BackendIdentity,
 }
 
 impl From<String> for InventoryError {
@@ -413,6 +420,13 @@ impl InventoryError {
     pub(crate) fn into_message(self) -> String {
         match self {
             Self::Unavailable(message) => message,
+            Self::Changed(change) => format!(
+                "{UNSUPPORTED}: observed document changed: {}",
+                match change {
+                    DocumentChange::FrameBindings => "frame bindings",
+                    DocumentChange::BackendIdentity => "DOM backend identity",
+                }
+            ),
             Self::Coverage(gap) => format!(
                 "{UNSUPPORTED}: frame document coverage unavailable: {}",
                 json!({ "missingOwnerFrameIds": gap.missing_owners, "mismatchedFrameSessions": gap.mismatched_frames, "coveredFrameSessions": gap.covered, "attachedFrameSessions": gap.attached })
@@ -456,9 +470,121 @@ pub async fn observe(
         .map_err(InventoryError::into_message)
 }
 
+pub(crate) struct InventoryContext {
+    roots: HashMap<String, Option<i64>>,
+}
+
+impl InventoryContext {
+    pub(crate) fn root_node(&self, session: &str) -> Result<i64, String> {
+        self.roots
+            .get(session)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("{UNSUPPORTED}: DOM root node identity unavailable"))
+    }
+
+    pub(crate) fn require_session(&self, session: &str) -> Result<(), String> {
+        if self.roots.contains_key(session) {
+            Ok(())
+        } else {
+            Err(format!("{UNSUPPORTED}: unrepresented observation session"))
+        }
+    }
+}
+
+/// Collect protected output inside the inventory's document-identity span.
+/// A changed document discards both the output and its control observation.
+/// Capture guards use the one-shot observer instead of admitting older captures.
+pub(crate) async fn observe_with<T, F, Fut>(
+    client: &Arc<CdpClient>,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    mut collect: F,
+) -> Result<(Observation, T), String>
+where
+    F: FnMut(InventoryContext) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match observe_inventory_with(client, top_session, iframe_sessions, &mut collect).await {
+                Ok(observed) => return Ok(observed),
+                Err(InventoryError::Changed(_)) => tokio::task::yield_now().await,
+                Err(error) => return Err(error.into_message()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| format!("{UNSUPPORTED}: frame observation deadline elapsed"))?
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrameBinding {
+    loader: String,
+    parent: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrameBindings {
+    root: String,
+    members: BTreeMap<String, FrameBinding>,
+}
+
+fn frame_bindings(tree: &Value) -> Result<FrameBindings, InventoryError> {
+    fn collect(
+        tree: &Value,
+        parent: Option<&str>,
+        members: &mut BTreeMap<String, FrameBinding>,
+    ) -> Result<String, InventoryError> {
+        let frame = tree["frame"]
+            .as_object()
+            .ok_or_else(|| format!("{UNSUPPORTED}: frame binding unavailable"))?;
+        let id = frame
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("{UNSUPPORTED}: frame binding ID unavailable"))?;
+        let loader = frame
+            .get("loaderId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{UNSUPPORTED}: frame loader identity unavailable"))?;
+        let reported_parent = frame
+            .get("parentId")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| format!("{UNSUPPORTED}: frame parent identity unavailable"))
+            })
+            .transpose()?;
+        if parent.is_some() && reported_parent.is_some() && parent != reported_parent {
+            return Err(format!("{UNSUPPORTED}: frame parent association changed").into());
+        }
+        let binding = FrameBinding {
+            loader: loader.to_owned(),
+            parent: parent.or(reported_parent).map(str::to_owned),
+        };
+        if members.insert(id.to_owned(), binding).is_some() {
+            return Err(format!("{UNSUPPORTED}: duplicate frame binding").into());
+        }
+        if let Some(children) = tree.get("childFrames") {
+            let children = children
+                .as_array()
+                .ok_or_else(|| format!("{UNSUPPORTED}: frame membership unavailable"))?;
+            for child in children {
+                collect(child, Some(id), members)?;
+            }
+        }
+        Ok(id.to_owned())
+    }
+    let mut members = BTreeMap::new();
+    let root = collect(tree, None, &mut members)?;
+    Ok(FrameBindings { root, members })
+}
+
 struct InventoryDocument {
     session: String,
     tree: Value,
+    bindings: FrameBindings,
     root: Value,
     backend: i64,
 }
@@ -472,9 +598,8 @@ async fn inventory_document(
         .send_command_no_params("Page.getFrameTree", Some(&session))
         .await
         .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
-    let root_frame = live["frameTree"]["frame"]["id"]
-        .as_str()
-        .ok_or_else(|| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
+    let bindings = frame_bindings(&live["frameTree"])?;
+    let root_frame = bindings.root.as_str();
     if expected_frame
         .as_deref()
         .is_some_and(|frame| frame != root_frame)
@@ -506,6 +631,7 @@ async fn inventory_document(
     Ok(InventoryDocument {
         session,
         tree: live["frameTree"].clone(),
+        bindings,
         root: root.clone(),
         backend,
     })
@@ -574,14 +700,24 @@ async fn validate_inventory_document(
     );
     let live = live.map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
     let root = root.map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
-    if live["frameTree"] != document.tree
-        || root["root"]["backendNodeId"].as_i64() != Some(document.backend)
-        || root["root"]["nodeName"] != "#document"
-        || root["root"]["frameId"]
-            .as_str()
-            .is_some_and(|frame| Some(frame) != document.tree["frame"]["id"].as_str())
+    if frame_bindings(&live["frameTree"])? != document.bindings {
+        return Err(InventoryError::Changed(DocumentChange::FrameBindings));
+    }
+    if root["root"]["nodeName"] != "#document" {
+        return Err(format!("{UNSUPPORTED}: DOM root unavailable").into());
+    }
+    if root["root"]["frameId"]
+        .as_str()
+        .is_some_and(|frame| frame != document.bindings.root)
     {
-        return Err(format!("{UNSUPPORTED}: observed document changed").into());
+        return Err(format!("{UNSUPPORTED}: document frame association changed").into());
+    }
+    let backend = root["root"]["backendNodeId"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("{UNSUPPORTED}: document identity unavailable"))?;
+    if backend != document.backend {
+        return Err(InventoryError::Changed(DocumentChange::BackendIdentity));
     }
     Ok(())
 }
@@ -589,7 +725,9 @@ async fn validate_inventory_document(
 /// Follow only frame-tree claims and pierced-DOM owners of this tab. An OOPIF
 /// may be absent from its parent's frame tree while its DOM owner is present.
 /// Independent represented sessions and sensitive controls are observed concurrently,
-/// with tree and document identities rechecked before admitting the complete result.
+/// with frame/loader/parent/member/backend bindings rechecked before success.
+/// Volatile metadata and sibling ordering are not identity. Changed observations
+/// are discarded for whole-batch reinventory by the deadline-owning caller.
 /// Renderer groups register connection-owned cancellation cleanup before resolve;
 /// cancellation cannot dispatch further value reads or abandon remote handles.
 /// Cached sessions from unrelated tabs are not evidence of membership.
@@ -598,6 +736,21 @@ pub(crate) async fn observe_inventory(
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, InventoryError> {
+    observe_inventory_with(client, top_session, iframe_sessions, |_| async { Ok(()) })
+        .await
+        .map(|(observation, ())| observation)
+}
+
+async fn observe_inventory_with<T, F, Fut>(
+    client: &Arc<CdpClient>,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    mut collect: F,
+) -> Result<(Observation, T), InventoryError>
+where
+    F: FnMut(InventoryContext) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
     client
         .settle_object_cleanup()
         .await
@@ -613,7 +766,7 @@ pub(crate) async fn observe_inventory(
     while let Some(document) = sessions.next().await {
         let document = document?;
         let session = &document.session;
-        let root_frame = document.tree["frame"]["id"].as_str().unwrap();
+        let root_frame = document.bindings.root.as_str();
         collect_tree_frames(&document.tree, session, iframe_sessions, &mut frames)?;
         covered.insert(root_frame.to_owned(), session.clone());
         collect_document_frames(&document.root, session, &mut covered, &mut owners);
@@ -679,6 +832,18 @@ pub(crate) async fn observe_inventory(
             }
         }
     }
+    let context = InventoryContext {
+        roots: documents
+            .iter()
+            .map(|document| {
+                (
+                    document.session.clone(),
+                    document.root["nodeId"].as_i64().filter(|id| *id > 0),
+                )
+            })
+            .collect(),
+    };
+    let collected = collect(context).await;
     for validation in futures_util::future::join_all(
         documents
             .iter()
@@ -697,7 +862,7 @@ pub(crate) async fn observe_inventory(
         .secrets
         .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
     observation.secrets.dedup_by(|a, b| a.0 == b.0);
-    Ok(observation)
+    Ok((observation, collected?))
 }
 
 pub async fn require_public(
@@ -792,10 +957,10 @@ mod tests {
                 let session = request["sessionId"].as_str().unwrap_or("");
                 let result = match request["method"].as_str().unwrap() {
                     "Page.getFrameTree" if session == "top-session" => {
-                        json!({"frameTree":{"frame":{"id":"top"},"childFrames":[{"frame":{"id":"payment", "parentId":"top"}}]}})
+                        json!({"frameTree":{"frame":{"id":"top","loaderId":"top-document"},"childFrames":[{"frame":{"id":"payment", "parentId":"top","loaderId":"payment-document"}}]}})
                     }
                     "Page.getFrameTree" => {
-                        json!({"frameTree":{"frame":{"id":"payment", "parentId":"top"}}})
+                        json!({"frameTree":{"frame":{"id":"payment", "parentId":"top","loaderId":"payment-document"}}})
                     }
                     "DOM.getDocument" if session == "top-session" => {
                         json!({"root":{"nodeName":"#document", "backendNodeId":100, "children":[{"nodeName":"IFRAME", "frameId":"payment"}]}})
@@ -851,6 +1016,55 @@ mod tests {
         );
         client.close().await;
         assert_eq!(server.await.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_protected_inventory_frame_bindings_preserve_all_identity_distinctions() {
+        let tree = json!({"frame":{"id":"top","loaderId":"top-document"},"childFrames":[
+            {"frame":{"id":"a","loaderId":"document-a","parentId":"top"}},
+            {"frame":{"id":"b","loaderId":"document-b","parentId":"top"}}
+        ]});
+        let binding = frame_bindings(&tree).unwrap();
+        let mut reordered = tree.clone();
+        reordered["frame"]["name"] = json!("changed-name");
+        reordered["frame"]["urlFragment"] = json!("#changed-fragment");
+        reordered["childFrames"].as_array_mut().unwrap().reverse();
+        assert_eq!(frame_bindings(&reordered).unwrap(), binding);
+        for path in [vec!["frame", "loaderId"], vec!["frame", "parentId"]] {
+            let mut changed = tree.clone();
+            changed[path[0]][path[1]] = json!("changed-identity");
+            assert_ne!(frame_bindings(&changed).unwrap(), binding);
+        }
+        let mut changed_root = tree.clone();
+        changed_root["frame"]["id"] = json!("next-root");
+        for child in changed_root["childFrames"].as_array_mut().unwrap() {
+            child["frame"]["parentId"] = json!("next-root");
+        }
+        assert_ne!(frame_bindings(&changed_root).unwrap(), binding);
+        let mut changed = tree.clone();
+        changed["childFrames"][0]["frame"]["loaderId"] = json!("next-child-document");
+        assert_ne!(frame_bindings(&changed).unwrap(), binding);
+        let mut removed = tree.clone();
+        removed["childFrames"].as_array_mut().unwrap().pop();
+        assert_ne!(frame_bindings(&removed).unwrap(), binding);
+        let mut added = tree.clone();
+        added["childFrames"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"frame":{"id":"c","loaderId":"document-c","parentId":"top"}}));
+        assert_ne!(frame_bindings(&added).unwrap(), binding);
+        let mut reparented = tree.clone();
+        reparented["childFrames"][0]["frame"]["parentId"] = json!("unrelated-parent");
+        assert!(frame_bindings(&reparented).is_err());
+        for invalid in [
+            json!({"frame":{"id":"top"}}),
+            json!({"frame":{"id":"top","loaderId":null}}),
+            json!({"frame":{"id":"top","loaderId":"document","parentId":5}}),
+            json!({"frame":{"id":"top","loaderId":"document"},"childFrames":null}),
+            json!({"frame":{"id":"top","loaderId":"document"},"childFrames":[{"frame":{"id":"top","loaderId":"document"}}]}),
+        ] {
+            assert!(frame_bindings(&invalid).is_err());
+        }
     }
 
     #[test]

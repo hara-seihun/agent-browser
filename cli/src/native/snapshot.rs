@@ -223,6 +223,8 @@ impl RoleNameTracker {
     }
 }
 
+/// Collect AX and selector membership within protected document bindings.
+/// Identity transitions discard all collected data before a bounded retry.
 pub async fn take_snapshot(
     client: &Arc<CdpClient>,
     session_id: &str,
@@ -241,50 +243,19 @@ pub async fn take_snapshot(
     // If a CSS selector is provided, resolve the set of backendNodeIds that
     // belong to the DOM subtree rooted at the matched element.  We use this
     // set to pick the right AX subtree root(s) later.
+    let (observation, (selector_backend_ids, ax_tree, effective_session_id)) = super::sensitive::observe_with(client, session_id, iframe_sessions, |context| async move {
     let selector_backend_ids: Option<std::collections::HashSet<i64>> =
         if let Some(ref selector) = options.selector {
-            let js = format!(
-                "document.querySelector({})",
-                serde_json::to_string(selector).unwrap_or_default()
-            );
-            let result: EvaluateResult = client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(false),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await?;
-
-            // A throwing evaluation (e.g. an invalid CSS selector like a
-            // snapshot ref "@e1") still yields an objectId — for the
-            // exception object. Passing that to DOM.describeNode produces the
-            // cryptic "Object id doesn't reference a Node"; fail clearly
-            // instead, and only accept results that are actually DOM nodes.
-            if let Some(exception) = result.exception_details {
-                let detail = exception
-                    .exception
-                    .and_then(|e| e.description)
-                    .unwrap_or(exception.text);
-                return Err(format!("Invalid selector '{}': {}", selector, detail));
-            }
-            if result.result.subtype.as_deref() != Some("node") {
-                return Err(format!("Selector '{}' did not match any element", selector));
-            }
-            let object_id = result
-                .result
-                .object_id
-                .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
-
-            // Request the full DOM subtree (depth: -1) so we can collect all
-            // backendNodeIds that live under the matched element.
+            let selected = client.send_command(
+                "DOM.querySelector",
+                Some(serde_json::json!({"nodeId":context.root_node(session_id)?,"selector":selector})),
+                Some(session_id),
+            ).await?;
+            let node_id = selected["nodeId"].as_i64().filter(|id| *id > 0).ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
             let describe: Value = client
                 .send_command(
                     "DOM.describeNode",
-                    Some(serde_json::json!({ "objectId": object_id, "depth": -1 })),
+                    Some(serde_json::json!({ "nodeId": node_id, "depth": -1 })),
                     Some(session_id),
                 )
                 .await?;
@@ -310,6 +281,7 @@ pub async fn take_snapshot(
 
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
+    context.require_session(effective_session_id)?;
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
     if effective_session_id != session_id {
@@ -328,7 +300,8 @@ pub async fn take_snapshot(
         )
         .await?;
 
-    let observation = super::sensitive::observe(client, session_id, iframe_sessions).await?;
+    Ok((selector_backend_ids, ax_tree, effective_session_id))
+    }).await?;
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
     for node in &mut tree_nodes {
         node.name = observation.protect_text(&node.name);
