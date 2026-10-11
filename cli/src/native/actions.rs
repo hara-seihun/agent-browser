@@ -3259,7 +3259,7 @@ async fn execute_command_inner(
     }
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
-    if action != "dialog" {
+    if !matches!(action, "dialog" | "close" | "session_info") && !lifecycle_confirmation {
         if let Some(ref dialog) = state.pending_dialog {
             if let Some(obj) = resp.as_object_mut() {
                 obj.insert(
