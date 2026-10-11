@@ -818,6 +818,13 @@ mod tests {
         )
         .await;
         assert_eq!(approval["data"]["confirmation_required"], true);
+        let expected_session = initial
+            .browser
+            .as_ref()
+            .unwrap()
+            .active_session_id()
+            .unwrap()
+            .to_owned();
         let state = Arc::new(tokio::sync::Mutex::new(initial));
         let socket_path = home.path().join("synthetic-daemon.sock");
         let socket_for_server = socket_path.clone();
@@ -835,11 +842,24 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(1), fixture.commands.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(client.pending_len().await, 1);
+        let mut methods = Vec::new();
+        for _ in 0..2 {
+            let command = tokio::time::timeout(Duration::from_secs(1), fixture.commands.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(command["sessionId"], expected_session);
+            if command["method"] == "DOM.getDocument" {
+                assert_eq!(
+                    command["params"],
+                    serde_json::json!({"depth": -1, "pierce": true})
+                );
+            }
+            methods.push(command["method"].as_str().unwrap().to_owned());
+        }
+        methods.sort();
+        assert_eq!(methods, ["DOM.getDocument", "Page.getFrameTree"]);
+        assert_eq!(client.pending_len().await, 2);
 
         let peer = tokio::net::UnixStream::connect(socket_path).await.unwrap();
         let (reader, mut writer) = tokio::io::split(peer);
