@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -11,6 +11,8 @@ use super::browser::BrowserManager;
 pub(crate) struct SyntheticCdp {
     pub manager: BrowserManager,
     pub stalled: Arc<AtomicBool>,
+    pub coverage_failures: Arc<AtomicUsize>,
+    pub coverage_observations: Arc<AtomicUsize>,
     pub commands: mpsc::UnboundedReceiver<Value>,
     pub server: tokio::task::JoinHandle<()>,
 }
@@ -21,6 +23,10 @@ impl SyntheticCdp {
         let address = listener.local_addr().unwrap();
         let stalled = Arc::new(AtomicBool::new(false));
         let stall_server = stalled.clone();
+        let coverage_failures = Arc::new(AtomicUsize::new(0));
+        let coverage_observations = Arc::new(AtomicUsize::new(0));
+        let server_failures = coverage_failures.clone();
+        let server_observations = coverage_observations.clone();
         let (tx, mut commands) = mpsc::unbounded_channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -39,6 +45,23 @@ impl SyntheticCdp {
                                 "title": "synthetic", "attached": false
                             }]}),
                             "Target.attachToTarget" => json!({"sessionId": "synthetic-session"}),
+                            "Page.getFrameTree" => {
+                                json!({"frameTree":{"frame":{"id":"synthetic-top"}}})
+                            }
+                            "DOM.getDocument" => {
+                                server_observations.fetch_add(1, Ordering::SeqCst);
+                                let missing = server_failures
+                                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                        n.checked_sub(1)
+                                    })
+                                    .is_ok();
+                                let children = if missing {
+                                    vec![json!({"nodeName":"IFRAME","frameId":"pending-frame"})]
+                                } else {
+                                    vec![]
+                                };
+                                json!({"root":{"nodeName":"#document","children":children}})
+                            }
                             "Runtime.evaluate" => json!({"result": {"type": "number", "value": 1}}),
                             _ => json!({}),
                         };
@@ -69,6 +92,8 @@ impl SyntheticCdp {
         Self {
             manager,
             stalled,
+            coverage_failures,
+            coverage_observations,
             commands,
             server,
         }

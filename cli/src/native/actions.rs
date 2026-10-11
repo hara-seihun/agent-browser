@@ -4717,20 +4717,40 @@ async fn observe_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
-    let first = {
-        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
-    };
-    match first {
-        Err(error)
-            if error.starts_with(&format!(
-                "{}: frame document coverage unavailable:",
-                super::sensitive::UNSUPPORTED
-            )) =>
-        {
-            // A browser round-trip orders already-created target notifications
-            // before the drain. Merely draining the queue can race its reader.
+    observe_sensitive_tab_until(
+        state,
+        session,
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .await
+}
+
+async fn observe_sensitive_tab_until(
+    state: &mut DaemonState,
+    session: &str,
+    deadline: std::time::Instant,
+) -> Result<super::sensitive::Observation, String> {
+    loop {
+        let current = {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            if mgr.active_session_id()? != session {
+                return Err(format!(
+                    "{}: active observation target changed",
+                    super::sensitive::UNSUPPORTED
+                ));
+            }
+            super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
+        };
+        match current {
+            Err(error)
+                if error.starts_with(&format!(
+                    "{}: frame document coverage unavailable:",
+                    super::sensitive::UNSUPPORTED
+                )) && std::time::Instant::now() < deadline =>
             {
+                // Stripe can create another iframe while the previous one is
+                // being inventoried. Admit only a complete read; never replay
+                // the surrounding action. Keep consumed event setup intact.
                 let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
                 mgr.client
                     .send_command_no_params("Target.getTargets", None)
@@ -4741,18 +4761,10 @@ async fn observe_sensitive_tab(
                             super::sensitive::UNSUPPORTED
                         )
                     })?;
+                state.drain_cdp_events_background().await?;
             }
-            state.drain_cdp_events_background().await?;
-            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-            if mgr.active_session_id()? != session {
-                return Err(format!(
-                    "{}: active observation target changed",
-                    super::sensitive::UNSUPPORTED
-                ));
-            }
-            super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
+            outcome => return outcome,
         }
-        outcome => outcome,
     }
 }
 
@@ -13992,6 +14004,59 @@ mod tests {
         )
         .await;
         assert_eq!(info["success"], true);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_observation_stabilization_handles_successive_new_frames() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture
+            .coverage_failures
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        fixture
+            .coverage_observations
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let observed_count = fixture.coverage_observations.clone();
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let observed = observe_sensitive_tab(&mut state, &session).await.unwrap();
+        assert!(!observed.has_sensitive());
+        assert_eq!(observed_count.load(std::sync::atomic::Ordering::SeqCst), 4);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_observation_stabilization_never_admits_permanent_missing_frame() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture
+            .coverage_failures
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(error.contains("pending-frame"));
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            assert!(
+                !method.starts_with("Input.")
+                    && method != "Page.navigate"
+                    && method != "Runtime.callFunctionOn"
+            );
+        }
         client.close().await;
         fixture.server.await.unwrap();
     }
