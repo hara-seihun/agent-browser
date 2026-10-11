@@ -293,6 +293,19 @@ where
     if filled.get("exceptionDetails").is_some() {
         return Err(PAGE.into());
     }
+    // Page-visible masks are private too; only hand-built metadata leaves here.
+    if let Some(rendered) = filled["result"]["value"]["redactionValue"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        state
+            .sensitive_observations
+            .entry(bound.session.clone())
+            .or_default()
+            .remember_private_value(&object_session, backend, "credential", rendered);
+    } else if filled["result"]["value"]["status"].as_str() == Some("filled") {
+        return Err(PAGE.into());
+    }
     match filled["result"]["value"]["status"].as_str() {
         Some("filled") => Ok(
             json!({"filled": true, "target": req.target, "frame": req.frame, "field": req.field}),
@@ -328,10 +341,11 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field) {
     this.dispatchEvent(new view.Event('input', {bubbles:true}));
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
     await new Promise(resolve => view.setTimeout(resolve, 100));
-    if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
+    const rendered = this.value;
+    if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
     const presentation = field === 'number' ? s => s.replace(/[ -]/g, '')
         : field === 'expiration_date' ? s => s.replace(/ /g, '') : s => s;
-    return {status:presentation(this.value) === presentation(expected) ? 'filled' : 'not_retained'};
+    return {status:presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
 }"#;
 
 #[cfg(test)]
@@ -390,7 +404,7 @@ mod tests {
                                     "document-object"
                                 );
                                 server_fills.fetch_add(1, Ordering::SeqCst);
-                                json!({"result":{"value":{"status":"filled"}}})
+                                json!({"result":{"value":{"status":"filled", "redactionValue":"synthetic-private-value"}}})
                             } else {
                                 json!({"result":{"objectId":"document-object", "type":"object"}})
                             }
@@ -446,6 +460,7 @@ mod tests {
         .unwrap();
         assert!(!result.to_string().contains(secret));
         assert_eq!(result["filled"], true);
+        assert!(result.get("redactionValue").is_none());
         assert_eq!(fixture.fills.load(Ordering::SeqCst), 1);
         fixture.server.abort();
     }
