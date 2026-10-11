@@ -14973,8 +14973,13 @@ mod tests {
                         assert!(result.is_err());
                     } else {
                         let error = result.unwrap().unwrap_err();
-                        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
-                        assert!(!error.contains("Synthetic-"));
+                        assert!(matches!(
+                            error,
+                            super::super::sensitive::InventoryError::Unavailable(_)
+                        ));
+                        let message = error.into_message();
+                        assert!(message.starts_with(super::super::sensitive::UNSUPPORTED));
+                        assert!(!message.contains("Synthetic-"));
                     }
                     assert_eq!(refs.entries_sorted().len(), 1);
                     assert_eq!(refs.get("e1").unwrap().name, "previous");
