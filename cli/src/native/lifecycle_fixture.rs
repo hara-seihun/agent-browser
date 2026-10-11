@@ -33,6 +33,7 @@ pub(crate) struct FrameInventory {
     document_backends: HashMap<String, i64>,
     pub invalid_control: bool,
     pub ax_generation_labels: bool,
+    pub ax_new_owner: Option<String>,
     pub objects: HashMap<(String, String), String>,
     held: Vec<Value>,
 }
@@ -214,13 +215,28 @@ impl SyntheticCdp {
                                     }
                                 }
                                 "Accessibility.getFullAXTree" => {
-                                    if inventory.ax_generation_labels {
-                                        let backend = inventory
+                                    let backend = inventory
+                                        .document_backends
+                                        .get(&root_frame)
+                                        .copied()
+                                        .unwrap_or(1000);
+                                    if let Some(frame) = inventory.ax_new_owner.take() {
+                                        inventory.owners.push(frame.clone());
+                                        inventory
                                             .document_backends
-                                            .get(&root_frame)
-                                            .copied()
-                                            .unwrap_or(1000);
-                                        json!({"nodes":[{"nodeId":"heading","ignored":false,"role":{"type":"role","value":"heading"},"name":{"type":"computedString","value":format!("snapshot-{backend}")},"backendDOMNodeId":1100}]})
+                                            .insert(root_frame.clone(), backend + 1);
+                                        if let Some(document) =
+                                            inventory.documents.get_mut(&root_frame)
+                                        {
+                                            document["root"]["backendNodeId"] = json!(backend + 1);
+                                            document["root"]["children"]
+                                                .as_array_mut()
+                                                .unwrap()
+                                                .push(json!({"nodeName":"IFRAME","frameId":frame}));
+                                        }
+                                    }
+                                    if inventory.ax_generation_labels {
+                                        json!({"nodes":[ {"nodeId":"heading","ignored":false,"role":{"type":"role","value":"heading"},"name":{"type":"computedString","value":format!("snapshot-{backend}")},"backendDOMNodeId":1100}]})
                                     } else {
                                         json!({"nodes":[]})
                                     }

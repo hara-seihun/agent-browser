@@ -3801,7 +3801,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   controls run concurrently. Frame/loader/parent/member/backend bindings are exact;
   metadata and sibling order are not identity. Changed observations are discarded
   and re-inventoried within that deadline; unknown identities fail closed.
-  Snapshots recollect AX with inventory. Post-capture guards never retry.
+  Snapshot/ref/diff batches reconcile newly represented iframe owners and
+  recollect AX under one deadline. Post-capture guards never retry.
   Cancelled renderer handles retain connection-owned cleanup (500ms bound).
   Unresolved cleanup refuses further observation until connection close.
   This is native form-input protection, not general secret detection in page text.

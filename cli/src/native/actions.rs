@@ -5972,6 +5972,52 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
 
+/// The daemon owns one deadline across coverage recovery and every discarded
+/// AX/control/ref batch; effects and navigation are never part of this retry.
+async fn protected_snapshot(
+    state: &mut DaemonState,
+    session: &str,
+    options: &SnapshotOptions,
+    frame: Option<&str>,
+) -> Result<(String, RefMap), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    protected_inventory_before(deadline, async {
+        loop {
+            state.harvest_iframe_attachments().await?;
+            state.prepare_pending_iframes().await?;
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            if mgr.active_session_id()? != session {
+                return Err(format!(
+                    "{}: active observation target changed",
+                    super::sensitive::UNSUPPORTED
+                ));
+            }
+            let mut refs = RefMap::new();
+            match snapshot::take_snapshot(
+                &mgr.client,
+                session,
+                options,
+                &mut refs,
+                frame,
+                &state.iframe_sessions,
+            )
+            .await
+            {
+                Ok(tree) => return Ok((tree, refs)),
+                Err(super::sensitive::InventoryError::Coverage(_)) => {
+                    observe_sensitive_tab_until(state, session, deadline).await?;
+                }
+                Err(super::sensitive::InventoryError::Changed(_)) => {
+                    state.drain_cdp_events_background().await?;
+                }
+                Err(error) => return Err(error.into_message()),
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -5997,16 +6043,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     state.ref_map.clear();
-    let tree = snapshot::take_snapshot(
-        &mgr.client,
-        &session_id,
-        &options,
-        &mut state.ref_map,
-        state.active_frame_id.as_deref(),
-        &state.iframe_sessions,
-    )
-    .await?;
-
+    let frame = state.active_frame_id.clone();
+    let (tree, refs) = protected_snapshot(state, &session_id, &options, frame.as_deref()).await?;
+    state.ref_map = refs;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url = mgr.get_url().await.unwrap_or_default();
 
     let refs: serde_json::Map<String, Value> = state
@@ -6100,20 +6140,20 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     if annotate {
         state.ref_map.clear();
-        let _ = snapshot::take_snapshot(
-            &mgr.client,
+        let frame = state.active_frame_id.clone();
+        let (_, refs) = protected_snapshot(
+            state,
             &session_id,
             &SnapshotOptions {
                 interactive: true,
                 ..SnapshotOptions::default()
             },
-            &mut state.ref_map,
-            state.active_frame_id.as_deref(),
-            &state.iframe_sessions,
+            frame.as_deref(),
         )
         .await?;
+        state.ref_map = refs;
     }
-
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let result = screenshot::take_screenshot(
         &mgr.client,
         &session_id,
@@ -7268,16 +7308,9 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     };
     // Start from the same ref base as a normal baseline snapshot so unchanged lines align.
     // Build the replacement separately so a failed diff leaves the existing refs usable.
-    let mut current_ref_map = RefMap::new();
-    let current = snapshot::take_snapshot(
-        &mgr.client,
-        &session_id,
-        &options,
-        &mut current_ref_map,
-        state.active_frame_id.as_deref(),
-        &state.iframe_sessions,
-    )
-    .await?;
+    let frame = state.active_frame_id.clone();
+    let (current, current_ref_map) =
+        protected_snapshot(state, &session_id, &options, frame.as_deref()).await?;
 
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
 
@@ -7310,8 +7343,6 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
 }
 
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-
     let url1 = cmd
         .get("url1")
         .and_then(|v| v.as_str())
@@ -7331,33 +7362,21 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.ref_map.clear();
 
     // Navigate to URL1 and snapshot
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.navigate(url1, wait_until).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
-    let mut snap1_ref_map = RefMap::new();
-    let snap1 = snapshot::take_snapshot(
-        &mgr.client,
-        &session_id,
-        &options,
-        &mut snap1_ref_map,
-        None,
-        &state.iframe_sessions,
-    )
-    .await?;
+    let (snap1, _) = protected_snapshot(state, &session_id, &options, None).await?;
 
     // Navigate to URL2 and snapshot
     state.ref_map.clear();
-    mgr.navigate(url2, wait_until).await?;
-    let mut snap2_ref_map = RefMap::new();
-    let snap2 = snapshot::take_snapshot(
-        &mgr.client,
-        &session_id,
-        &options,
-        &mut snap2_ref_map,
-        None,
-        &state.iframe_sessions,
-    )
-    .await?;
+    state
+        .browser
+        .as_mut()
+        .ok_or("Browser not launched")?
+        .navigate(url2, wait_until)
+        .await?;
+    let (snap2, snap2_ref_map) = protected_snapshot(state, &session_id, &options, None).await?;
 
     let result = diff::diff_text(&snap1, &snap2);
     state.ref_map = snap2_ref_map;
@@ -14617,6 +14636,122 @@ mod tests {
         assert_eq!(client.object_cleanup_len().await, 0);
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_snapshot_new_owner_reconciles_and_recollects_ax() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.documents.insert(
+                "synthetic-top".into(),
+                json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}),
+            );
+            inventory.ax_generation_labels = true;
+            inventory
+                .targets
+                .push(("late-stripe".into(), "iframe".into()));
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        observe_sensitive_tab(&mut state, &session).await.unwrap();
+        fixture.frame_inventory.lock().unwrap().ax_new_owner = Some("late-stripe".into());
+        while fixture.commands.try_recv().is_ok() {}
+        let start = std::time::Instant::now();
+        let (captured, _) =
+            protected_snapshot(&mut state, &session, &SnapshotOptions::default(), None)
+                .await
+                .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert!(captured.contains("snapshot-1001"));
+        assert!(!captured.contains("snapshot-1000"));
+        assert!(state.iframe_sessions.contains_key("late-stripe"));
+        assert!(state.pending_iframe_setup.is_empty());
+        assert!(state.pending_iframe_attachments.is_empty());
+        let mut ax = 0;
+        let mut attaches = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            assert!(!method.starts_with("Input.") && method != "Page.navigate");
+            if method == "Accessibility.getFullAXTree" {
+                ax += 1;
+            }
+            if method == "Target.attachToTarget" {
+                assert_eq!(command["params"]["targetId"], "late-stripe");
+                attaches += 1;
+            }
+        }
+        assert_eq!((ax, attaches), (2, 1));
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert_eq!(client.object_cleanup_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_snapshot_new_owner_refuses_wrong_absent_or_unreadable_targets(
+    ) {
+        for target_type in [None, Some("worker"), Some("iframe")] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                inventory.documents.insert("synthetic-top".into(), json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}));
+                inventory.ax_generation_labels = true;
+                if let Some(kind) = target_type {
+                    inventory.targets.push(("late-stripe".into(), kind.into()));
+                }
+                inventory
+                    .targets
+                    .push(("unrelated".into(), "iframe".into()));
+                if target_type == Some("iframe") {
+                    inventory.unreadable.insert("late-stripe".into());
+                }
+            }
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            state.browser = Some(fixture.manager);
+            observe_sensitive_tab(&mut state, &session).await.unwrap();
+            state
+                .iframe_sessions
+                .insert("unrelated".into(), "unrelated-session".into());
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                inventory
+                    .session_roots
+                    .insert("unrelated-session".into(), "unrelated".into());
+                inventory.unreadable.insert("unrelated".into());
+                inventory.ax_new_owner = Some("late-stripe".into());
+            }
+            let error = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                protected_snapshot(&mut state, &session, &SnapshotOptions::default(), None),
+            )
+            .await;
+            if target_type == Some("iframe") {
+                assert!(error
+                    .unwrap()
+                    .err()
+                    .unwrap()
+                    .contains("pierced DOM unavailable"));
+                assert!(state.iframe_sessions.contains_key("late-stripe"));
+            } else {
+                assert!(error.is_err());
+                assert!(!state.iframe_sessions.contains_key("late-stripe"));
+            }
+            client.settle_object_cleanup().await.unwrap();
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "Target.attachToTarget" {
+                    assert_eq!(target_type, Some("iframe"));
+                    assert_eq!(command["params"]["targetId"], "late-stripe");
+                }
+                assert_ne!(command["sessionId"], "unrelated-session");
+            }
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[tokio::test]

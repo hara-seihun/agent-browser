@@ -500,7 +500,7 @@ pub(crate) async fn observe_with<T, F, Fut>(
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
     mut collect: F,
-) -> Result<(Observation, T), String>
+) -> Result<(Observation, T), InventoryError>
 where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
@@ -510,12 +510,14 @@ where
             match observe_inventory_with(client, top_session, iframe_sessions, &mut collect).await {
                 Ok(observed) => return Ok(observed),
                 Err(InventoryError::Changed(_)) => tokio::task::yield_now().await,
-                Err(error) => return Err(error.into_message()),
+                Err(error) => return Err(error),
             }
         }
     })
     .await
-    .map_err(|_| format!("{UNSUPPORTED}: frame observation deadline elapsed"))?
+    .map_err(|_| {
+        InventoryError::Unavailable(format!("{UNSUPPORTED}: frame observation deadline elapsed"))
+    })?
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -232,7 +232,7 @@ pub async fn take_snapshot(
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<String, String> {
+) -> Result<String, super::sensitive::InventoryError> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
@@ -344,7 +344,8 @@ pub async fn take_snapshot(
             return Err(format!(
                 "No accessibility node found for selector '{}'",
                 options.selector.as_deref().unwrap_or("")
-            ));
+            )
+            .into());
         }
         roots
     } else {
@@ -521,9 +522,7 @@ pub async fn take_snapshot(
             };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
             if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                // Snapshot the child frame; errors are silently ignored
-                // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
+                let child = Box::pin(take_snapshot(
                     client,
                     session_id,
                     options,
@@ -531,14 +530,17 @@ pub async fn take_snapshot(
                     Some(&child_fid),
                     iframe_sessions,
                 ))
-                .await
-                {
-                    if !child_text.is_empty()
-                        && child_text != "(empty page)"
-                        && child_text != "(no interactive elements)"
-                    {
-                        iframe_snapshots.push((ref_id.to_string(), child_text));
+                .await;
+                match child {
+                    Ok(child_text) => {
+                        if !child_text.is_empty()
+                            && child_text != "(empty page)"
+                            && child_text != "(no interactive elements)"
+                        {
+                            iframe_snapshots.push((ref_id.to_string(), child_text));
+                        }
                     }
+                    Err(error) => return Err(error),
                 }
             }
         }
