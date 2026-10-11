@@ -215,7 +215,7 @@ async fn install_domain_filter_runtime_script(
     Ok(())
 }
 
-fn domain_filter_script(allowed_domains: &[String]) -> String {
+pub(super) fn domain_filter_script(allowed_domains: &[String]) -> String {
     let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
     format!(
         r#"(() => {{

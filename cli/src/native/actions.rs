@@ -14267,6 +14267,12 @@ mod tests {
             .filter(|c| c["method"] == "Target.attachToTarget")
             .collect();
         assert_eq!(attachments.len(), 6);
+        let control_script = network::domain_filter_script(&["fixture.invalid".to_owned()]);
+        let evaluations: Vec<_> = commands
+            .iter()
+            .filter(|c| c["method"] == "Runtime.evaluate")
+            .collect();
+        assert_eq!(evaluations.len(), 6);
         for n in 1..=6 {
             let sid = format!("synthetic-frame-frame-{n}");
             let position = |method| {
@@ -14276,20 +14282,42 @@ mod tests {
                     .unwrap()
             };
             assert!(position("Target.setAutoAttach") < position("Fetch.enable"));
-            assert!(position("Fetch.enable") < position("Runtime.runIfWaitingForDebugger"));
+            assert!(position("Fetch.enable") < position("Page.addScriptToEvaluateOnNewDocument"));
+            assert!(
+                position("Page.addScriptToEvaluateOnNewDocument") < position("Runtime.evaluate")
+            );
+            assert!(position("Runtime.evaluate") < position("Runtime.runIfWaitingForDebugger"));
             assert!(position("Runtime.runIfWaitingForDebugger") < position("DOM.getDocument"));
+            let scripts: Vec<_> = evaluations
+                .iter()
+                .filter(|c| c["sessionId"] == sid)
+                .collect();
+            assert_eq!(scripts.len(), 1);
+            assert_eq!(scripts[0]["params"], json!({"expression": &control_script}));
+            assert_eq!(
+                commands[position("Page.addScriptToEvaluateOnNewDocument")]["params"],
+                json!({"source": &control_script})
+            );
         }
-        assert!(commands.iter().all(|c| {
-            let method = c["method"].as_str().unwrap();
-            !method.starts_with("Input.")
-                && !matches!(
-                    method,
-                    "Runtime.evaluate"
-                        | "Runtime.callFunctionOn"
-                        | "Page.createIsolatedWorld"
-                        | "Page.navigate"
-                )
-        }));
+        for command in &commands {
+            let method = command["method"].as_str().unwrap();
+            // Exact network-control installation is required setup, not an
+            // observation-world escape. No other renderer evaluation is allowed.
+            if method == "Runtime.evaluate" {
+                assert_eq!(command["params"], json!({"expression": &control_script}));
+                assert!(state
+                    .active_iframe_sessions
+                    .contains(command["sessionId"].as_str().unwrap()));
+            }
+            assert!(
+                !method.starts_with("Input.")
+                    && !matches!(
+                        method,
+                        "Runtime.callFunctionOn" | "Page.createIsolatedWorld" | "Page.navigate"
+                    ),
+                "unexpected inventory command: {command}"
+            );
+        }
         client.close().await;
         fixture.server.await.unwrap();
     }
