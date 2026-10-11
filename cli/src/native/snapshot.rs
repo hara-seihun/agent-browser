@@ -307,7 +307,10 @@ async fn collect_snapshot_batch(
                     find_cursor_interactive_elements(
                         client,
                         session,
-                        cursor_context.root_node(session).ok(),
+                        cursor_context
+                            .cursor_nodes
+                            .get(*session)
+                            .ok_or("Cursor document inventory unavailable")?,
                     ),
                 )
                 .await?;
@@ -638,7 +641,7 @@ fn render_snapshot_frame(
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
-    root_node: Option<i64>,
+    inventoried_nodes: &HashMap<String, i64>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
@@ -762,37 +765,18 @@ async fn find_cursor_interactive_elements(
         return Ok(HashMap::new());
     }
 
-    let root_node = root_node.ok_or("Cursor DOM root unavailable")?;
-    let nodes = futures_util::future::join_all(elements.iter().map(|element| async {
-        let selector = element["selector"]
-            .as_str()
-            .ok_or("Cursor selector unavailable")?;
-        let selected = client
-            .send_command(
-                "DOM.querySelector",
-                Some(serde_json::json!({"nodeId":root_node,"selector":selector})),
-                Some(session_id),
-            )
-            .await?;
-        let node = selected["nodeId"]
-            .as_i64()
-            .filter(|id| *id > 0)
-            .ok_or("Cursor node unavailable")?;
-        let described = client
-            .send_command(
-                "DOM.describeNode",
-                Some(serde_json::json!({"nodeId":node})),
-                Some(session_id),
-            )
-            .await?;
-        described["node"]["backendNodeId"]
-            .as_i64()
-            .filter(|id| *id > 0)
-            .ok_or_else(|| "Cursor backend identity unavailable".to_owned())
-    }))
-    .await
-    .into_iter()
-    .collect::<Result<Vec<_>, String>>()?;
+    let nodes = elements
+        .iter()
+        .map(|element| {
+            let selector = element["selector"]
+                .as_str()
+                .ok_or("Cursor selector unavailable")?;
+            inventoried_nodes
+                .get(selector)
+                .copied()
+                .ok_or_else(|| "Cursor backend identity unavailable".to_owned())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();

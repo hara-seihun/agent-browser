@@ -474,7 +474,7 @@ pub async fn observe(
 }
 
 pub(crate) struct InventoryContext {
-    roots: HashMap<String, Option<i64>>,
+    pub(crate) cursor_nodes: HashMap<String, HashMap<String, i64>>,
     pub(crate) top_frame: String,
     frame_roots: HashMap<String, Option<i64>>,
     pub(crate) frames: HashMap<String, String>,
@@ -547,15 +547,54 @@ fn collect_snapshot_context(
     }
 }
 
-impl InventoryContext {
-    pub(crate) fn root_node(&self, session: &str) -> Result<i64, String> {
-        self.roots
-            .get(session)
-            .copied()
-            .flatten()
-            .ok_or_else(|| format!("{UNSUPPORTED}: DOM root node identity unavailable"))
+fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
+    fn walk(node: &Value, parent: &str, paths: &mut HashMap<String, i64>) -> Result<(), String> {
+        let Some(children) = node["children"].as_array() else {
+            return Ok(());
+        };
+        let mut counts = HashMap::<String, usize>::new();
+        for child in children {
+            let Some(name) = child["nodeName"].as_str() else {
+                continue;
+            };
+            let element = match child["nodeType"].as_i64() {
+                Some(kind) => kind == 1,
+                None => !name.starts_with('#'),
+            };
+            if !element {
+                continue;
+            }
+            let index = counts.entry(name.to_owned()).or_insert(0);
+            *index += 1;
+            let local = match child.get("localName") {
+                Some(value) => value
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or("Cursor element local name unavailable")?
+                    .to_owned(),
+                None => name.to_ascii_lowercase(),
+            };
+            let component = format!("{local}:nth-of-type({index})");
+            let path = if parent.is_empty() {
+                component
+            } else {
+                format!("{parent} > {component}")
+            };
+            if let Some(backend) = child["backendNodeId"].as_i64().filter(|id| *id > 0) {
+                if paths.insert(path.clone(), backend).is_some() {
+                    return Err("Ambiguous cursor element path".into());
+                }
+            }
+            walk(child, &path, paths)?;
+        }
+        Ok(())
     }
+    let mut paths = HashMap::new();
+    walk(root, "", &mut paths)?;
+    Ok(paths)
+}
 
+impl InventoryContext {
     pub(crate) fn frame_node(&self, frame: &str) -> Result<i64, String> {
         self.frame_roots
             .get(frame)
@@ -934,15 +973,12 @@ where
         ..Observation::default()
     };
     let mut context = InventoryContext {
-        roots: documents
+        cursor_nodes: documents
             .iter()
             .map(|document| {
-                (
-                    document.session.clone(),
-                    document.root["nodeId"].as_i64().filter(|id| *id > 0),
-                )
+                cursor_node_paths(&document.root).map(|paths| (document.session.clone(), paths))
             })
-            .collect(),
+            .collect::<Result<_, _>>()?,
         top_frame: documents
             .iter()
             .find(|document| document.session == top_session)
@@ -1318,6 +1354,37 @@ mod tests {
         ] {
             assert!(frame_bindings(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn test_protected_inventory_cursor_paths_preserve_element_identity_and_document_scope() {
+        let root = json!({"nodeName":"#document","children":[
+            {"nodeName":"html","nodeType":10},
+            {"nodeName":"HTML","nodeType":1,"localName":"html","backendNodeId":1,"children":[
+                {"nodeName":"BODY","nodeType":1,"localName":"body","backendNodeId":2,"children":[
+                    {"nodeName":"#text","nodeType":3},
+                    {"nodeName":"DIV","nodeType":1,"localName":"div","backendNodeId":3},
+                    {"nodeName":"SPAN","nodeType":1,"localName":"span","backendNodeId":4},
+                    {"nodeName":"DIV","nodeType":1,"localName":"div","backendNodeId":5,
+                        "shadowRoots":[{"nodeName":"#document-fragment","children":[{"nodeName":"DIV","backendNodeId":99}]}]},
+                    {"nodeName":"IFRAME","nodeType":1,"localName":"iframe","backendNodeId":6,
+                        "contentDocument":{"nodeName":"#document","children":[{"nodeName":"DIV","backendNodeId":100}]}}
+                ]}
+            ]}
+        ]});
+        let paths = cursor_node_paths(&root).unwrap();
+        assert_eq!(paths.len(), 6);
+        assert_eq!(
+            paths["html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(1)"],
+            3
+        );
+        assert_eq!(
+            paths["html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(2)"],
+            5
+        );
+        assert!(!paths.values().any(|id| matches!(id, 99 | 100)));
+        let malformed = json!({"children":[{"nodeName":"DIV","nodeType":1,"localName":null,"backendNodeId":7}]});
+        assert!(cursor_node_paths(&malformed).is_err());
     }
 
     #[test]
