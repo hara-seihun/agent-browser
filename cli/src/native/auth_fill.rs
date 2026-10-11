@@ -380,7 +380,6 @@ where
             .remember_private_value(&object_session, id, "credential", &value);
     }
     let filled = client
-        .client
         .send_command(
             "Runtime.callFunctionOn",
             Some(json!({
