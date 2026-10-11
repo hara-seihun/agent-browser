@@ -6688,11 +6688,12 @@ async fn handle_scoped_getter(
     if action == "getattribute" && cmd.get("attribute").and_then(Value::as_str).is_none() {
         return Err("Missing 'attribute' parameter".into());
     }
-    if let Some(known) = state
-        .sensitive_observations
-        .get(&session)
-        .filter(|known| !known.controls.is_empty())
-    {
+    if let Some(known) = state.sensitive_observations.get(&session).filter(|known| {
+        known
+            .controls
+            .values()
+            .any(|marker| marker == "[redacted: credential]")
+    }) {
         let (object, effective) = super::element::resolve_element_object_id(
             &mgr.client,
             &session,
@@ -6718,6 +6719,7 @@ async fn handle_scoped_getter(
                 .get("backendNodeId")
                 .and_then(Value::as_i64)
                 .and_then(|id| controls.get(&(session.to_owned(), id)))
+                .filter(|marker| marker.as_str() == "[redacted: credential]")
             {
                 return Some(marker.clone());
             }
