@@ -11,6 +11,11 @@ use super::cdp::client::CdpClient;
 use super::observation_progress::{DeadlineDiagnostic, Phase};
 
 pub const UNSUPPORTED: &str = "SENSITIVE_OUTPUT_UNSUPPORTED";
+pub const MIN_SECRET_CHARS: usize = 3;
+
+fn useful_secret(value: &str) -> bool {
+    value.chars().take(MIN_SECRET_CHARS).count() == MIN_SECRET_CHARS
+}
 
 const AUTOCOMPLETE: &[(&str, &str)] = &[
     ("cc-number", "cc-number"),
@@ -227,12 +232,31 @@ impl Observation {
         let redacted = marker(kind);
         self.controls
             .insert((session.to_owned(), backend), redacted.clone());
-        if !value.is_empty() {
+        if useful_secret(value) {
             self.secrets.push((value.to_owned(), redacted));
             self.secrets
                 .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
             self.secrets.dedup_by(|a, b| a.0 == b.0);
         }
+    }
+
+    /// Retires only global fragments; scoped control protection is unchanged.
+    /// Reports counts by character length, never values or value-derived hashes.
+    pub fn prune_secret_fragments(&mut self) -> BTreeMap<usize, usize> {
+        let mut removed = BTreeMap::new();
+        self.secrets.retain(|(value, _)| {
+            if useful_secret(value) {
+                true
+            } else {
+                *removed.entry(value.chars().count()).or_insert(0) += 1;
+                false
+            }
+        });
+        removed
+    }
+
+    pub fn secret_count(&self) -> usize {
+        self.secrets.len()
     }
 
     pub fn protect_text(&self, text: &str) -> String {
@@ -254,7 +278,7 @@ impl Observation {
             if let Some((secret, marker)) = self
                 .secrets
                 .iter()
-                .find(|(s, _)| text[start..].starts_with(s))
+                .find(|(s, _)| useful_secret(s) && text[start..].starts_with(s))
             {
                 out.push_str(marker);
                 start += secret.len();
@@ -286,6 +310,7 @@ impl Observation {
         self.frame_sessions = other.frame_sessions;
         self.controls.extend(other.controls);
         self.secrets.extend(other.secrets);
+        self.prune_secret_fragments();
         self.secrets
             .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
         self.secrets.dedup_by(|a, b| a.0 == b.0);
@@ -1010,7 +1035,7 @@ where
             .controls
             .insert((control.session.clone(), control.backend), redacted.clone());
         for value in values? {
-            if !value.is_empty() {
+            if useful_secret(&value) {
                 observation.secrets.push((value, redacted.clone()));
             }
         }
@@ -1112,6 +1137,45 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_fragments_never_poison_metadata_and_cleanup_preserves_full_values() {
+        use super::*;
+        let mut observed = Observation::default();
+        for (index, value) in ["O", "2", "12", "é", "界", "123", "OF29AB8CD"]
+            .iter()
+            .enumerate()
+        {
+            observed.remember_private_value("synthetic", index as i64 + 1, "credential", value);
+        }
+        assert_eq!(observed.controls.len(), 7);
+        assert_eq!(observed.secret_count(), 2);
+        assert_eq!(
+            observed.protect_text("OpenAI https://fixture.test/e12 @e2"),
+            "OpenAI https://fixture.test/e12 @e2"
+        );
+        assert_eq!(
+            observed.protect_text("OF29AB8CD 123"),
+            "[redacted: credential] [redacted: credential]"
+        );
+        observed.secrets.extend([
+            ("O".into(), marker("credential")),
+            ("12".into(), marker("credential")),
+            ("界".into(), marker("credential")),
+        ]);
+        assert_eq!(observed.protect_text("OpenAI @e12"), "OpenAI @e12");
+        let removed = observed.prune_secret_fragments();
+        assert_eq!(removed, BTreeMap::from([(1, 2), (2, 1)]));
+        assert_eq!(observed.secret_count(), 2);
+        assert_eq!(observed.controls.len(), 7);
+        assert!(observed.prune_secret_fragments().is_empty());
+        assert_eq!(observed.protect_text("OF29AB8CD"), marker("credential"));
+        let mut incoming = Observation::default();
+        incoming.secrets.push(("2".into(), marker("credential")));
+        observed.secrets.push(("O".into(), marker("credential")));
+        observed.merge(incoming);
+        assert_eq!(observed.secret_count(), 2);
+    }
+
     use super::*;
     #[tokio::test]
     async fn payment_inventory_needs_no_isolated_world() {
@@ -1467,7 +1531,7 @@ mod tests {
         };
         assert_eq!(
             obs.protect_text("4242424242424242 12 test"),
-            "[redacted: cc-number] [redacted: cc-exp-month] test"
+            "[redacted: cc-number] 12 test"
         );
     }
 }

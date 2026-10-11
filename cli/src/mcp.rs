@@ -1507,7 +1507,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_FILL,
             "Private field fill",
-            "Resolve one private credential field into an explicitly bound active target and selected frame. Metadata-only; never submits or retries. Stop captures first.",
+            "Resolve one private credential field into an explicitly bound active target and selected frame. Select the first box for a complete2..32-input maxlength1 group; all boxes are pinned, protected and checked collectively after one dispatch. Global redaction excludes fragments shorter than3Unicode characters; scoped short control markers remain. Metadata-only; never submits or retries. Stop captures first.",
             json!({
                 "credentialProvider": {"type":"string", "minLength":1},
                 "item": {"type":"string", "minLength":1},

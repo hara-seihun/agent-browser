@@ -191,7 +191,8 @@ async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String>
 /// Resolves a secret only after a live target/frame and editable input are pinned.
 /// All plugin and page failures are metadata-only; foreign errors never escape.
 /// Retention permits spaces/hyphens only for number and spaces only for expiry;
-/// every other private field must retain its exact input representation.
+/// every other private field must retain its exact input representation. A pinned
+/// complete segmented input may retain that representation collectively.
 pub async fn handle_auth_fill(
     cmd: &Value,
     state: &mut DaemonState,
@@ -295,20 +296,98 @@ where
     if bind(state, req).await? != bound {
         return Err(BINDING.into());
     }
-    state
-        .sensitive_observations
-        .entry(bound.session.clone())
-        .or_default()
-        .remember_private_value(&object_session, backend, "credential", &value);
-    let mgr = state.browser.as_ref().ok_or(BINDING)?;
-    let filled = mgr
+    let client = state.browser.as_ref().ok_or(BINDING)?.client.clone();
+    let is_segment = node["node"]["attributes"].as_array().is_some_and(|attrs| {
+        attrs
+            .chunks_exact(2)
+            .any(|pair| pair[0] == "maxlength" && pair[1] == "1")
+    });
+    let mut segments = None;
+    let mut segment_group = None;
+    let mut backends = vec![backend];
+    let count = value.chars().count();
+    if is_segment && (2..=32).contains(&count) {
+        let group = client
+            .object_group(vec![object_session.clone()])
+            .await
+            .map_err(|_| PAGE)?;
+        let result = client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(json!({
+                    "objectId": object,
+                    "functionDeclaration": SEGMENT_GROUP,
+                    "arguments": [{"value": count}],
+                    "objectGroup": group.name,
+                    "returnByValue": false
+                })),
+                Some(&object_session),
+            )
+            .await
+            .map_err(|_| PAGE)?;
+        if result.get("exceptionDetails").is_some() {
+            return Err(PAGE.into());
+        }
+        if let Some(array) = result["result"]["objectId"].as_str() {
+            let properties = client
+                .send_command(
+                    "Runtime.getProperties",
+                    Some(json!({
+                        "objectId": array, "ownProperties": true
+                    })),
+                    Some(&object_session),
+                )
+                .await
+                .map_err(|_| PAGE)?;
+            let entries = properties["result"].as_array().ok_or(PAGE)?;
+            backends.clear();
+            for index in 0..count {
+                let name = index.to_string();
+                let element = entries
+                    .iter()
+                    .find(|entry| entry["name"].as_str() == Some(&name))
+                    .and_then(|entry| entry["value"]["objectId"].as_str())
+                    .ok_or(PAGE)?;
+                let described = client
+                    .send_command(
+                        "DOM.describeNode",
+                        Some(json!({"objectId":element})),
+                        Some(&object_session),
+                    )
+                    .await
+                    .map_err(|_| PAGE)?;
+                let id = described["node"]["backendNodeId"]
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .ok_or(PAGE)?;
+                if backends.contains(&id) || (index == 0 && id != backend) {
+                    return Err(PAGE.into());
+                }
+                backends.push(id);
+            }
+            segments = Some(array.to_owned());
+        }
+        segment_group = Some(group);
+    }
+    if bind(state, req).await? != bound {
+        return Err(BINDING.into());
+    }
+    for id in backends {
+        state
+            .sensitive_observations
+            .entry(bound.session.clone())
+            .or_default()
+            .remember_private_value(&object_session, id, "credential", &value);
+    }
+    let filled = client
         .client
         .send_command(
             "Runtime.callFunctionOn",
             Some(json!({
                 "objectId": object,
                 "functionDeclaration": PRIVATE_FILL,
-                "arguments": [{"value": value}, {"objectId": document}, {"value": req.field}],
+                "arguments": [{"value": value}, {"objectId": document}, {"value": req.field},
+                    match &segments { Some(array) => json!({"objectId":array}), None => json!({"value":null}) }],
                 "returnByValue": true,
                 "awaitPromise": true
             })),
@@ -316,6 +395,8 @@ where
         )
         .await
         .map_err(|_| PAGE)?;
+    drop(segment_group);
+    client.settle_object_cleanup().await.map_err(|_| PAGE)?;
     if filled.get("exceptionDetails").is_some() {
         return Err(PAGE.into());
     }
@@ -350,7 +431,24 @@ where
     }
 }
 
-const PRIVATE_FILL: &str = r#"async function(value, document, field) {
+const SEGMENT_GROUP: &str = r#"function(count) {
+    const eligible = el => el.tagName === 'INPUT' && el.maxLength === 1 &&
+        el.type === this.type && el.form === this.form && el.isConnected &&
+        !el.matches(':disabled') && !el.readOnly && el.getClientRects().length;
+    for (let parent = this.parentElement; parent; parent = parent.parentElement) {
+        const fields = Array.from(parent.querySelectorAll('input')).filter(eligible);
+        if (fields.length < 2) continue;
+        if (fields.length !== count || fields[0] !== this) return null;
+        const editables = Array.from(parent.querySelectorAll('input,textarea,select')).filter(el =>
+            el.getClientRects().length && !el.matches(':disabled') && !el.readOnly);
+        if (editables.length !== fields.length) return null;
+        fields.container = parent;
+        return fields;
+    }
+    return null;
+}"#;
+
+const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
     if (this.matches(':disabled') || this.readOnly) return {status:'not_editable'};
     const view = document.defaultView;
@@ -361,17 +459,28 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field) {
     probe.value = value;
     if (!probe.value) return {status:'invalid_value'};
     const expected = probe.value;
+    const validSegments = () => {
+        if (!segments) return true;
+        const current = Array.from(segments.container.querySelectorAll('input,textarea,select')).filter(el =>
+            el.getClientRects().length && !el.matches(':disabled') && !el.readOnly);
+        return segments[0] === this && segments.length === Array.from(expected).length &&
+            current.length === segments.length && current.every((el, i) => el === segments[i]) &&
+            segments.every(el => el.isConnected && el.ownerDocument === document &&
+                el.tagName === 'INPUT' && el.maxLength === 1 && el.type === this.type && el.form === this.form);
+    };
+    if (!validSegments()) return {status:'detached'};
     const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
     setter.call(this, expected);
     this.dispatchEvent(new view.Event('input', {bubbles:true}));
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
     await new Promise(resolve => view.setTimeout(resolve, 100));
-    const rendered = this.value;
-    if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
+    const rendered = segments ? segments.map(el => el.value).join('') : this.value;
+    if (!this.isConnected || this.ownerDocument !== document || !validSegments()) return {status:'detached',redactionValue:rendered};
     const presentation = field === 'number' ? s => s.replace(/[ -]/g, '')
         : field === 'expiration_date' ? s => s.replace(/ /g, '') : s => s;
-    return {status:presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
+    const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
+    return {status:complete && presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
 }"#;
 
 #[cfg(test)]
@@ -711,6 +820,160 @@ mod tests {
             .await
             .unwrap_err(),
             BINDING
+        );
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Chrome; run serially"]
+    async fn e2e_private_fill_segmented_retention_redaction_and_rejection() {
+        use super::super::actions::{close_current_browser, execute_command};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    stream.read(&mut buffer).await.unwrap();
+                    let fields = (1..=9)
+                        .map(|n| {
+                            format!("<input maxlength='1' aria-label='Code character {n} of 9'>")
+                        })
+                        .collect::<String>();
+                    let body = format!(
+                        r#"<title>OpenAI</title><form><div id='code'>{fields}</div><button id='continue' disabled>Continue</button></form><output id='echo'></output><script>
+                        const boxes = Array.from(document.querySelectorAll('input'));
+                        window.inputCount=0; window.changeCount=0;
+                        boxes[0].addEventListener('input', e => {{
+                            window.inputCount++;
+                            const chars = Array.from(e.target.value);
+                            boxes.forEach((box,i) => box.value=chars[i] || '');
+                            if (document.body.dataset.mode === 'reject') boxes[8].value='X';
+                            if (document.body.dataset.mode === 'replace') boxes[8].replaceWith(boxes[8].cloneNode());
+                            document.querySelector('#continue').disabled=boxes.some(box => !box.value);
+                            document.querySelector('#echo').textContent=chars.join('');
+                        }});
+                        boxes[0].addEventListener('change', () => window.changeCount++);
+                    </script>"#
+                    );
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let mut state = DaemonState::new();
+        assert_eq!(
+            execute_command(&json!({"id":"launch","action":"launch"}), &mut state).await["success"],
+            true
+        );
+        let url = format!("http://127.0.0.1:{port}/e12?plain=OpenAI2");
+        assert_eq!(
+            execute_command(
+                &json!({"id":"nav","action":"navigate","url":url,"waitUntil":"load"}),
+                &mut state
+            )
+            .await["success"],
+            true
+        );
+        let mgr = state.browser.as_ref().unwrap();
+        let target = mgr.active_target_id().unwrap().to_owned();
+        let sid = mgr.active_session_id().unwrap().to_owned();
+        let req = request(&json!({"credentialProvider":"fixture","credentialItem":"Synthetic","field":"password","selector":"input[aria-label='Code character 1 of 9']","target":target,"frame":"main"})).unwrap();
+        let secret = "OF29AB8CD";
+        let result = fill_with_resolver(
+            &mut state,
+            &req,
+            Instant::now() + std::time::Duration::from_secs(5),
+            |_| async { Ok(secret.into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["filled"], true);
+        assert!(!result.to_string().contains(secret));
+        let actual = state.browser.as_ref().unwrap().evaluate_in_session(&sid,
+            "Array.from(document.querySelectorAll('input')).map(el=>el.value).join('') === 'OF29AB8CD' && !document.querySelector('#continue').disabled && window.inputCount===1 && window.changeCount===1", None).await.unwrap();
+        assert_eq!(actual, json!(true));
+        let known = &state.sensitive_observations[&sid];
+        assert_eq!(known.controls.len(), 9);
+        assert_eq!(known.secret_count(), 1);
+        assert_eq!(known.protect_text("OpenAI @e12 @e2"), "OpenAI @e12 @e2");
+        assert_eq!(known.protect_text(secret), "[redacted: credential]");
+        for n in 1..=9 {
+            let getter = execute_command(&json!({"id":"get","action":"inputvalue","selector":format!("input[aria-label='Code character {n} of 9']")}), &mut state).await;
+            assert_eq!(getter["success"], true, "{getter}");
+            assert_eq!(
+                getter["data"]["value"], "[redacted: credential]",
+                "{getter}"
+            );
+        }
+        let snapshot = execute_command(
+            &json!({"id":"snapshot","action":"snapshot","interactive":true}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(snapshot["success"], true, "{snapshot}");
+        assert!(!snapshot.to_string().contains(secret));
+        assert!(snapshot.to_string().contains("Code character 2 of 9"));
+        assert_eq!(state.sensitive_observations[&sid].secret_count(), 1);
+        let metadata = execute_command(
+            &json!({"id":"metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            metadata["data"]["sensitiveSecretMaintenance"]["retainedCount"],
+            1
+        );
+        assert_eq!(
+            metadata["data"]["sensitiveSecretMaintenance"]["removedByCharacterLength"],
+            json!({})
+        );
+        for (mode, error) in [
+            ("reject", "auth_fill_not_retained:"),
+            ("replace", "auth_fill_input_changed:"),
+        ] {
+            state
+                .browser
+                .as_ref()
+                .unwrap()
+                .evaluate_in_session(&sid, &format!("document.body.dataset.mode='{mode}'"), None)
+                .await
+                .unwrap();
+            let failure = fill_with_resolver(
+                &mut state,
+                &req,
+                Instant::now() + std::time::Duration::from_secs(5),
+                |_| async { Ok(secret.into()) },
+            )
+            .await
+            .unwrap_err();
+            assert!(failure.starts_with(error), "{failure}");
+        }
+        let actual = state
+            .browser
+            .as_ref()
+            .unwrap()
+            .evaluate_in_session(
+                &sid,
+                "window.inputCount===3 && window.changeCount===3",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(actual, json!(true));
+        assert_eq!(
+            state
+                .browser
+                .as_ref()
+                .unwrap()
+                .client
+                .object_cleanup_len()
+                .await,
+            0
         );
         close_current_browser(&mut state).await.unwrap();
         server.abort();

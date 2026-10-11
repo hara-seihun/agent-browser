@@ -7182,8 +7182,22 @@ async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
 }
 
 /// Recorded daemon metadata only; never probe CDP or advance restore state.
-fn session_info(state: &DaemonState) -> Value {
+/// Global secret fragments are retired in memory without touching control guards.
+fn session_info(state: &mut DaemonState) -> Value {
+    let mut removed = std::collections::BTreeMap::<usize, usize>::new();
+    let mut retained = 0;
+    for observation in state.sensitive_observations.values_mut() {
+        for (length, count) in observation.prune_secret_fragments() {
+            *removed.entry(length).or_insert(0) += count;
+        }
+        retained += observation.secret_count();
+    }
     json!({
+        "sensitiveSecretMaintenance": {
+            "minimumCharacters": super::sensitive::MIN_SECRET_CHARS,
+            "removedByCharacterLength": removed,
+            "retainedCount": retained,
+        },
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
