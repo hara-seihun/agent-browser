@@ -1394,6 +1394,11 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
+        if data.get("filled").and_then(Value::as_bool) == Some(true) {
+            println!("{} Private field filled", color::success_indicator());
+            return;
+        }
+
         // Auth save/update/login/delete
         if data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -2698,6 +2703,7 @@ Usage: agent-browser auth <subcommand> [args]
 Subcommands:
   save <name>              Save credentials for a login profile
   login <name>             Login using saved credentials (waits for form fields)
+  fill                    Resolve one private provider field into a pinned input
   list                     List saved profiles (names and URLs only)
   show <name>              Show profile metadata (no passwords)
   delete <name>            Delete a saved profile
@@ -2719,6 +2725,24 @@ Login Options:
   --username-selector <s>   Username selector override for this login
   --password-selector <s>   Password selector override for this login
   --submit-selector <s>     Submit selector override for this login
+
+Private Fill Options (all binding flags required):
+  --credential-provider <p> Configured credential.read provider
+  --item <title>            Provider item reference
+  --field <field>           Provider field name
+  --selector <css>          CSS selector in selected frame (no refs)
+  --target <target-id>      Exact active browser target ID
+  --frame <frame-id|main>   Exact selected frame ID, or main after frame main
+  --format mm/yy           Only expiration_date; omitted preserves provider format
+  --timeout <ms>           Total deadline 1..300000ms; initial 180000ms unless configured
+
+Private fill behavior:
+  Pins input/document and checks live target/frame before and after lookup.
+  Existing native browser required; no launch, restore, navigation or submit.
+  Stop recording, tracing, streaming and network capture first.
+  Metadata-only results/errors; private values registered for later redaction.
+  Login deadline, disconnect cleanup and IPC margin apply; never replayed.
+  MCP agent_browser_auth_fill uses fillTimeoutMs plus outer timeoutMs.
 
 Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
@@ -2742,6 +2766,7 @@ Examples:
   agent-browser auth login github
   agent-browser auth login github --no-navigate
   agent-browser auth login my-app --credential-provider vault --item "My App"
+  agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID
   agent-browser auth list
   agent-browser auth show github
   agent-browser auth delete github
@@ -3712,13 +3737,13 @@ plugin add asks the package for plugin.manifest to discover name and
 capabilities. Use --capability when adding older plugins without a manifest.
 
 Capabilities:
-  credential.read          Resolve credentials for auth login
+  credential.read          Resolve credentials for auth login or private auth fill
   browser.provider         Launch/connect an external browser provider
   launch.mutate            Append local launch args, extensions, or init scripts
   command.run              Accept arbitrary namespaced plugin requests
 
 Core capabilities and protocol request types use dedicated command paths.
-Use auth login for credential.read, --provider for browser.provider, and
+Use auth login or auth fill for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
 
 Example config:
@@ -3920,6 +3945,10 @@ Batch:
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
+  auth fill --credential-provider <p> --item <title> --field <field>
+            --selector <css> --target <target-id> --frame <frame-id|main>
+            [--format mm/yy] [--timeout <ms>]
+                             Private pinned fill, metadata only, no submit/retry
   auth login <name> [--timeout <ms>]  Login with one total lookup/form deadline
   auth login <name> --no-navigate
                              Use active page after verifying credential URL origin

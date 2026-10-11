@@ -424,6 +424,54 @@ pub async fn resolve_credential_with_plugins(
     Ok(credential)
 }
 
+/// Private single-field lookup. The secret is transported on plugin stdin/stdout,
+/// never arguments; plugin stderr and foreign error payloads remain suppressed.
+pub async fn resolve_credential_field_with_plugins(
+    provider: &str,
+    plugins: &[PluginConfig],
+    item_ref: &str,
+    field: &str,
+    format: Option<&str>,
+    deadline: Instant,
+) -> Result<String, String> {
+    let plugin = find_plugin(plugins, provider)
+        .ok_or("credential_field_provider_missing: credential plugin is not configured")?;
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis();
+    if remaining <= 1_000 {
+        return Err("credential_field_deadline: insufficient remaining lookup budget".into());
+    }
+    let mut request = json!({"itemRef": item_ref, "field": field, "timeoutMs": remaining});
+    if let Some(format) = format {
+        request["format"] = json!(format);
+    }
+    let response = invoke_plugin(
+        plugin,
+        "credential.field.resolve",
+        CAPABILITY_CREDENTIAL_READ,
+        request,
+        deadline,
+        false,
+    )
+    .await
+    .map_err(|_| "credential_field_lookup_failed: private lookup failed")?;
+    parse_credential_field_response(&response)
+}
+
+fn parse_credential_field_response(response: &serde_json::Value) -> Result<String, String> {
+    if response["protocol"].as_str() != Some(PROTOCOL_VERSION)
+        || response["success"].as_bool() != Some(true)
+    {
+        return Err("credential_field_invalid_response: private lookup failed".into());
+    }
+    response["value"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+        .ok_or_else(|| "credential_field_invalid_response: private lookup returned no field".into())
+}
+
 pub async fn connect_browser_provider_with_plugins(
     provider: &str,
     plugins: &[PluginConfig],
@@ -1013,6 +1061,7 @@ fn is_core_plugin_entrypoint(entrypoint: &str) -> bool {
             | CAPABILITY_LAUNCH_MUTATE
             | TYPE_PLUGIN_MANIFEST
             | "credential.resolve"
+            | "credential.field.resolve"
             | "browser.launch"
             | "browser.close"
     )
@@ -1151,6 +1200,7 @@ mod tests {
         assert!(is_core_plugin_entrypoint(CAPABILITY_BROWSER_PROVIDER));
         assert!(is_core_plugin_entrypoint(CAPABILITY_LAUNCH_MUTATE));
         assert!(is_core_plugin_entrypoint("credential.resolve"));
+        assert!(is_core_plugin_entrypoint("credential.field.resolve"));
         assert!(is_core_plugin_entrypoint("browser.launch"));
         assert!(is_core_plugin_entrypoint("browser.close"));
         assert!(is_core_plugin_entrypoint("launch.mutate"));
@@ -1434,6 +1484,28 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"arg
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         fs::write(ready_path, std::process::id().to_string()).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn credential_field_response_is_metadata_only_on_failure() {
+        let secret = "synthetic-private-value";
+        assert_eq!(
+            parse_credential_field_response(
+                &json!({"protocol":PROTOCOL_VERSION,"success":true,"value":secret})
+            )
+            .unwrap(),
+            secret
+        );
+        for response in [
+            json!({"protocol":PROTOCOL_VERSION,"success":false,"error":secret}),
+            json!({"protocol":secret,"success":true,"value":secret}),
+            json!({"protocol":PROTOCOL_VERSION,"success":true,"value":""}),
+            json!({"protocol":PROTOCOL_VERSION,"success":true,"value":{"secret":secret}}),
+        ] {
+            assert!(!parse_credential_field_response(&response)
+                .unwrap_err()
+                .contains(secret));
+        }
     }
 
     #[cfg(unix)]

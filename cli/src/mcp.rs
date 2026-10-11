@@ -121,6 +121,7 @@ const TOOL_CLIPBOARD_COPY: &str = "agent_browser_clipboard_copy";
 const TOOL_CLIPBOARD_PASTE: &str = "agent_browser_clipboard_paste";
 const TOOL_AUTH_SAVE: &str = "agent_browser_auth_save";
 const TOOL_AUTH_LOGIN: &str = "agent_browser_auth_login";
+const TOOL_AUTH_FILL: &str = "agent_browser_auth_fill";
 const TOOL_AUTH_LIST: &str = "agent_browser_auth_list";
 const TOOL_AUTH_SHOW: &str = "agent_browser_auth_show";
 const TOOL_AUTH_DELETE: &str = "agent_browser_auth_delete";
@@ -399,6 +400,7 @@ const STATE_PROFILE_TOOLS: &[&str] = &[
     TOOL_COOKIES_CLEAR,
     TOOL_AUTH_SAVE,
     TOOL_AUTH_LOGIN,
+    TOOL_AUTH_FILL,
     TOOL_AUTH_LIST,
     TOOL_AUTH_SHOW,
     TOOL_AUTH_DELETE,
@@ -1503,6 +1505,22 @@ fn parity_tools() -> Vec<Value> {
             &["name"],
         ),
         tool(
+            TOOL_AUTH_FILL,
+            "Private field fill",
+            "Resolve one private credential field into an explicitly bound active target and selected frame. Metadata-only; never submits or retries. Stop captures first.",
+            json!({
+                "credentialProvider": {"type":"string", "minLength":1},
+                "item": {"type":"string", "minLength":1},
+                "field": {"type":"string", "minLength":1},
+                "selector": {"type":"string", "minLength":1, "description":"CSS selector in the selected frame; refs are not accepted."},
+                "target": {"type":"string", "minLength":1},
+                "frame": {"type":"string", "minLength":1, "description":"Explicit selected frame ID, or main after frame main."},
+                "format": {"type":"string", "enum":["mm/yy"], "description":"Only valid for expiration_date; omitted preserves provider format."},
+                "fillTimeoutMs": {"type":"integer", "minimum":1, "maximum":300000, "description":"One total operation budget; initial 180000ms unless action timeout configured. Outer timeoutMs must include 10 seconds IPC margin."}
+            }),
+            &["credentialProvider", "item", "field", "selector", "target", "frame"],
+        ),
+        tool(
             TOOL_AUTH_LIST,
             "Auth list",
             "List auth profiles.",
@@ -2400,6 +2418,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_CLIPBOARD_PASTE => call_literal(arguments, &["clipboard", "paste"]),
         TOOL_AUTH_SAVE => call_auth_save(arguments),
         TOOL_AUTH_LOGIN => call_auth_login(arguments),
+        TOOL_AUTH_FILL => call_auth_fill(arguments),
         TOOL_AUTH_LIST => call_literal(arguments, &["auth", "list"]),
         TOOL_AUTH_SHOW => call_one_string(arguments, "auth show", "name"),
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
@@ -3268,6 +3287,40 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
         args.push("--no-navigate".to_string());
     }
     Ok(args)
+}
+
+fn auth_fill_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["auth".into(), "fill".into()];
+    for (key, flag) in [
+        ("credentialProvider", "--credential-provider"),
+        ("item", "--item"),
+        ("field", "--field"),
+        ("selector", "--selector"),
+        ("target", "--target"),
+        ("frame", "--frame"),
+    ] {
+        args.push(flag.into());
+        args.push(required_string(arguments, key)?);
+    }
+    if let Some(format) = optional_string(arguments, "format")? {
+        args.push("--format".into());
+        args.push(format);
+    }
+    if let Some(timeout) = optional_u64(arguments, "fillTimeoutMs")? {
+        args.push("--timeout".into());
+        args.push(timeout.to_string());
+    }
+    Ok(args)
+}
+
+fn call_auth_fill(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = auth_fill_args(arguments)?;
+    let mut effective = arguments.clone();
+    if effective.get("timeoutMs").is_none() {
+        let budget = optional_u64(arguments, "fillTimeoutMs")?.unwrap_or(180_000);
+        effective["timeoutMs"] = json!(budget.saturating_add(10_000));
+    }
+    call_cli_tool(&effective, args, None)
 }
 
 fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4363,6 +4416,34 @@ mod tests {
             .unwrap(),
             vec!["webmcp", "result", "invocation-1", "--timeout", "250"]
         );
+    }
+
+    #[test]
+    fn private_fill_uses_canonical_cli_parser() {
+        let input = json!({"credentialProvider":"fixture", "item":"Synthetic", "field":"expiration_date", "selector":"#expiry", "target":"page", "frame":"child", "format":"mm/yy", "fillTimeoutMs":2200});
+        let args = auth_fill_args(&input).unwrap();
+        let flags = crate::flags::parse_flags(&[]);
+        let cmd = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(cmd["action"], "auth_fill");
+        assert_eq!(cmd["credentialProvider"], "fixture");
+        assert_eq!(cmd["credentialItem"], "Synthetic");
+        assert_eq!(cmd["frame"], "child");
+        assert_eq!(cmd["timeout"], 2200);
+        assert_eq!(cmd["format"], "mm/yy");
+        let mut invalid = input.clone();
+        invalid["frame"] = Value::Null;
+        assert!(auth_fill_args(&invalid).is_err());
+        invalid = input;
+        invalid["fillTimeoutMs"] = json!(0);
+        assert!(
+            crate::commands::parse_command(&auth_fill_args(&invalid).unwrap(), &flags).is_err()
+        );
+        let tools = tools();
+        let fill = tools
+            .iter()
+            .find(|tool| tool["name"] == TOOL_AUTH_FILL)
+            .unwrap();
+        assert_eq!(fill["inputSchema"]["required"].as_array().unwrap().len(), 6);
     }
 
     #[test]

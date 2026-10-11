@@ -5,6 +5,8 @@ pub mod actions;
 #[allow(dead_code)]
 pub mod auth;
 #[allow(dead_code)]
+pub mod auth_fill;
+#[allow(dead_code)]
 pub mod browser;
 #[allow(dead_code)]
 pub mod cdp;

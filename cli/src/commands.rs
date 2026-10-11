@@ -1060,6 +1060,90 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
+                Some("fill") => {
+                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]";
+                    let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": flags.default_timeout.unwrap_or(180_000)});
+                    let mut seen = std::collections::HashSet::new();
+                    let mut j = 1;
+                    while j < rest.len() {
+                        let key = match rest[j] {
+                            "--credential-provider" => "credentialProvider",
+                            "--item" => "credentialItem",
+                            "--field" => "field",
+                            "--selector" => "selector",
+                            "--target" => "target",
+                            "--frame" => "frame",
+                            "--format" => "format",
+                            "--timeout" => "timeout",
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: "unknown argument for auth fill".into(),
+                                    usage: USAGE,
+                                })
+                            }
+                        };
+                        if !seen.insert(key) {
+                            return Err(ParseError::InvalidValue {
+                                message: "duplicate flag for auth fill".into(),
+                                usage: USAGE,
+                            });
+                        }
+                        let value = rest
+                            .get(j + 1)
+                            .filter(|v| !v.starts_with("--") && !v.trim().is_empty())
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "auth fill".into(),
+                                usage: USAGE,
+                            })?;
+                        if key == "timeout" {
+                            let ms = value
+                                .parse::<u64>()
+                                .ok()
+                                .filter(|ms| *ms > 0 && *ms <= 300_000)
+                                .ok_or_else(|| ParseError::InvalidValue {
+                                    message: "auth fill timeout must be 1..300000ms".into(),
+                                    usage: USAGE,
+                                })?;
+                            cmd[key] = json!(ms);
+                        } else {
+                            cmd[key] = json!(value);
+                        }
+                        j += 2;
+                    }
+                    if [
+                        "credentialProvider",
+                        "credentialItem",
+                        "field",
+                        "selector",
+                        "target",
+                        "frame",
+                    ]
+                    .iter()
+                    .any(|key| cmd.get(*key).is_none())
+                    {
+                        return Err(ParseError::MissingArguments {
+                            context: "auth fill".into(),
+                            usage: USAGE,
+                        });
+                    }
+                    if !cmd["timeout"]
+                        .as_u64()
+                        .is_some_and(|ms| ms > 0 && ms <= 300_000)
+                        || cmd["selector"].as_str().is_some_and(|s| s.starts_with('@'))
+                        || cmd.get("format").is_some_and(|f| {
+                            f.as_str() != Some("mm/yy")
+                                || cmd["field"].as_str() != Some("expiration_date")
+                        })
+                    {
+                        return Err(ParseError::InvalidValue {
+                            message:
+                                "auth fill requires CSS and supports mm/yy only for expiration_date"
+                                    .into(),
+                            usage: USAGE,
+                        });
+                    }
+                    Ok(cmd)
+                }
                 Some("login") => {
                     const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--timeout <ms>] [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1230,7 +1314,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.unwrap_or("(none)").to_string(),
-                    valid_options: &["save", "login", "list", "delete", "show"],
+                    valid_options: &["save", "login", "fill", "list", "delete", "show"],
                 }),
             }
         }
@@ -6459,6 +6543,39 @@ mod tests {
     fn test_batch_no_args_no_commands_field() {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert!(cmd.get("commands").is_none());
+    }
+
+    #[test]
+    fn test_auth_fill_requires_explicit_binding_and_never_accepts_secret() {
+        let base = "auth fill --credential-provider fixture --item Synthetic --field number --selector #card --target page --frame main";
+        let cmd = parse_command(&args(base), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "auth_fill");
+        assert_eq!(cmd["timeout"], 180_000);
+        assert!(cmd.get("value").is_none());
+        for extra in [
+            " --value synthetic-secret",
+            " --submit",
+            " --frame child",
+            " --format raw",
+            " --format mm/yy",
+            " --timeout 0",
+            " --timeout 300001",
+        ] {
+            assert!(parse_command(&args(&format!("{base}{extra}")), &default_flags()).is_err());
+        }
+        let expiry = base.replace("--field number", "--field expiration_date");
+        let cmd = parse_command(
+            &args(&format!("{expiry} --format mm/yy --timeout 2000")),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["format"], "mm/yy");
+        assert_eq!(cmd["timeout"], 2000);
+        assert!(parse_command(
+            &args("auth fill --credential-provider fixture"),
+            &default_flags()
+        )
+        .is_err());
     }
 
     #[test]

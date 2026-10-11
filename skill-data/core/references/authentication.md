@@ -257,6 +257,26 @@ agent-browser --confirm-actions plugin:stealth:launch.mutate open https://exampl
 
 Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
 
+## Private single-field fill
+
+```bash
+agent-browser frame "iframe.payment"
+agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID
+agent-browser auth fill --credential-provider vault --item "Payment Card" --field expiration_date --selector "input[name=exp-date]" --target TARGET_ID --frame FRAME_ID --format mm/yy --timeout 180000
+```
+
+Provider, item, field, CSS selector, exact active target ID, and exact selected frame ID are all required. Obtain IDs from tab/frame metadata; never guess them. For the top document, select `frame main`, then pass `--frame main`. Snapshot refs are not supported. An existing native browser is required; no launch, navigation, session restoration or submit occurs. The input/document are pinned before lookup; live target/frame/loader association is checked before and after lookup. Filling is a single native-setter operation, never a focus-based keyboard insertion. Stop recording, tracing, streaming and network capture first.
+
+The credential plugin declares `credential.read` and receives this stdio envelope:
+
+```json
+{"protocol":"agent-browser.plugin.v1","type":"credential.field.resolve","capability":"credential.read","request":{"itemRef":"Payment Card","field":"expiration_date","format":"mm/yy","timeoutMs":180000}}
+```
+
+It responds with `{"protocol":"agent-browser.plugin.v1","success":true,"value":"synthetic-private-value"}`. The value must be a nonempty string. Omit `format` to preserve provider formatting; the command accepts only `mm/yy` for `expiration_date`. Field availability is provider-defined. `plugin run` cannot invoke this core request type. Provider errors, stderr, page exceptions and private values never enter normal command output. The field is registered for later sensitive-output redaction before dispatch.
+
+`--timeout` accepts 1..300000ms, initially 180000ms unless an action timeout is configured. It covers the complete operation, with the same 10-second IPC margin and disconnect/subprocess cancellation as auth login. Lookup requires more than one second remaining for provider cleanup. No failed or uncertain fill is automatically replayed. MCP exposes `agent_browser_auth_fill` with required `credentialProvider`, `item`, `field`, `selector`, `target`, `frame`, optional `format`, operation `fillTimeoutMs`, and outer `timeoutMs`.
+
 ## Saving Authentication State
 
 After logging in, save state for reuse:

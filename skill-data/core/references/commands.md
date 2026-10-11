@@ -334,6 +334,7 @@ EOF
 
 ```bash
 agent-browser auth save <name> --url <url> --username <user> --password-stdin
+agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]
 agent-browser auth login <name> [--timeout <ms>] # One total login deadline
 agent-browser auth login <name> --no-navigate
                                           # Use active page after same-origin validation
@@ -350,6 +351,8 @@ agent-browser plugin run <name> <type> --payload <json>
 ```
 
 `--timeout` accepts 1..300000ms and covers all login stages, including credential retrieval. The initial budget is 180000ms or an explicitly configured action timeout. Outer tools must allow that plus 10 seconds. Interrupted/lost responses have unknown effects and are never automatically resent; caller disconnect cancels subsequent stages. `session info` preserves transport failure as `daemon_metadata_transport`, not successful empty runtime metadata.
+
+`auth fill` privately resolves one provider field into a pinned input in the exact active target and selected frame. All binding flags are required; selectors are CSS, not refs. Stop captures first. It checks live frame/document association before and after lookup, fills once without navigation or submit, and returns metadata only. `--format mm/yy` applies only to `expiration_date`. Auth-login deadline, cancellation and no-replay semantics apply. See [authentication.md](authentication.md#private-single-field-fill).
 
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 

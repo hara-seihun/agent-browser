@@ -260,6 +260,15 @@ agent-browser auth login my-app --credential-provider vault --item "My App" --ur
 agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
+For a single private field, select the intended target/frame, obtain their safe IDs, then use native lookup without putting the value into tool arguments:
+
+```bash
+agent-browser frame "iframe.payment"
+agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID
+```
+
+All binding flags are required. `--selector` is CSS, not a ref; `--frame main` requires `frame main` first. Optional `--format mm/yy` is only for `expiration_date`. The daemon pins the input/document, validates the active target and live selected frame before and after lookup, then fills once without navigation or submission. Stop captures before lookup. Values and errors stay private; lost responses are unknown outcomes and must not be replayed. The auth-login total deadline and cancellation contract apply. See [references/authentication.md](references/authentication.md) for the plugin protocol.
+
 Plugins can also provide browser providers, launch mutators such as stealth setup, and arbitrary namespaced commands:
 
 ```bash

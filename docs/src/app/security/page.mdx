@@ -163,6 +163,8 @@ agent-browser auth login my-app --credential-provider vault --item "My App"
 agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
+For a single private field use `auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID`. All binding flags are required, the selector must be CSS, and IDs come from the intended active tab/selected frame metadata. Select `frame main` before `--frame main`. Native pins the input/document and checks live target/frame association before and after lookup, then fills once without navigation, submit or focus-based insertion. Results and foreign errors are metadata-only. The private value is registered for later output redaction. Stop recording, tracing, streaming and network capture first. Optional `--format mm/yy` applies only to `expiration_date`; deadline/cancellation and no-replay semantics match auth login. The dedicated [private field plugin protocol](/plugins#private-field-resolution) uses `credential.read` and cannot be called through `plugin run`.
+
 Use a plugin as a browser provider:
 
 ```bash

@@ -362,6 +362,7 @@ Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, 
 ```bash
 agent-browser auth save <name> [opts]    # Save auth profile
 agent-browser auth login <name>          # Login using saved credentials
+agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]
 agent-browser auth login <name> --no-navigate
                                           # Use active page after origin validation
 agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
@@ -377,6 +378,19 @@ agent-browser plugin show <name>         # Show one configured plugin
 agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
+
+### Private field fill
+
+`auth fill` resolves one vault field without exposing its value in tool arguments or output. Select the intended tab and frame, then supply their returned IDs. For the top document select `frame main` first. An existing native browser is required. The daemon pins the input/document, verifies exact active target and live selected-frame association before and after lookup, then fills once without navigation or submit. CSS selectors are required; snapshot refs are not accepted. Stop recording, tracing, streaming and network capture before lookup.
+
+<table><thead><tr><th>Option</th><th>Contract</th></tr></thead><tbody>
+<tr><td><code>--credential-provider</code>, <code>--item</code>, <code>--field</code></td><td>Required configured credential provider, item reference and provider field name.</td></tr>
+<tr><td><code>--selector</code>, <code>--target</code>, <code>--frame</code></td><td>Required CSS selector, exact active target ID and exact selected frame ID or <code>main</code>.</td></tr>
+<tr><td><code>--format mm/yy</code></td><td>Only for <code>expiration_date</code>; omitted preserves provider formatting.</td></tr>
+<tr><td><code>--timeout</code></td><td>One total operation deadline, 1..300000ms, initial 180000ms unless an action timeout is configured.</td></tr>
+</tbody></table>
+
+Results and errors are metadata-only. The value is registered for subsequent sensitive-output redaction before fill dispatch. The auth-login IPC margin, disconnect cancellation and subprocess cleanup apply; uncertain effects are never replayed. MCP exposes `agent_browser_auth_fill` with `credentialProvider`, `item`, `field`, `selector`, `target`, `frame`, optional `format`, operation `fillTimeoutMs`, and outer `timeoutMs`. See [Plugins](/plugins#private-field-resolution) for the stdio protocol.
 
 Save options:
 

@@ -681,6 +681,29 @@ Provider credentials are still resolved directly by the daemon and remain out of
 |-------------------|-------------|
 | `--no-navigate` | Use the active top-level page without the initial navigation and require its origin to match the effective credential URL. Form submission may still navigate. |
 
+### Private field fill
+
+Use `auth fill` for one vault field, including a payment field in a selected iframe. Select the intended tab and frame first, then use their returned target/frame IDs. The `main` frame must be selected explicitly with `frame main` when filling the top document.
+
+```bash
+agent-browser frame "iframe.payment"
+agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID
+agent-browser auth fill --credential-provider vault --item "Payment Card" --field expiration_date --format mm/yy --selector "input[name=exp-date]" --target TARGET_ID --frame FRAME_ID --timeout 180000
+```
+
+| Auth fill option | Description |
+|------------------|-------------|
+| `--credential-provider <plugin>` | Required configured provider with `credential.read`. |
+| `--item <title>` | Required provider item reference. |
+| `--field <field>` | Required provider field name. |
+| `--selector <css>` | Required CSS selector in the selected frame, not a snapshot ref. |
+| `--target <target-id>` | Required exact active browser target ID. |
+| `--frame <frame-id\|main>` | Required exact selected frame ID, or `main`. |
+| `--format mm/yy` | Optional formatting for `expiration_date`; omitted preserves the provider value. |
+| `--timeout <ms>` | One total deadline, 1..300000ms; initial 180000ms unless an action timeout is configured. |
+
+The daemon verifies live target/frame/document association before and after lookup, pins the editable input and its document, and fills once under its native operation lock. It does not navigate, submit, restore another session, or retry. Stop recording, tracing, streaming and network capture first. Results and errors contain metadata only; the private value is remembered for subsequent output redaction. The existing auth-login disconnect cancellation, subprocess cleanup and IPC margin also apply. A lost response or deadline after dispatch is an unknown outcome, never an instruction to replay. MCP exposes `agent_browser_auth_fill` with `fillTimeoutMs` and outer `timeoutMs`.
+
 ### Import auth from your browser
 
 If you are already logged in to a site in Chrome, you can grab that auth state and reuse it:
@@ -886,6 +909,8 @@ Native sensitive form input protection is always active. Other security controls
 
 `snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]`. `cc-name` remains public. Protection covers native snapshots and getters, including shadow DOM and cross-origin out-of-process iframes. It does not change live form values, so filling and submitting still work.
 
+The native inventory validates the live target frame root and pierced document coverage without creating isolated worlds or executing page JavaScript. Unattached frame owners or incomplete document coverage fail closed, including debugger-paused or script-disabled payment frames. Once a tab is known sensitive, automatic restore saving refuses before renderer observation so metadata and close remain responsive.
+
 This is form-input protection, not a general detector for secrets in arbitrary page text. Native classification uses password input type, sensitive autocomplete tokens, and recognized `name`/`id` identifiers. Use the protected APIs for form inspection.
 
 - **Always refused:** recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript`. These return `SENSITIVE_OUTPUT_UNSUPPORTED` before execution, capture, or file writes even on benign pages.
@@ -999,7 +1024,7 @@ Use a generic plugin command for domain-specific tools such as CAPTCHA solvers:
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
 ```
 
-The protocol request always includes `protocol`, `type`, `capability`, and `request`. A credential plugin receives `credential.resolve`, a browser provider receives `browser.launch`, a launch mutator receives `launch.mutate`, and generic commands receive the supplied request type. `plugin run` is for `command.run` and custom capabilities; core capabilities and protocol request types use their dedicated command paths. agent-browser keeps browser automation, redaction-sensitive output, and policy enforcement in core.
+The protocol request always includes `protocol`, `type`, `capability`, and `request`. A credential plugin receives `credential.resolve` for login or `credential.field.resolve` for private field fill, a browser provider receives `browser.launch`, a launch mutator receives `launch.mutate`, and generic commands receive the supplied request type. `plugin run` is for `command.run` and custom capabilities; core capabilities and protocol request types use their dedicated command paths. agent-browser keeps browser automation, redaction-sensitive output, and policy enforcement in core.
 
 Gate plugin access by capability action:
 
