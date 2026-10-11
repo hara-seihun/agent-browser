@@ -4729,9 +4729,20 @@ async fn observe_sensitive_tab(
                     super::sensitive::UNSUPPORTED
                 ) =>
         {
-            // New OOPIFs can enter the DOM during inventory, after the initial
-            // command drain. Synchronize queued attachments once, then repeat
-            // only observation; the surrounding action has not been replayed.
+            // A browser round-trip orders already-created target notifications
+            // before the drain. Merely draining the queue can race its reader.
+            {
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                mgr.client
+                    .send_command_no_params("Target.getTargets", None)
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "{}: frame attachment synchronization unavailable",
+                            super::sensitive::UNSUPPORTED
+                        )
+                    })?;
+            }
             state.drain_cdp_events_background().await?;
             let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
             if mgr.active_session_id()? != session {
