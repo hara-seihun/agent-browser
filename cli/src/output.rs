@@ -2750,6 +2750,7 @@ Private fill behavior:
   First box of a complete2..32 visible same-type maxlength1 input group:
     Pin every segment, dispatch once, require exact collective retention.
   Global redaction minimum:3 Unicode characters; short control markers remain.
+  Scoped getters/snapshots honor private control IDs; bulk content/read refuse.
   session info prunes global fragments and reports sensitiveSecretMaintenance
     minimumCharacters, removedByCharacterLength, retainedCount; never values.
   Retention ignores spaces/hyphens for number and spaces for expiration_date;

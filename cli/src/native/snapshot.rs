@@ -237,11 +237,37 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, super::sensitive::InventoryError> {
-    let (observation, batch) =
+    take_snapshot_with_controls(
+        client,
+        session_id,
+        options,
+        ref_map,
+        frame_id,
+        iframe_sessions,
+        &HashMap::new(),
+    )
+    .await
+}
+
+pub(crate) async fn take_snapshot_with_controls(
+    client: &Arc<CdpClient>,
+    session_id: &str,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
+    private_controls: &HashMap<(String, i64), String>,
+) -> Result<String, super::sensitive::InventoryError> {
+    let (mut observation, batch) =
         super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
             collect_snapshot_batch(client, options, frame_id, context)
         })
         .await?;
+    observation.controls.extend(
+        private_controls
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     let root = frame_id.unwrap_or(&batch.context.top_frame);
     let mut candidate_refs = ref_map.clone();
     let output = render_snapshot_frame(

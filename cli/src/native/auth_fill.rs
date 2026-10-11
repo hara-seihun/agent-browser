@@ -917,6 +917,33 @@ mod tests {
         assert_eq!(snapshot["success"], true, "{snapshot}");
         assert!(!snapshot.to_string().contains(secret));
         assert!(snapshot.to_string().contains("Code character 2 of 9"));
+        assert!(
+            snapshot["data"]["snapshot"]
+                .as_str()
+                .unwrap()
+                .matches("[redacted: credential]")
+                .count()
+                >= 9
+        );
+        for (action, selector, key) in [
+            ("gettext", "#code", "text"),
+            ("innertext", "#code", "text"),
+            ("innerhtml", "#code", "html"),
+            ("getattribute", "input", "value"),
+        ] {
+            let getter = execute_command(
+                &json!({"id":"scoped","action":action,"selector":selector,"attribute":"value"}),
+                &mut state,
+            )
+            .await;
+            assert_eq!(getter["success"], true, "{getter}");
+            assert_eq!(getter["data"][key], "[redacted: credential]", "{getter}");
+        }
+        for action in ["content", "read"] {
+            let refused = execute_command(&json!({"id":"bulk","action":action}), &mut state).await;
+            assert_eq!(refused["success"], false, "{refused}");
+            assert_eq!(refused["code"], "SENSITIVE_OUTPUT_UNSUPPORTED", "{refused}");
+        }
         assert_eq!(state.sensitive_observations[&sid].secret_count(), 1);
         let metadata = execute_command(
             &json!({"id":"metadata","action":"session_info"}),

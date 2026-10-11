@@ -3078,7 +3078,14 @@ async fn execute_command_inner(
                     .entry(session.clone())
                     .or_default();
                 known.merge(current);
-                if known.has_sensitive() && super::sensitive::guarded(action, cmd) {
+                let private_projection_unavailable = matches!(action, "content" | "read")
+                    && known
+                        .controls
+                        .values()
+                        .any(|marker| marker == "[redacted: credential]");
+                if known.has_sensitive()
+                    && (super::sensitive::guarded(action, cmd) || private_projection_unavailable)
+                {
                     return error_response(
                         &id,
                         &format!(
@@ -3141,8 +3148,7 @@ async fn execute_command_inner(
         "check" => handle_check(cmd, state).await,
         "uncheck" => handle_uncheck(cmd, state).await,
         "wait" => handle_wait(cmd, state).await,
-        "gettext" => handle_gettext(cmd, state).await,
-        "getattribute" => handle_getattribute(cmd, state).await,
+        "gettext" | "getattribute" => handle_scoped_getter(action, cmd, state).await,
         "isvisible" => handle_isvisible(cmd, state).await,
         "isenabled" => handle_isenabled(cmd, state).await,
         "ischecked" => handle_ischecked(cmd, state).await,
@@ -3200,9 +3206,7 @@ async fn execute_command_inner(
         "highlight" => handle_highlight(cmd, state).await,
         "tap" => handle_tap(cmd, state).await,
         "boundingbox" => handle_boundingbox(cmd, state).await,
-        "innertext" => handle_innertext(cmd, state).await,
-        "innerhtml" => handle_innerhtml(cmd, state).await,
-        "inputvalue" => handle_inputvalue(cmd, state).await,
+        "innertext" | "innerhtml" | "inputvalue" => handle_scoped_getter(action, cmd, state).await,
         "setvalue" => handle_setvalue(cmd, state).await,
         "count" => handle_count(cmd, state).await,
         "styles" => handle_styles(cmd, state).await,
@@ -6029,6 +6033,10 @@ async fn protected_snapshot(
 ) -> Result<(String, RefMap), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let progress = state.protected_observation_progress();
+    let private_controls = match state.sensitive_observations.get(session) {
+        Some(known) => known.controls.clone(),
+        None => HashMap::new(),
+    };
     protected_inventory_before(deadline, &progress, async {
         loop {
             progress
@@ -6046,13 +6054,14 @@ async fn protected_snapshot(
                 ));
             }
             let mut refs = RefMap::new();
-            match snapshot::take_snapshot(
+            match snapshot::take_snapshot_with_controls(
                 &mgr.client,
                 session,
                 options,
                 &mut refs,
                 frame,
                 &state.iframe_sessions,
+                &private_controls,
             )
             .await
             {
@@ -6663,6 +6672,88 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     // Just a timeout wait
     tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
     Ok(json!({ "waited": "timeout", "ms": timeout_ms }))
+}
+
+async fn handle_scoped_getter(
+    action: &str,
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session = mgr.active_session_id()?.to_string();
+    let selector = cmd
+        .get("selector")
+        .and_then(Value::as_str)
+        .ok_or("Missing 'selector' parameter")?;
+    if action == "getattribute" && cmd.get("attribute").and_then(Value::as_str).is_none() {
+        return Err("Missing 'attribute' parameter".into());
+    }
+    if let Some(known) = state
+        .sensitive_observations
+        .get(&session)
+        .filter(|known| !known.controls.is_empty())
+    {
+        let (object, effective) = super::element::resolve_element_object_id(
+            &mgr.client,
+            &session,
+            &state.ref_map,
+            selector,
+            &state.iframe_sessions,
+        )
+        .await?;
+        let described = mgr
+            .client
+            .send_command(
+                "DOM.describeNode",
+                Some(json!({"objectId":object,"depth":-1,"pierce":true})),
+                Some(&effective),
+            )
+            .await?;
+        fn marker_in(
+            node: &Value,
+            session: &str,
+            controls: &HashMap<(String, i64), String>,
+        ) -> Option<String> {
+            if let Some(marker) = node
+                .get("backendNodeId")
+                .and_then(Value::as_i64)
+                .and_then(|id| controls.get(&(session.to_owned(), id)))
+            {
+                return Some(marker.clone());
+            }
+            match node {
+                Value::Object(fields) => fields
+                    .values()
+                    .find_map(|value| marker_in(value, session, controls)),
+                Value::Array(values) => values
+                    .iter()
+                    .find_map(|value| marker_in(value, session, controls)),
+                _ => None,
+            }
+        }
+        let node = described
+            .get("node")
+            .filter(|node| node["backendNodeId"].as_i64().is_some_and(|id| id > 0))
+            .ok_or("scoped_getter_identity_unavailable: input identity could not be observed")?;
+        if let Some(marker) = marker_in(node, &effective, &known.controls) {
+            return match action {
+                "gettext" => Ok(json!({"text":marker,"origin":mgr.get_url().await?})),
+                "getattribute" => Ok(json!({"value":marker,"origin":mgr.get_url().await?})),
+                "innertext" => Ok(json!({"text":marker})),
+                "innerhtml" => Ok(json!({"html":marker})),
+                "inputvalue" => Ok(json!({"value":marker})),
+                _ => unreachable!("scoped getter dispatch is closed"),
+            };
+        }
+    }
+    match action {
+        "gettext" => handle_gettext(cmd, state).await,
+        "getattribute" => handle_getattribute(cmd, state).await,
+        "innertext" => handle_innertext(cmd, state).await,
+        "innerhtml" => handle_innerhtml(cmd, state).await,
+        "inputvalue" => handle_inputvalue(cmd, state).await,
+        _ => unreachable!("scoped getter dispatch is closed"),
+    }
 }
 
 async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
