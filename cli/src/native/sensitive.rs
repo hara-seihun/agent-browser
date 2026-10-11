@@ -2,6 +2,7 @@
 //! daemon memory for the tab's protection state, never serialized or saved to disk.
 //! Observation responses are protected before output or artifact publication.
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
@@ -446,7 +447,7 @@ fn collect_tree_frames(
 /// Validate document coverage through pierced DOM, without executing renderer
 /// JavaScript or creating worlds in newly attached, debugger-paused frames.
 pub async fn observe(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, String> {
@@ -513,8 +514,15 @@ async fn inventory_document(
 async fn inventory_control(
     client: &CdpClient,
     control: &Control,
+    object_group: &str,
 ) -> Result<Vec<String>, InventoryError> {
-    let resolved = client.send_command("DOM.resolveNode", Some(json!({ "backendNodeId": control.backend, "objectGroup": "agent-browser-sensitive" })), Some(&control.session)).await
+    let resolved = client
+        .send_command(
+            "DOM.resolveNode",
+            Some(json!({ "backendNodeId": control.backend, "objectGroup": object_group })),
+            Some(&control.session),
+        )
+        .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive control unavailable"))?;
     let object = resolved["object"]["objectId"]
         .as_str()
@@ -582,12 +590,18 @@ async fn validate_inventory_document(
 /// may be absent from its parent's frame tree while its DOM owner is present.
 /// Independent represented sessions and sensitive controls are observed concurrently,
 /// with tree and document identities rechecked before admitting the complete result.
+/// Renderer groups register connection-owned cancellation cleanup before resolve;
+/// cancellation cannot dispatch further value reads or abandon remote handles.
 /// Cached sessions from unrelated tabs are not evidence of membership.
 pub(crate) async fn observe_inventory(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, InventoryError> {
+    client
+        .settle_object_cleanup()
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     let mut frames = HashMap::new();
     let mut covered = HashMap::new();
     let mut owners = HashSet::new();
@@ -640,10 +654,18 @@ pub(crate) async fn observe_inventory(
             .collect(),
         ..Observation::default()
     };
+    let control_sessions: HashSet<_> = controls
+        .iter()
+        .map(|control| control.session.clone())
+        .collect();
+    let object_group = client
+        .object_group(control_sessions.into_iter().collect())
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     let values = futures_util::future::join_all(
         controls
             .iter()
-            .map(|control| inventory_control(client, control)),
+            .map(|control| inventory_control(client, control, &object_group.name)),
     )
     .await;
     for (control, values) in controls.iter().zip(values) {
@@ -666,6 +688,11 @@ pub(crate) async fn observe_inventory(
     {
         validation?;
     }
+    object_group.finish();
+    client
+        .settle_object_cleanup()
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
     observation
         .secrets
         .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
@@ -674,7 +701,7 @@ pub(crate) async fn observe_inventory(
 }
 
 pub async fn require_public(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     session: &str,
     frames: &HashMap<String, String>,
 ) -> Result<(), String> {
@@ -780,7 +807,7 @@ mod tests {
                     "Runtime.callFunctionOn" => {
                         json!({"result":{"value":["4242424242424242", "", ""]}})
                     }
-                    "Runtime.releaseObject" => json!({}),
+                    "Runtime.releaseObject" | "Runtime.releaseObjectGroup" => json!({}),
                     "Page.createIsolatedWorld" => {
                         world_requests += 1;
                         let reply = json!({"id":request["id"], "error":{"code":-32000,"message":"Frame observation unavailable while target transitions"}});
@@ -805,9 +832,11 @@ mod tests {
             }
             world_requests
         });
-        let client = CdpClient::connect(&format!("ws://{address}"))
-            .await
-            .unwrap();
+        let client = Arc::new(
+            CdpClient::connect(&format!("ws://{address}"))
+                .await
+                .unwrap(),
+        );
         let observed = observe(
             &client,
             "top-session",

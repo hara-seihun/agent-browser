@@ -28,6 +28,7 @@ pub(crate) struct FrameInventory {
     pub reply_delays: HashMap<String, std::time::Duration>,
     pub changed_documents: HashSet<String>,
     pub invalid_control: bool,
+    pub objects: HashMap<(String, String), String>,
     held: Vec<Value>,
 }
 
@@ -159,7 +160,27 @@ impl SyntheticCdp {
                                     }
                                 }
                                 "DOM.resolveNode" => {
-                                    json!({"object":{"objectId":format!("{session}-{}", command["params"]["backendNodeId"])}})
+                                    let object =
+                                        format!("{session}-{}", command["params"]["backendNodeId"]);
+                                    inventory.objects.insert(
+                                        (session.into(), object.clone()),
+                                        command["params"]["objectGroup"].as_str().unwrap().into(),
+                                    );
+                                    json!({"object":{"objectId":object}})
+                                }
+                                "Runtime.releaseObject" => {
+                                    inventory.objects.remove(&(
+                                        session.into(),
+                                        command["params"]["objectId"].as_str().unwrap().into(),
+                                    ));
+                                    json!({})
+                                }
+                                "Runtime.releaseObjectGroup" => {
+                                    let group = command["params"]["objectGroup"].as_str().unwrap();
+                                    inventory.objects.retain(|(sid, _), owned_group| {
+                                        sid != session || owned_group != group
+                                    });
+                                    json!({})
                                 }
                                 "Runtime.callFunctionOn" => {
                                     if inventory.invalid_control {

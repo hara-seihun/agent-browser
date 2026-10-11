@@ -6,7 +6,7 @@ Safety rules that apply to every agent-browser task, across all sites and framew
 
 ## Native sensitive form input contract
 
-Protected inventory has a two-second total admission window. Independent represented sibling and nested frame sessions and sensitive control reads run concurrently. Live frame trees and document identities are rechecked before success; changed or unknown document identities refuse. Cached sessions without a live frame-tree claim or DOM owner in the current tab are never queried.
+Protected inventory has a two-second total admission window. Independent represented sibling and nested frame sessions and sensitive control reads run concurrently. Live frame trees and document identities are rechecked before success; changed or unknown document identities refuse. Cached sessions without a live frame-tree claim or DOM owner in the current tab are never queried. Observation-unique renderer object groups register connection-owned cleanup before any resolve dispatch. Cancelled resolve, callback, or release waits never abandon cleanup or start late value reads. Cleanup has a 500ms bound; unresolved cleanup refuses further observation until connection close, which owns retirement of the cleanup tasks.
 
 Always use native `snapshot`, `get value`, `get text`, `get html`, or `get attr` to inspect forms. Protected values become `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]`. `cc-name` remains public. Shadow DOM and cross-origin out-of-process iframes are covered. Live values are unchanged, so input and submission still work.
 

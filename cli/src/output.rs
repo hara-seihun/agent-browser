@@ -3799,6 +3799,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory
   has a two-second total admission window; independent represented frames and
   controls run concurrently. Changed/unknown document identities fail closed.
+  Cancelled renderer handles retain connection-owned cleanup (500ms bound).
+  Unresolved cleanup refuses further observation until connection close.
   This is native form-input protection, not general secret detection in page text.
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
   inspect/expose, addinitscript.

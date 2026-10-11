@@ -14430,6 +14430,8 @@ mod tests {
             }
         }
         assert_eq!((reads, releases, deep, shallow), (78, 78, 26, 26));
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+        assert_eq!(client.object_cleanup_len().await, 0);
         assert_eq!(client.pending_len().await, 0);
         client.close().await;
         fixture.server.await.unwrap();
@@ -14501,16 +14503,23 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.contains("deadline elapsed"));
+        client.settle_object_cleanup().await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(client.pending_len().await, 0);
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         let mut reads = 0;
+        let mut group_releases = 0;
         while let Ok(command) = fixture.commands.try_recv() {
             if command["method"] == "Runtime.callFunctionOn" {
                 reads += 1;
             }
+            if command["method"] == "Runtime.releaseObjectGroup" {
+                group_releases += 1;
+            }
             assert!(!command["method"].as_str().unwrap().starts_with("Input."));
         }
         assert_eq!(reads, 3);
+        assert_eq!(group_releases, 1);
         let info = execute_command(
             &json!({"id":"controls-cancel-metadata","action":"session_info"}),
             &mut state,
@@ -14532,6 +14541,8 @@ mod tests {
             .unwrap();
         assert!(error.contains("sensitive control observation failed"));
         assert!(!error.contains("Synthetic-"));
+        client.settle_object_cleanup().await.unwrap();
+        assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         let mut releases = 0;
         while let Ok(command) = fixture.commands.try_recv() {
             if command["method"] == "Runtime.releaseObject" {
@@ -14541,6 +14552,140 @@ mod tests {
         assert_eq!(releases, 3);
         assert_eq!(client.pending_len().await, 0);
         client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_cancelled_resolve_and_release_have_owned_cleanup() {
+        for held_method in ["DOM.resolveNode", "Runtime.releaseObject"] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                inventory.documents.insert("synthetic-top".into(), json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}));
+                inventory.hold_method = Some(held_method.into());
+            }
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            state.browser = Some(fixture.manager);
+            let error = observe_sensitive_tab_until(
+                &mut state,
+                &session,
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(error.contains("deadline elapsed"));
+            client.settle_object_cleanup().await.unwrap();
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            let mut groups = HashSet::new();
+            let mut callbacks = 0;
+            let mut group_releases = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "DOM.resolveNode" {
+                    groups.insert(
+                        command["params"]["objectGroup"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                }
+                if command["method"] == "Runtime.callFunctionOn" {
+                    callbacks += 1;
+                }
+                if command["method"] == "Runtime.releaseObjectGroup" {
+                    group_releases += 1;
+                }
+            }
+            assert_eq!(groups.len(), 1);
+            assert_eq!(group_releases, 1);
+            assert_eq!(
+                callbacks,
+                if held_method == "DOM.resolveNode" {
+                    0
+                } else {
+                    3
+                }
+            );
+            fixture.frame_inventory.lock().unwrap().hold_method = None;
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            while let Ok(command) = fixture.commands.try_recv() {
+                assert_ne!(
+                    command["method"], "Runtime.callFunctionOn",
+                    "late value read after cancelled {held_method}"
+                );
+            }
+            let observed = observe_sensitive_tab(&mut state, &session).await.unwrap();
+            assert_eq!(observed.controls.len(), 3);
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "DOM.resolveNode" {
+                    assert!(!groups.contains(command["params"]["objectGroup"].as_str().unwrap()));
+                }
+            }
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            tokio::task::yield_now().await;
+            assert_eq!(client.pending_len().await, 0);
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_cleanup_failure_is_retained_and_close_bounded() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.documents.insert(
+                "synthetic-top".into(),
+                json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}),
+            );
+            inventory.invalid_control = true;
+            inventory.hold_method = Some("Runtime.releaseObjectGroup".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("sensitive control observation failed"));
+        let interrupted = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(interrupted.contains("deadline elapsed"));
+        let start = std::time::Instant::now();
+        assert!(client.settle_object_cleanup().await.is_err());
+        assert_eq!(client.object_cleanup_len().await, 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        while fixture.commands.try_recv().is_ok() {}
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("sensitive object cleanup unavailable"));
+        assert!(fixture.commands.try_recv().is_err());
+        let info = execute_command(
+            &json!({"id":"cleanup-error-metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        let start = std::time::Instant::now();
+        client.close().await;
+        assert!(start.elapsed() < std::time::Duration::from_millis(1500));
+        assert_eq!(client.pending_len().await, 0);
+        assert_eq!(client.object_cleanup_len().await, 0);
         fixture.server.await.unwrap();
     }
 

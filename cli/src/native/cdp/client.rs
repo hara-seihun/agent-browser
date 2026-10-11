@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde::de::IgnoredAny;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -18,6 +18,41 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
+
+const OBJECT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+pub(crate) struct RemoteObjectGroup {
+    pub(crate) name: String,
+    completion: Option<oneshot::Sender<bool>>,
+}
+
+impl RemoteObjectGroup {
+    pub(crate) fn finish(mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(false);
+        }
+    }
+}
+
+impl Drop for RemoteObjectGroup {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(true);
+        }
+    }
+}
+
+enum ObjectCleanupState {
+    Running(JoinHandle<Result<(), String>>),
+    Complete,
+    Failed,
+}
+
+struct ObjectCleanup {
+    group: String,
+    sessions: Vec<String>,
+    state: ObjectCleanupState,
+}
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 type WsTx = Arc<
@@ -163,6 +198,8 @@ pub struct CdpClient {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
+    object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
+    next_object_group: AtomicU64,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -423,6 +460,8 @@ impl CdpClient {
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
+            object_groups: Mutex::new(HashMap::new()),
+            next_object_group: AtomicU64::new(1),
         })
     }
 
@@ -450,6 +489,7 @@ impl CdpClient {
         self.closed.store(true, Ordering::SeqCst);
 
         let _ = self.cancel_tx.send(true);
+        self.close_object_groups().await;
         Self::abort_task(&self.keepalive_handle).await;
 
         let _ = tokio::time::timeout(TRANSPORT_CLOSE_TIMEOUT, async {
@@ -464,11 +504,144 @@ impl CdpClient {
         self.close_complete.store(true, Ordering::SeqCst);
     }
 
+    /// Register cleanup before resolving any renderer handles. Cancellation drops
+    /// only the signal guard; the connection retains the bounded cleanup task.
+    pub(crate) async fn object_group(
+        self: &Arc<Self>,
+        sessions: Vec<String>,
+    ) -> Result<RemoteObjectGroup, String> {
+        self.ensure_open()?;
+        self.settle_object_cleanup().await?;
+        let id = self.next_object_group.fetch_add(1, Ordering::SeqCst);
+        let group = format!("agent-browser-sensitive-{id}");
+        let (completion, cancelled) = oneshot::channel();
+        let mut groups = self.object_groups.lock().await;
+        self.ensure_open()?;
+        let client = self.clone();
+        let cleanup_group = group.clone();
+        let cleanup_sessions = sessions.clone();
+        let mut closing = self.cancel_tx.subscribe();
+        let task = tokio::spawn(async move {
+            let cleanup = tokio::select! {
+                cancelled = cancelled => cancelled.unwrap_or(true),
+                _ = closing.changed() => true,
+            };
+            if cleanup {
+                client
+                    .release_object_group(&cleanup_group, &cleanup_sessions)
+                    .await
+            } else {
+                Ok(())
+            }
+        });
+        groups.insert(
+            id,
+            ObjectCleanup {
+                group: group.clone(),
+                sessions,
+                state: ObjectCleanupState::Running(task),
+            },
+        );
+        Ok(RemoteObjectGroup {
+            name: group,
+            completion: Some(completion),
+        })
+    }
+
+    pub(crate) async fn settle_object_cleanup(&self) -> Result<(), String> {
+        let mut groups = self.object_groups.lock().await;
+        let mut complete = Vec::new();
+        let mut failed = false;
+        for (id, cleanup) in groups.iter_mut() {
+            match &mut cleanup.state {
+                ObjectCleanupState::Running(task) => {
+                    if matches!((&mut *task).await, Ok(Ok(()))) {
+                        cleanup.state = ObjectCleanupState::Complete;
+                        complete.push(*id);
+                    } else {
+                        cleanup.state = ObjectCleanupState::Failed;
+                        failed = true;
+                    }
+                }
+                ObjectCleanupState::Complete => complete.push(*id),
+                ObjectCleanupState::Failed => failed = true,
+            }
+        }
+        for id in complete {
+            groups.remove(&id);
+        }
+        if failed {
+            Err("Sensitive object cleanup unavailable; close the browser connection".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn release_object_group(&self, group: &str, sessions: &[String]) -> Result<(), String> {
+        tokio::time::timeout(OBJECT_CLEANUP_TIMEOUT, async {
+            let outcomes = futures_util::future::join_all(sessions.iter().map(|session| {
+                self.send_command_internal(
+                    "Runtime.releaseObjectGroup",
+                    Some(json!({"objectGroup":group})),
+                    Some(session),
+                    true,
+                )
+            }))
+            .await;
+            if outcomes.iter().all(Result::is_ok) {
+                Ok(())
+            } else {
+                Err("Sensitive object cleanup unavailable".into())
+            }
+        })
+        .await
+        .map_err(|_| "Sensitive object cleanup deadline elapsed".to_string())?
+    }
+
+    async fn close_object_groups(&self) {
+        let _ = tokio::time::timeout(OBJECT_CLEANUP_TIMEOUT, async {
+            let mut groups = self.object_groups.lock().await;
+            for cleanup in groups.values_mut() {
+                if let ObjectCleanupState::Running(task) = &mut cleanup.state {
+                    task.abort();
+                    let _ = (&mut *task).await;
+                    cleanup.state = ObjectCleanupState::Failed;
+                }
+            }
+            futures_util::future::join_all(
+                groups
+                    .values()
+                    .map(|cleanup| self.release_object_group(&cleanup.group, &cleanup.sessions)),
+            )
+            .await;
+        })
+        .await;
+        let mut groups = self.object_groups.lock().await;
+        for cleanup in groups.values_mut() {
+            if let ObjectCleanupState::Running(task) = &mut cleanup.state {
+                task.abort();
+                let _ = (&mut *task).await;
+            }
+        }
+        groups.clear();
+    }
+
     pub async fn send_command(
         &self,
         method: &str,
         params: Option<Value>,
         session_id: Option<&str>,
+    ) -> Result<Value, String> {
+        self.send_command_internal(method, params, session_id, false)
+            .await
+    }
+
+    async fn send_command_internal(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+        cleanup_while_closing: bool,
     ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
@@ -493,7 +666,9 @@ impl CdpClient {
 
         {
             let mut ws_tx = self.ws_tx.lock().await;
-            self.ensure_open()?;
+            if !cleanup_while_closing {
+                self.ensure_open()?;
+            }
             let mut pending = self.pending.lock().await;
             pending.insert(id, tx);
             drop(pending);
@@ -638,6 +813,11 @@ impl CdpClient {
     #[cfg(test)]
     pub(crate) async fn pending_len(&self) -> usize {
         self.pending.lock().await.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn object_cleanup_len(&self) -> usize {
+        self.object_groups.lock().await.len()
     }
 }
 

@@ -2106,7 +2106,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
@@ -5194,6 +5194,7 @@ mod tests {
             if name == TOOL_GET_VALUE {
                 assert!(description.contains("two-second total admission window"));
                 assert!(description.contains("changed or unknown document identities"));
+                assert!(description.contains("connection-owned cleanup with a 500ms bound"));
             }
             if let Some(action) = sensitive_tool_action(name) {
                 assert_eq!(
