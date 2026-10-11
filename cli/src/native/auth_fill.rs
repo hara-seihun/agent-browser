@@ -942,7 +942,13 @@ mod tests {
         for action in ["content", "read"] {
             let refused = execute_command(&json!({"id":"bulk","action":action}), &mut state).await;
             assert_eq!(refused["success"], false, "{refused}");
-            assert_eq!(refused["code"], "SENSITIVE_OUTPUT_UNSUPPORTED", "{refused}");
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("SENSITIVE_OUTPUT_UNSUPPORTED:"),
+                "{refused}"
+            );
         }
         assert_eq!(state.sensitive_observations[&sid].secret_count(), 1);
         let metadata = execute_command(
