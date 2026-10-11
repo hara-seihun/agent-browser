@@ -15012,10 +15012,9 @@ mod tests {
                     group_sessions.insert(command["sessionId"].as_str().unwrap().to_owned());
                 }
             }
-            assert!(group_sessions.contains("synthetic-session"));
             if outcome == "complete" {
                 assert_eq!(reads.len(), 9);
-                assert_eq!(group_sessions.len(), 3);
+                assert!(group_sessions.is_empty());
                 assert_eq!(
                     commands
                         .iter()
@@ -15031,6 +15030,11 @@ mod tests {
                         .count(),
                     3
                 );
+            } else {
+                assert!(group_sessions.contains("synthetic-session"));
+                assert!(group_sessions.iter().all(|session| {
+                    matches!(session.as_str(), "synthetic-session" | "session-1")
+                }));
             }
             fixture
                 .frame_inventory
