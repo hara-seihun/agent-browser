@@ -390,7 +390,7 @@ agent-browser plugin run <name> <type> --payload <json>
 <tr><td><code>--timeout</code></td><td>One total operation deadline, 1..300000ms, initial 180000ms unless an action timeout is configured.</td></tr>
 </tbody></table>
 
-Results and errors are metadata-only. The value is registered for subsequent sensitive-output redaction before fill dispatch. The auth-login IPC margin, disconnect cancellation and subprocess cleanup apply; uncertain effects are never replayed. MCP exposes `agent_browser_auth_fill` with `credentialProvider`, `item`, `field`, `selector`, `target`, `frame`, optional `format`, operation `fillTimeoutMs`, and outer `timeoutMs`. See [Plugins](/plugins#private-field-resolution) for the stdio protocol.
+Retention accepts spaces/hyphens for `number` and spaces for `expiration_date`; other fields must retain the exact value. Results and errors are metadata-only. The value is registered for subsequent sensitive-output redaction before fill dispatch. The auth-login IPC margin, disconnect cancellation and subprocess cleanup apply; uncertain effects are never replayed. MCP exposes `agent_browser_auth_fill` with `credentialProvider`, `item`, `field`, `selector`, `target`, `frame`, optional `format`, operation `fillTimeoutMs`, and outer `timeoutMs`. See [Plugins](/plugins#private-field-resolution) for the stdio protocol.
 
 Save options:
 

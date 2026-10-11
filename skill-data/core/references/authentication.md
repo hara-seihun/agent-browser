@@ -265,7 +265,7 @@ agent-browser auth fill --credential-provider vault --item "Payment Card" --fiel
 agent-browser auth fill --credential-provider vault --item "Payment Card" --field expiration_date --selector "input[name=exp-date]" --target TARGET_ID --frame FRAME_ID --format mm/yy --timeout 180000
 ```
 
-Provider, item, field, CSS selector, exact active target ID, and exact selected frame ID are all required. Obtain IDs from tab/frame metadata; never guess them. For the top document, select `frame main`, then pass `--frame main`. Snapshot refs are not supported. An existing native browser is required; no launch, navigation, session restoration or submit occurs. The input/document are pinned before lookup; live target/frame/loader association is checked before and after lookup. Filling is a single native-setter operation, never a focus-based keyboard insertion. Stop recording, tracing, streaming and network capture first.
+Provider, item, field, CSS selector, exact active target ID, and exact selected frame ID are all required. Obtain IDs from tab/frame metadata; never guess them. For the top document, select `frame main`, then pass `--frame main`. Snapshot refs are not supported. An existing native browser is required; no launch, navigation, session restoration or submit occurs. The input/document are pinned before lookup; live target/frame/loader association is checked before and after lookup. Filling is a single native-setter operation, never a focus-based keyboard insertion. The retention check ignores only spaces/hyphens for `number` and spaces for `expiration_date`; other fields compare exactly. Stop recording, tracing, streaming and network capture first.
 
 The credential plugin declares `credential.read` and receives this stdio envelope:
 

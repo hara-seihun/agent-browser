@@ -1394,7 +1394,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
-        if data.get("filled").and_then(Value::as_bool) == Some(true) {
+        if data.get("filled").and_then(serde_json::Value::as_bool) == Some(true) {
             println!("{} Private field filled", color::success_indicator());
             return;
         }
@@ -2741,6 +2741,8 @@ Private fill behavior:
   Existing native browser required; no launch, restore, navigation or submit.
   Stop recording, tracing, streaming and network capture first.
   Metadata-only results/errors; private values registered for later redaction.
+  Retention ignores spaces/hyphens for number and spaces for expiration_date;
+  all other fields compare exactly.
   Login deadline, disconnect cleanup and IPC margin apply; never replayed.
   MCP agent_browser_auth_fill uses fillTimeoutMs plus outer timeoutMs.
 

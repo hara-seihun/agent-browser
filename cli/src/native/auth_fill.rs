@@ -164,6 +164,8 @@ async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String>
 
 /// Resolves a secret only after a live target/frame and editable input are pinned.
 /// All plugin and page failures are metadata-only; foreign errors never escape.
+/// Retention permits spaces/hyphens only for number and spaces only for expiry;
+/// every other private field must retain its exact input representation.
 pub async fn handle_auth_fill(
     cmd: &Value,
     state: &mut DaemonState,
@@ -280,7 +282,7 @@ where
             Some(json!({
                 "objectId": object,
                 "functionDeclaration": PRIVATE_FILL,
-                "arguments": [{"value": value}, {"objectId": document}],
+                "arguments": [{"value": value}, {"objectId": document}, {"value": req.field}],
                 "returnByValue": true,
                 "awaitPromise": true
             })),
@@ -309,7 +311,7 @@ where
     }
 }
 
-const PRIVATE_FILL: &str = r#"async function(value, document) {
+const PRIVATE_FILL: &str = r#"async function(value, document, field) {
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
     if (this.matches(':disabled') || this.readOnly) return {status:'not_editable'};
     const view = document.defaultView;
@@ -327,7 +329,9 @@ const PRIVATE_FILL: &str = r#"async function(value, document) {
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
     await new Promise(resolve => view.setTimeout(resolve, 100));
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
-    return {status:this.value === expected ? 'filled' : 'not_retained'};
+    const presentation = field === 'number' ? s => s.replace(/[ -]/g, '')
+        : field === 'expiration_date' ? s => s.replace(/ /g, '') : s => s;
+    return {status:presentation(this.value) === presentation(expected) ? 'filled' : 'not_retained'};
 }"#;
 
 #[cfg(test)]
@@ -576,7 +580,52 @@ mod tests {
         .await;
         assert_eq!(snapshot["success"], true, "{snapshot}");
         assert!(!snapshot.to_string().contains(secret));
-        let mut drift = req;
+        let mut masked = req;
+        for (field, mode, supplied, rendered) in [
+            (
+                "number",
+                "number",
+                "4242424242424242",
+                "4242 4242 4242 4242",
+            ),
+            ("expiration_date", "expiry", "12/30", "12 / 30"),
+            (
+                "password",
+                "password",
+                "synthetic-private-value",
+                "synthetic-private-value ",
+            ),
+        ] {
+            state.browser.as_ref().unwrap().evaluate_in_session(&sid, &format!(
+                "document.body.dataset.mask = '{mode}'; if (!window.maskInstalled) {{ window.maskInstalled=true; document.querySelector('#slot').addEventListener('input', e => {{ const mode=document.body.dataset.mask; if(mode==='number') e.target.value=e.target.value.replace(/[ -]/g,'').replace(/(.{{4}})/g,'$1 ').trim(); else if(mode==='expiry') e.target.value=e.target.value.replace(/ /g,'').replace('/',' / '); else if(mode==='password') e.target.value += ' '; }}); }} true"
+            ), None).await.unwrap();
+            masked.field = field.into();
+            let result = fill_with_resolver(
+                &mut state,
+                &masked,
+                Instant::now() + std::time::Duration::from_secs(2),
+                |_| async { Ok(supplied.into()) },
+            )
+            .await;
+            if field == "password" {
+                assert!(result.unwrap_err().starts_with("auth_fill_not_retained:"));
+            } else {
+                assert_eq!(result.unwrap()["filled"], true);
+            }
+            let actual = state
+                .browser
+                .as_ref()
+                .unwrap()
+                .evaluate_in_session(
+                    &sid,
+                    &format!("document.querySelector('#slot').value === '{}'", rendered),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(actual, json!(true));
+        }
+        let mut drift = masked;
         drift.target = "different-target".into();
         assert_eq!(
             fill_with_resolver(
