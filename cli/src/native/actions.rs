@@ -19,8 +19,8 @@ use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
-    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
-    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    ExceptionThrownEvent, GetFullAXTreeResult, GetTargetsResult, JavascriptDialogOpeningEvent,
+    TargetCreatedEvent, TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -63,6 +63,16 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
 const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
+
+struct PendingIframeAttachment {
+    task: tokio::task::JoinHandle<Result<AttachToTargetResult, String>>,
+}
+
+impl Drop for PendingIframeAttachment {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 pub struct PendingConfirmation {
     pub action: String,
@@ -586,11 +596,14 @@ pub struct DaemonState {
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
-    /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
+    /// Populated by attachment events and represented live-target reconciliation.
     /// Entries are retained across tab changes because Chrome does not emit a
     /// second attachment event when returning to an already-attached tab.
     /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// Attachment/setup custody survives cancellation of protected observation.
+    pending_iframe_attachments: HashMap<String, PendingIframeAttachment>,
+    pending_iframe_setup: HashSet<String>,
     /// Dedicated iframe sessions reachable from the currently active page.
     /// Network tracking uses this subset so background-tab iframe traffic is
     /// not mixed into the active tab's request list or HAR capture.
@@ -732,6 +745,8 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            pending_iframe_attachments: HashMap::new(),
+            pending_iframe_setup: HashSet::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
@@ -1199,6 +1214,15 @@ impl DaemonState {
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
         let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
+        // Retain the entire consumed attachment batch before any await.
+        for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
+            self.retain_iframe_attachment(frame_id, iframe_sid);
+        }
+        for sid in &drained.detached_iframe_sessions {
+            self.iframe_sessions.retain(|_, value| value != sid);
+            self.pending_iframe_setup.remove(sid);
+            self.active_iframe_sessions.remove(sid);
+        }
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -1218,49 +1242,12 @@ impl DaemonState {
             }
         }
 
-        // Track cross-origin iframe sessions
-        for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
-            self.iframe_sessions
-                .insert(frame_id.clone(), iframe_sid.clone());
-            let filter = self.domain_filter.read().await.clone();
-            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-            let controls_active = filter.is_some() || has_proxy_creds;
-            let setup_result = if let Some(ref mgr) = self.browser {
-                async {
-                    mgr.prepare_domains_pub(iframe_sid).await?;
-                    let _ = mgr
-                        .client
-                        .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
-                        .await;
-                    let _ = mgr
-                        .client
-                        .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
-                        .await;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            iframe_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                        )
-                        .await?;
-                    }
-                    mgr.resume_if_waiting_pub(iframe_sid).await
-                }
-                .await
-            } else {
-                Ok(())
-            };
-            if let Err(error) = setup_result {
-                if controls_active {
-                    return close_after_network_control_failure(self, error).await;
-                }
-                eprintln!(
-                    "Warning: failed to prepare iframe session controls: {}",
-                    error
-                );
-            }
-        }
+        self.harvest_iframe_attachments().await?;
+        protected_inventory_before(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            self.prepare_pending_iframes(),
+        )
+        .await?;
 
         // Register top-level pages that browser-level auto-attach paused before
         // their first request. Controls must be installed before resuming.
@@ -1382,11 +1369,6 @@ impl DaemonState {
             if let Some(ref mgr) = self.browser {
                 let _ = mgr.resume_if_waiting_pub(sid).await;
             }
-        }
-
-        for sid in &drained.detached_iframe_sessions {
-            self.iframe_sessions.retain(|_, v| v != sid);
-            self.active_iframe_sessions.remove(sid);
         }
 
         // Attach and register new targets
@@ -1549,6 +1531,118 @@ impl DaemonState {
         }
 
         Ok(())
+    }
+
+    fn retain_iframe_attachment(&mut self, frame: &str, session: &str) {
+        if self.iframe_sessions.get(frame).map(String::as_str) != Some(session) {
+            self.iframe_sessions
+                .insert(frame.to_owned(), session.to_owned());
+            self.pending_iframe_setup.insert(session.to_owned());
+        }
+    }
+
+    async fn finish_iframe_attachment(&mut self, frame: &str) -> Result<(), String> {
+        let attachment = self
+            .pending_iframe_attachments
+            .get_mut(frame)
+            .ok_or("Missing owned iframe attachment")?;
+        let result = (&mut attachment.task).await;
+        self.pending_iframe_attachments.remove(frame);
+        let attach = result
+            .map_err(|_| {
+                format!(
+                    "{}: frame attachment task unavailable",
+                    super::sensitive::UNSUPPORTED
+                )
+            })?
+            .map_err(|_| {
+                format!(
+                    "{}: live frame attachment unavailable",
+                    super::sensitive::UNSUPPORTED
+                )
+            })?;
+        self.retain_iframe_attachment(frame, &attach.session_id);
+        Ok(())
+    }
+
+    async fn harvest_iframe_attachments(&mut self) -> Result<(), String> {
+        let completed: Vec<_> = self
+            .pending_iframe_attachments
+            .iter()
+            .filter(|(_, attachment)| attachment.task.is_finished())
+            .map(|(frame, _)| frame.clone())
+            .collect();
+        for frame in completed {
+            self.finish_iframe_attachment(&frame).await?;
+        }
+        Ok(())
+    }
+
+    async fn prepare_pending_iframes(&mut self) -> Result<(), String> {
+        let mut pending: Vec<_> = self.pending_iframe_setup.iter().cloned().collect();
+        pending.sort();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let filter = self.domain_filter.read().await.clone();
+        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+        let controls_active = filter.is_some() || has_proxy_creds;
+        let mgr = self.browser.as_ref().ok_or("Browser not launched")?;
+        // Per-session ordering is mandatory; independent frame setup is not.
+        let outcomes = futures_util::future::join_all(pending.into_iter().map(|session| {
+            let filter = filter.as_ref();
+            async move {
+                let setup: Result<(), String> = async {
+                    mgr.prepare_iframe_domains_pub(&session).await?;
+                    mgr.client
+                        .send_command_no_params("DOM.enable", Some(&session))
+                        .await?;
+                    mgr.client
+                        .send_command_no_params("Accessibility.enable", Some(&session))
+                        .await?;
+                    if controls_active {
+                        install_network_controls_for_session(
+                            &mgr.client,
+                            &session,
+                            filter,
+                            has_proxy_creds,
+                        )
+                        .await?;
+                    }
+                    mgr.resume_if_waiting_pub(&session).await
+                }
+                .await;
+                (session, setup)
+            }
+        }))
+        .await;
+        let mut failure = None;
+        for (session, setup) in outcomes {
+            match setup {
+                Ok(()) => {
+                    self.pending_iframe_setup.remove(&session);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            if controls_active {
+                return close_after_network_control_failure(self, error).await;
+            }
+            return Err(format!(
+                "{}: iframe session setup unavailable",
+                super::sensitive::UNSUPPORTED
+            ));
+        }
+        Ok(())
+    }
+
+    fn clear_iframe_custody(&mut self) {
+        self.pending_iframe_attachments.clear();
+        self.pending_iframe_setup.clear();
+        self.iframe_sessions.clear();
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -2383,7 +2477,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.launch_hash = None;
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
-    state.iframe_sessions.clear();
+    state.clear_iframe_custody();
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
@@ -4725,46 +4819,114 @@ async fn observe_sensitive_tab(
     .await
 }
 
+async fn protected_inventory_before<T>(
+    deadline: std::time::Instant,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
+        .await
+        .map_err(|_| {
+            format!(
+                "{}: frame observation deadline elapsed",
+                super::sensitive::UNSUPPORTED
+            )
+        })?
+}
+
 async fn observe_sensitive_tab_until(
     state: &mut DaemonState,
     session: &str,
     deadline: std::time::Instant,
 ) -> Result<super::sensitive::Observation, String> {
+    protected_inventory_before(deadline, reconcile_sensitive_tab(state, session)).await
+}
+
+async fn reconcile_sensitive_tab(
+    state: &mut DaemonState,
+    session: &str,
+) -> Result<super::sensitive::Observation, String> {
     loop {
-        let current = {
-            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-            if mgr.active_session_id()? != session {
-                return Err(format!(
-                    "{}: active observation target changed",
-                    super::sensitive::UNSUPPORTED
-                ));
-            }
-            super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
-        };
-        match current {
-            Err(error)
-                if error.starts_with(&format!(
-                    "{}: frame document coverage unavailable:",
-                    super::sensitive::UNSUPPORTED
-                )) && std::time::Instant::now() < deadline =>
-            {
-                // Stripe can create another iframe while the previous one is
-                // being inventoried. Admit only a complete read; never replay
-                // the surrounding action. Keep consumed event setup intact.
-                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-                mgr.client
-                    .send_command_no_params("Target.getTargets", None)
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "{}: frame attachment synchronization unavailable",
-                            super::sensitive::UNSUPPORTED
-                        )
-                    })?;
-                state.drain_cdp_events_background().await?;
-            }
-            outcome => return outcome,
+        state.harvest_iframe_attachments().await?;
+        state.prepare_pending_iframes().await?;
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        if mgr.active_session_id()? != session {
+            return Err(format!(
+                "{}: active observation target changed",
+                super::sensitive::UNSUPPORTED
+            ));
         }
+        let gap =
+            match super::sensitive::observe_inventory(&mgr.client, session, &state.iframe_sessions)
+                .await
+            {
+                Ok(observation) => {
+                    state.active_iframe_sessions = observation.frame_sessions.clone();
+                    return Ok(observation);
+                }
+                Err(super::sensitive::InventoryError::Coverage(gap)) => gap,
+                Err(error) => return Err(error.into_message()),
+            };
+        let represented = gap.unattached_frames();
+        let live: GetTargetsResult = mgr
+            .client
+            .send_command_typed("Target.getTargets", &json!({}), None)
+            .await
+            .map_err(|_| {
+                format!(
+                    "{}: live frame target inventory unavailable",
+                    super::sensitive::UNSUPPORTED
+                )
+            })?;
+        let client = mgr.client.clone();
+        let mut candidates: Vec<_> = represented
+            .into_iter()
+            .filter(|frame| {
+                let matches: Vec<_> = live
+                    .target_infos
+                    .iter()
+                    .filter(|target| &target.target_id == frame)
+                    .collect();
+                matches.len() == 1 && matches[0].target_type == "iframe"
+            })
+            .collect();
+        candidates.sort();
+        for frame in &candidates {
+            if !state.iframe_sessions.contains_key(frame) {
+                state
+                    .pending_iframe_attachments
+                    .entry(frame.clone())
+                    .or_insert_with(|| {
+                        let client = client.clone();
+                        let target_id = frame.clone();
+                        PendingIframeAttachment {
+                            task: tokio::spawn(async move {
+                                client
+                                    .send_command_typed(
+                                        "Target.attachToTarget",
+                                        &AttachToTargetParams {
+                                            target_id,
+                                            flatten: true,
+                                        },
+                                        None,
+                                    )
+                                    .await
+                            }),
+                        }
+                    });
+            }
+        }
+        // Await owned tasks by reference. Cancelling observation retains their
+        // responses and the setup custody for every successful attachment.
+        for frame in candidates {
+            if state.pending_iframe_attachments.contains_key(&frame) {
+                state.finish_iframe_attachment(&frame).await?;
+            }
+        }
+        state.prepare_pending_iframes().await?;
+        // Dynamic children may appear during setup. Complete reinventory, not
+        // an input replay, is the only transition to admitted observation.
+        state.drain_cdp_events_background().await?;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -5561,7 +5723,7 @@ async fn navigate_active_page(
         .as_ref()
         .is_some_and(|browser| browser.page_count() > 1);
     if !has_background_tabs {
-        state.iframe_sessions.clear();
+        state.clear_iframe_custody();
     }
 
     state.ref_map.clear();
@@ -14048,7 +14210,7 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
-        assert!(error.contains("pending-frame"));
+        assert!(error.contains("deadline elapsed"));
         while let Ok(command) = fixture.commands.try_recv() {
             let method = command["method"].as_str().unwrap();
             assert!(
@@ -14057,6 +14219,356 @@ mod tests {
                     && method != "Runtime.callFunctionOn"
             );
         }
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_recovers_lost_notifications_and_nested_owners() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = (1..=5).map(|n| format!("frame-{n}")).collect();
+            inventory.targets = (1..=6)
+                .map(|n| (format!("frame-{n}"), "iframe".into()))
+                .collect();
+            inventory
+                .targets
+                .push(("unrelated-frame".into(), "iframe".into()));
+            inventory
+                .targets
+                .push(("unknown-target".into(), "worker".into()));
+            inventory.documents.insert(
+                "frame-1".into(),
+                json!({"root":{
+                    "nodeName":"#document", "children":[{"nodeName":"IFRAME","frameId":"frame-6"}]
+                }}),
+            );
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        *state.domain_filter.write().await = Some(DomainFilter::new("fixture.invalid"));
+        assert!(!observe_sensitive_tab(&mut state, &session)
+            .await
+            .unwrap()
+            .has_sensitive());
+        assert_eq!(state.iframe_sessions.len(), 6);
+        assert_eq!(state.active_iframe_sessions.len(), 6);
+        assert!(state.pending_iframe_setup.is_empty());
+        assert!(state.pending_iframe_attachments.is_empty());
+        let mut commands = vec![];
+        while let Ok(command) = fixture.commands.try_recv() {
+            commands.push(command);
+        }
+        let attachments: Vec<_> = commands
+            .iter()
+            .filter(|c| c["method"] == "Target.attachToTarget")
+            .collect();
+        assert_eq!(attachments.len(), 6);
+        for n in 1..=6 {
+            let sid = format!("synthetic-frame-frame-{n}");
+            let position = |method| {
+                commands
+                    .iter()
+                    .position(|c| c["method"] == method && c["sessionId"] == sid)
+                    .unwrap()
+            };
+            assert!(position("Target.setAutoAttach") < position("Fetch.enable"));
+            assert!(position("Fetch.enable") < position("Runtime.runIfWaitingForDebugger"));
+            assert!(position("Runtime.runIfWaitingForDebugger") < position("DOM.getDocument"));
+        }
+        assert!(commands.iter().all(|c| {
+            let method = c["method"].as_str().unwrap();
+            !method.starts_with("Input.")
+                && !matches!(
+                    method,
+                    "Runtime.evaluate"
+                        | "Runtime.callFunctionOn"
+                        | "Page.createIsolatedWorld"
+                        | "Page.navigate"
+                )
+        }));
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_refuses_unknown_and_unrelated_targets() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = vec!["unknown-owner".into(), "absent-owner".into()];
+            inventory.targets = vec![
+                ("unknown-owner".into(), "worker".into()),
+                ("unrelated-frame".into(), "iframe".into()),
+            ];
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(state.iframe_sessions.is_empty());
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["method"], "Target.attachToTarget");
+        }
+        // Unrelated retained sessions are not visited, even when unreadable.
+        fixture.frame_inventory.lock().unwrap().owners.clear();
+        state
+            .iframe_sessions
+            .insert("unrelated-frame".into(), "unrelated-session".into());
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .session_roots
+            .insert("unrelated-session".into(), "unrelated-frame".into());
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .unreadable
+            .insert("unrelated-frame".into());
+        assert!(!observe_sensitive_tab(&mut state, &session)
+            .await
+            .unwrap()
+            .has_sensitive());
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["sessionId"], "unrelated-session");
+        }
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_refuses_unreadable_and_misassociated_frames() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = vec!["unreadable-frame".into()];
+            inventory.targets = vec![("unreadable-frame".into(), "iframe".into())];
+            inventory.unreadable.insert("unreadable-frame".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            format!(
+                "{}: pierced DOM unavailable",
+                super::super::sensitive::UNSUPPORTED
+            )
+        );
+        assert_eq!(state.iframe_sessions.len(), 1);
+        let sid = state.iframe_sessions["unreadable-frame"].clone();
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .session_roots
+            .insert(sid, "wrong-root".into());
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("association changed"));
+        let info = execute_command(
+            &json!({"id":"inventory-metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_deadline_bounds_a_stalled_observation() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.stall();
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let start = std::time::Instant::now();
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            start + std::time::Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("deadline elapsed"));
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        tokio::task::yield_now().await;
+        assert_eq!(client.pending_len().await, 0);
+        let info = execute_command(
+            &json!({"id":"inventory-deadline-metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_setup_cancellation_retains_entire_attachment_batch() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = vec!["first".into(), "second".into(), "third".into()];
+            for frame in ["first", "second", "third"] {
+                inventory
+                    .session_roots
+                    .insert(format!("session-{frame}"), frame.into());
+            }
+            inventory.hold_method = Some("Page.enable".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let drained = DrainedEvents {
+            attached_iframe_sessions: ["first", "second", "third"]
+                .iter()
+                .map(|frame| (frame.to_string(), format!("session-{frame}")))
+                .collect(),
+            ..DrainedEvents::default()
+        };
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            state.apply_drained_events(drained),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert_eq!(state.iframe_sessions.len(), 3);
+        assert_eq!(state.pending_iframe_setup.len(), 3);
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["method"], "Runtime.runIfWaitingForDebugger");
+        }
+        fixture.frame_inventory.lock().unwrap().hold_method = None;
+        client
+            .send_command_no_params("Fixture.release", None)
+            .await
+            .unwrap();
+        assert!(!observe_sensitive_tab(&mut state, &session)
+            .await
+            .unwrap()
+            .has_sensitive());
+        assert!(state.pending_iframe_setup.is_empty());
+        tokio::task::yield_now().await;
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_setup_deadline_keeps_lifecycle_available() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = vec!["stalled-setup".into()];
+            inventory.targets = vec![("stalled-setup".into(), "iframe".into())];
+            inventory.hold_method = Some("Page.enable".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("deadline elapsed"));
+        assert_eq!(state.iframe_sessions.len(), 1);
+        assert_eq!(state.pending_iframe_setup.len(), 1);
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["method"], "Runtime.runIfWaitingForDebugger");
+        }
+        let info = execute_command(
+            &json!({"id":"setup-deadline-metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        fixture.frame_inventory.lock().unwrap().hold_method = None;
+        client
+            .send_command_no_params("Fixture.release", None)
+            .await
+            .unwrap();
+        assert!(!observe_sensitive_tab(&mut state, &session)
+            .await
+            .unwrap()
+            .has_sensitive());
+        assert!(state.pending_iframe_setup.is_empty());
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_attach_deadline_retains_response_without_reattachment() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = vec!["late-frame".into()];
+            inventory.targets = vec![("late-frame".into(), "iframe".into())];
+            inventory.hold_method = Some("Target.attachToTarget".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("deadline elapsed"));
+        assert!(state.pending_iframe_attachments.contains_key("late-frame"));
+        assert!(state.iframe_sessions.is_empty());
+        fixture.frame_inventory.lock().unwrap().hold_method = None;
+        client
+            .send_command_no_params("Fixture.release", None)
+            .await
+            .unwrap();
+        assert!(!observe_sensitive_tab(&mut state, &session)
+            .await
+            .unwrap()
+            .has_sensitive());
+        assert_eq!(state.iframe_sessions.len(), 1);
+        assert!(state.pending_iframe_attachments.is_empty());
+        let mut count = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            if command["method"] == "Target.attachToTarget" {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1);
+        assert_eq!(client.pending_len().await, 0);
         client.close().await;
         fixture.server.await.unwrap();
     }

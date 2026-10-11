@@ -210,6 +210,7 @@ pub fn guarded_eval(script: &str) -> String {
 
 #[derive(Default)]
 pub struct Observation {
+    pub(crate) frame_sessions: HashSet<String>,
     pub controls: HashMap<(String, i64), String>,
     secrets: Vec<(String, String)>,
 }
@@ -279,6 +280,7 @@ impl Observation {
     }
 
     pub fn merge(&mut self, other: Self) {
+        self.frame_sessions = other.frame_sessions;
         self.controls.extend(other.controls);
         self.secrets.extend(other.secrets);
         self.secrets
@@ -373,6 +375,72 @@ fn collect_document_frames(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct CoverageGap {
+    pub missing_owners: Vec<String>,
+    pub mismatched_frames: Vec<(String, String, Option<String>)>,
+    covered: HashMap<String, String>,
+    attached: HashMap<String, String>,
+}
+
+impl CoverageGap {
+    /// Only represented but uncached frames may request attachment recovery.
+    pub(crate) fn unattached_frames(&self) -> HashSet<String> {
+        self.missing_owners
+            .iter()
+            .chain(self.mismatched_frames.iter().map(|(frame, _, _)| frame))
+            .filter(|frame| !self.attached.contains_key(*frame))
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum InventoryError {
+    Unavailable(String),
+    Coverage(CoverageGap),
+}
+
+impl From<String> for InventoryError {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
+impl InventoryError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Unavailable(message) => message,
+            Self::Coverage(gap) => format!(
+                "{UNSUPPORTED}: frame document coverage unavailable: {}",
+                json!({ "missingOwnerFrameIds": gap.missing_owners, "mismatchedFrameSessions": gap.mismatched_frames, "coveredFrameSessions": gap.covered, "attachedFrameSessions": gap.attached })
+            ),
+        }
+    }
+}
+
+fn collect_tree_frames(
+    tree: &Value,
+    parent_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    frames: &mut HashMap<String, String>,
+) -> Result<(), InventoryError> {
+    let frame = tree["frame"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("{UNSUPPORTED}: frame tree ID unavailable"))?;
+    let session = iframe_sessions
+        .get(frame)
+        .map(String::as_str)
+        .unwrap_or(parent_session);
+    frames.insert(frame.to_owned(), session.to_owned());
+    if let Some(children) = tree.get("childFrames").and_then(Value::as_array) {
+        for child in children {
+            collect_tree_frames(child, session, iframe_sessions, frames)?;
+        }
+    }
+    Ok(())
+}
+
 /// Fail closed on incomplete frame inventory or an unreadable sensitive control.
 /// Validate document coverage through pierced DOM, without executing renderer
 /// JavaScript or creating worlds in newly attached, debugger-paused frames.
@@ -381,27 +449,40 @@ pub async fn observe(
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, String> {
-    let (top_frame, frames) =
-        super::a11y::collect_frame_sessions(client, top_session, iframe_sessions)
-            .await
-            .map_err(|_| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
-    let mut sessions = HashMap::from([(top_session.to_owned(), top_frame)]);
-    for frame in &frames {
-        if iframe_sessions.get(&frame.frame_id) == Some(&frame.session_id) {
-            sessions.insert(frame.session_id.clone(), frame.frame_id.clone());
-        }
-    }
+    observe_inventory(client, top_session, iframe_sessions)
+        .await
+        .map_err(InventoryError::into_message)
+}
+
+/// Follow only frame-tree claims and pierced-DOM owners of this tab. An OOPIF
+/// may be absent from its parent's frame tree while its DOM owner is present.
+/// Cached sessions from unrelated tabs are not evidence of membership.
+pub(crate) async fn observe_inventory(
+    client: &CdpClient,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Observation, InventoryError> {
+    let mut frames = HashMap::new();
     let mut covered = HashMap::new();
     let mut owners = HashSet::new();
     let mut controls = Vec::new();
-    for (session, root_frame) in sessions {
+    let mut sessions: Vec<(String, Option<String>)> = vec![(top_session.to_owned(), None)];
+    let mut visited = HashSet::from([top_session.to_owned()]);
+    while let Some((session, expected_frame)) = sessions.pop() {
         let live = client
             .send_command_no_params("Page.getFrameTree", Some(&session))
             .await
             .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
-        if live["frameTree"]["frame"]["id"].as_str() != Some(root_frame.as_str()) {
-            return Err(format!("{UNSUPPORTED}: frame session association changed"));
+        let root_frame = live["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or_else(|| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
+        if expected_frame
+            .as_deref()
+            .is_some_and(|frame| frame != root_frame)
+        {
+            return Err(format!("{UNSUPPORTED}: frame session association changed").into());
         }
+        collect_tree_frames(&live["frameTree"], &session, iframe_sessions, &mut frames)?;
         let document = client
             .send_command(
                 "DOM.getDocument",
@@ -412,10 +493,18 @@ pub async fn observe(
             .map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
         let root = document
             .get("root")
+            .filter(|root| root.is_object())
             .ok_or_else(|| format!("{UNSUPPORTED}: DOM root unavailable"))?;
-        covered.insert(root_frame, session.clone());
+        covered.insert(root_frame.to_owned(), session.clone());
         collect_document_frames(root, &session, &mut covered, &mut owners);
         collect_nodes(root, &session, &mut controls, &mut HashSet::new());
+        for frame in frames.keys().chain(owners.iter()) {
+            if let Some(sid) = iframe_sessions.get(frame) {
+                if visited.insert(sid.clone()) {
+                    sessions.push((sid.clone(), Some(frame.clone())));
+                }
+            }
+        }
     }
     let mut missing_owners: Vec<_> = owners
         .iter()
@@ -424,24 +513,26 @@ pub async fn observe(
         .collect();
     let mut mismatched_frames: Vec<_> = frames
         .iter()
-        .filter(|frame| covered.get(&frame.frame_id) != Some(&frame.session_id))
-        .map(|frame| {
-            (
-                &frame.frame_id,
-                &frame.session_id,
-                covered.get(&frame.frame_id),
-            )
-        })
+        .filter(|(frame, session)| covered.get(*frame) != Some(*session))
+        .map(|(frame, session)| (frame.clone(), session.clone(), covered.get(frame).cloned()))
         .collect();
     if !missing_owners.is_empty() || !mismatched_frames.is_empty() {
         missing_owners.sort();
         mismatched_frames.sort();
-        return Err(format!(
-            "{UNSUPPORTED}: frame document coverage unavailable: {}",
-            json!({ "missingOwnerFrameIds": missing_owners, "mismatchedFrameSessions": mismatched_frames, "coveredFrameSessions": covered, "attachedFrameSessions": iframe_sessions })
-        ));
+        return Err(InventoryError::Coverage(CoverageGap {
+            missing_owners,
+            mismatched_frames,
+            covered,
+            attached: iframe_sessions.clone(),
+        }));
     }
-    let mut observation = Observation::default();
+    let mut observation = Observation {
+        frame_sessions: visited
+            .into_iter()
+            .filter(|session| session != top_session)
+            .collect(),
+        ..Observation::default()
+    };
     for control in controls {
         let redacted = marker(control.kind);
         observation
@@ -460,9 +551,7 @@ pub async fn observe(
             "returnByValue": true,
         })), Some(&control.session)).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
         if values.get("exceptionDetails").is_some() {
-            return Err(format!(
-                "{UNSUPPORTED}: sensitive control observation failed"
-            ));
+            return Err(format!("{UNSUPPORTED}: sensitive control observation failed").into());
         }
         let values = values
             .get("result")
@@ -717,6 +806,7 @@ mod tests {
             Some("password")
         );
         let obs = Observation {
+            frame_sessions: HashSet::new(),
             controls: HashMap::new(),
             secrets: vec![
                 ("4242424242424242".into(), marker("cc-number")),

@@ -819,6 +819,11 @@ impl BrowserManager {
         self.prepare_domains(session_id).await
     }
 
+    /// Protected iframe admission requires confirmed child auto-attachment.
+    pub async fn prepare_iframe_domains_pub(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains_with_attachment(session_id, true).await
+    }
+
     pub async fn resume_if_waiting_pub(&self, session_id: &str) -> Result<(), String> {
         self.resume_if_waiting(session_id).await
     }
@@ -845,6 +850,15 @@ impl BrowserManager {
     }
 
     async fn prepare_domains(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains_with_attachment(session_id, false)
+            .await
+    }
+
+    async fn prepare_domains_with_attachment(
+        &self,
+        session_id: &str,
+        require_auto_attach: bool,
+    ) -> Result<(), String> {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
@@ -862,8 +876,9 @@ impl BrowserManager {
         // flatten: true gives each iframe its own session_id.
         // waitForDebuggerOnStart keeps child targets paused until the daemon
         // installs any required network controls and explicitly resumes them.
-        // Ignored on engines that don't support it (e.g. Lightpanda).
-        let _ = self
+        // General page setup supports engines without this domain. Protected
+        // iframe admission instead requires the attachment contract explicitly.
+        let attachment = self
             .client
             .send_command(
                 "Target.setAutoAttach",
@@ -875,6 +890,9 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await;
+        if require_auto_attach {
+            attachment?;
+        }
         Ok(())
     }
 
@@ -987,11 +1005,9 @@ impl BrowserManager {
     async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
         // Needed for real browser sessions (Chrome 144+) where targets are
         // paused after attach until explicitly resumed. No-op otherwise.
-        let _ = self
-            .client
+        self.client
             .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
-            .await;
-        Ok(())
+            .await
     }
 
     /// Enable domains on a direct page connection (no session_id needed).
