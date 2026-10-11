@@ -351,11 +351,14 @@ fn collect_document_frames(
             owners.insert(frame.to_owned());
         }
     }
-    if let Some(document) = node.get("contentDocument") {
+    if let Some(document) = node
+        .get("contentDocument")
+        .filter(|value| value.is_object())
+    {
         if let Some(frame) = document
             .get("frameId")
-            .or_else(|| node.get("frameId"))
             .and_then(Value::as_str)
+            .or_else(|| node.get("frameId").and_then(Value::as_str))
         {
             frames.insert(frame.to_owned(), session.to_owned());
         }
@@ -664,15 +667,19 @@ mod tests {
             {"nodeName":"IFRAME", "frameId":"same", "contentDocument":{"frameId":"same", "children":[
                 {"nodeName":"IFRAME", "frameId":"remote"}
             ]}},
-            {"nodeName":"FRAME", "frameId":"other", "contentDocument":{"children":[]}}
+            {"nodeName":"FRAME", "frameId":"other", "contentDocument":{"children":[]}},
+            {"nodeName":"IFRAME", "frameId":"null-document-id", "contentDocument":{"frameId":null,"children":[]}},
+            {"nodeName":"IFRAME", "frameId":"missing-document", "contentDocument":null}
         ]});
         let mut covered = HashMap::new();
         let mut owners = HashSet::new();
         collect_document_frames(&node, "top-session", &mut covered, &mut owners);
         assert_eq!(covered["same"], "top-session");
         assert_eq!(covered["other"], "top-session");
+        assert_eq!(covered["null-document-id"], "top-session");
         assert!(owners.contains("remote"));
         assert!(!covered.contains_key("remote"));
+        assert!(!covered.contains_key("missing-document"));
     }
 
     #[test]
