@@ -472,6 +472,76 @@ pub async fn observe(
 
 pub(crate) struct InventoryContext {
     roots: HashMap<String, Option<i64>>,
+    pub(crate) top_frame: String,
+    frame_roots: HashMap<String, Option<i64>>,
+    pub(crate) frames: HashMap<String, String>,
+    pub(crate) owners: HashMap<(String, i64), String>,
+    pub(crate) hrefs: HashMap<(String, i64), Result<String, String>>,
+}
+
+fn collect_snapshot_context(
+    node: &Value,
+    session: &str,
+    context: &mut InventoryContext,
+    inherited_base: Option<&url::Url>,
+) {
+    let document_base = if node["nodeName"] == "#document" {
+        node["baseURL"]
+            .as_str()
+            .or_else(|| node["documentURL"].as_str())
+            .and_then(|base| url::Url::parse(base).ok())
+    } else {
+        None
+    };
+    let base = document_base.as_ref().or(inherited_base);
+    if node["nodeName"] == "#document" {
+        if let Some(frame) = node["frameId"].as_str() {
+            context.frame_roots.insert(
+                frame.to_owned(),
+                node["nodeId"].as_i64().filter(|id| *id > 0),
+            );
+        }
+    }
+    if let Some(backend) = node["backendNodeId"].as_i64() {
+        if matches!(node["nodeName"].as_str(), Some("IFRAME" | "FRAME")) {
+            if let Some(frame) = node["contentDocument"]["frameId"]
+                .as_str()
+                .or_else(|| node["frameId"].as_str())
+            {
+                context
+                    .owners
+                    .insert((session.to_owned(), backend), frame.to_owned());
+            }
+        }
+        if let Some(attrs) = node["attributes"].as_array() {
+            for pair in attrs.chunks_exact(2) {
+                if pair[0] == "href" {
+                    if let Some(href) = pair[1].as_str() {
+                        let resolved = url::Url::parse(href)
+                            .or_else(|_| {
+                                base.ok_or(url::ParseError::RelativeUrlWithoutBase)?
+                                    .join(href)
+                            })
+                            .map(|url| url.to_string())
+                            .map_err(|_| "Link document base unavailable".to_owned());
+                        context
+                            .hrefs
+                            .insert((session.to_owned(), backend), resolved);
+                    }
+                }
+            }
+        }
+    }
+    for key in ["children", "shadowRoots", "pseudoElements"] {
+        if let Some(children) = node[key].as_array() {
+            for child in children {
+                collect_snapshot_context(child, session, context, base);
+            }
+        }
+    }
+    if let Some(document) = node.get("contentDocument") {
+        collect_snapshot_context(document, session, context, None);
+    }
 }
 
 impl InventoryContext {
@@ -483,12 +553,12 @@ impl InventoryContext {
             .ok_or_else(|| format!("{UNSUPPORTED}: DOM root node identity unavailable"))
     }
 
-    pub(crate) fn require_session(&self, session: &str) -> Result<(), String> {
-        if self.roots.contains_key(session) {
-            Ok(())
-        } else {
-            Err(format!("{UNSUPPORTED}: unrepresented observation session"))
-        }
+    pub(crate) fn frame_node(&self, frame: &str) -> Result<i64, String> {
+        self.frame_roots
+            .get(frame)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("{UNSUPPORTED}: frame DOM root identity unavailable"))
     }
 }
 
@@ -817,12 +887,47 @@ where
         .object_group(control_sessions.into_iter().collect())
         .await
         .map_err(|_| format!("{UNSUPPORTED}: sensitive object cleanup unavailable"))?;
-    let values = futures_util::future::join_all(
-        controls
+    let mut context = InventoryContext {
+        roots: documents
             .iter()
-            .map(|control| inventory_control(client, control, &object_group.name)),
-    )
-    .await;
+            .map(|document| {
+                (
+                    document.session.clone(),
+                    document.root["nodeId"].as_i64().filter(|id| *id > 0),
+                )
+            })
+            .collect(),
+        top_frame: documents
+            .iter()
+            .find(|document| document.session == top_session)
+            .expect("top document observed")
+            .bindings
+            .root
+            .clone(),
+        frame_roots: documents
+            .iter()
+            .map(|document| {
+                (
+                    document.bindings.root.clone(),
+                    document.root["nodeId"].as_i64().filter(|id| *id > 0),
+                )
+            })
+            .collect(),
+        frames: covered,
+        owners: HashMap::new(),
+        hrefs: HashMap::new(),
+    };
+    for document in &documents {
+        collect_snapshot_context(&document.root, &document.session, &mut context, None);
+    }
+    let (values, collected) = tokio::join!(
+        futures_util::future::join_all(controls.iter().map(|control| inventory_control(
+            client,
+            control,
+            &object_group.name
+        ))),
+        collect(context),
+    );
     for (control, values) in controls.iter().zip(values) {
         let redacted = marker(control.kind);
         observation
@@ -834,18 +939,7 @@ where
             }
         }
     }
-    let context = InventoryContext {
-        roots: documents
-            .iter()
-            .map(|document| {
-                (
-                    document.session.clone(),
-                    document.root["nodeId"].as_i64().filter(|id| *id > 0),
-                )
-            })
-            .collect(),
-    };
-    let collected = collect(context).await;
+
     for validation in futures_util::future::join_all(
         documents
             .iter()

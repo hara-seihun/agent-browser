@@ -2106,7 +2106,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect AX within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
@@ -5193,6 +5193,8 @@ mod tests {
             assert!(description.contains("No bypass flag"));
             if name == TOOL_GET_VALUE {
                 assert!(description.contains("two-second total admission window"));
+                assert!(description.contains("Complete snapshots reuse one inventory"));
+                assert!(description.contains("frame-bound refs transactionally"));
                 assert!(description.contains("exact frame/loader/parent/member/backend bindings"));
                 assert!(description.contains("re-inventoried inside the original deadline"));
                 assert!(description.contains("post-capture guards never retry"));

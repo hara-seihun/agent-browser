@@ -7,7 +7,9 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+#[cfg(test)]
+use super::element::resolve_ax_session;
+use super::element::RefMap;
 
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
@@ -223,8 +225,10 @@ impl RoleNameTracker {
     }
 }
 
-/// Collect AX and selector membership within protected document bindings.
-/// Identity transitions discard all collected data before a bounded retry.
+/// Collect all represented frame AX, cursor and selector projections inside one
+/// protected identity span; controls overlap collection and validation happens once.
+/// Synchronous child rendering allocates deterministic frame-bound refs transactionally.
+/// Identity transitions discard the complete batch before a bounded retry.
 pub async fn take_snapshot(
     client: &Arc<CdpClient>,
     session_id: &str,
@@ -233,75 +237,156 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, super::sensitive::InventoryError> {
-    client
-        .send_command_no_params("DOM.enable", Some(session_id))
+    let (observation, batch) =
+        super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
+            collect_snapshot_batch(client, options, frame_id, context)
+        })
         .await?;
-    client
-        .send_command_no_params("Accessibility.enable", Some(session_id))
-        .await?;
+    let root = frame_id.unwrap_or(&batch.context.top_frame);
+    let mut candidate_refs = ref_map.clone();
+    let output = render_snapshot_frame(
+        root,
+        frame_id,
+        options,
+        &mut candidate_refs,
+        &observation,
+        &batch,
+        &mut std::collections::HashSet::new(),
+    )?;
+    *ref_map = candidate_refs;
+    Ok(output)
+}
 
-    // If a CSS selector is provided, resolve the set of backendNodeIds that
-    // belong to the DOM subtree rooted at the matched element.  We use this
-    // set to pick the right AX subtree root(s) later.
-    let (observation, (selector_backend_ids, ax_tree, effective_session_id)) = super::sensitive::observe_with(client, session_id, iframe_sessions, |context| async move {
-    let selector_backend_ids: Option<std::collections::HashSet<i64>> =
-        if let Some(ref selector) = options.selector {
-            let selected = client.send_command(
-                "DOM.querySelector",
-                Some(serde_json::json!({"nodeId":context.root_node(session_id)?,"selector":selector})),
-                Some(session_id),
-            ).await?;
-            let node_id = selected["nodeId"].as_i64().filter(|id| *id > 0).ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
-            let describe: Value = client
-                .send_command(
-                    "DOM.describeNode",
-                    Some(serde_json::json!({ "nodeId": node_id, "depth": -1 })),
-                    Some(session_id),
+struct SnapshotBatch {
+    context: super::sensitive::InventoryContext,
+    selected_frame: String,
+    projections: HashMap<String, GetFullAXTreeResult>,
+    cursor: HashMap<String, HashMap<i64, CursorElementInfo>>,
+    selector_backend_ids: Option<std::collections::HashSet<i64>>,
+}
+
+async fn collect_snapshot_batch(
+    client: &CdpClient,
+    options: &SnapshotOptions,
+    frame_id: Option<&str>,
+    context: super::sensitive::InventoryContext,
+) -> Result<SnapshotBatch, String> {
+    let root = frame_id.unwrap_or(&context.top_frame);
+    let selected_session = context
+        .frames
+        .get(root)
+        .ok_or("Unrepresented snapshot frame")?;
+    let frames: Vec<_> = context.frames.iter().collect();
+    let sessions: std::collections::HashSet<_> = context.frames.values().collect();
+    let ax = async {
+        futures_util::future::join_all(frames.iter().map(|(frame, session)| async move {
+            let tree: GetFullAXTreeResult = client
+                .send_command_typed(
+                    "Accessibility.getFullAXTree",
+                    &serde_json::json!({"frameId": frame}),
+                    Some(session),
                 )
                 .await?;
+            Ok::<_, String>((frame.to_string(), tree))
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<HashMap<_, _>, _>>()
+    };
+    let cursor_context = &context;
+    let cursor = async {
+        futures_util::future::join_all(sessions.iter().map(|session| async move {
+            let elements = find_cursor_interactive_elements(
+                client,
+                session,
+                cursor_context.root_node(session).ok(),
+            )
+            .await?;
+            Ok::<_, String>((session.to_string(), elements))
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<HashMap<_, _>, _>>()
+    };
+    let selector = async {
+        let session_id = selected_session.as_str();
+        let selector_backend_ids: Option<std::collections::HashSet<i64>> =
+            if let Some(ref selector) = options.selector {
+                let selected = client.send_command(
+                "DOM.querySelector",
+                Some(serde_json::json!({"nodeId":context.frame_node(root)?,"selector":selector})),
+                Some(session_id),
+            ).await?;
+                let node_id = selected["nodeId"]
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
+                let describe: Value = client
+                    .send_command(
+                        "DOM.describeNode",
+                        Some(serde_json::json!({ "nodeId": node_id, "depth": -1 })),
+                        Some(session_id),
+                    )
+                    .await?;
 
-            let root_node = describe
-                .get("node")
-                .ok_or_else(|| format!("Could not resolve DOM node for selector '{}'", selector))?;
+                let root_node = describe.get("node").ok_or_else(|| {
+                    format!("Could not resolve DOM node for selector '{}'", selector)
+                })?;
 
-            let mut ids = std::collections::HashSet::new();
-            collect_backend_node_ids(root_node, &mut ids);
+                let mut ids = std::collections::HashSet::new();
+                collect_backend_node_ids(root_node, &mut ids);
 
-            if ids.is_empty() {
-                return Err(format!(
-                    "Could not resolve backendNodeId for selector '{}'",
-                    selector
-                ));
-            }
+                if ids.is_empty() {
+                    return Err(format!(
+                        "Could not resolve backendNodeId for selector '{}'",
+                        selector
+                    ));
+                }
 
-            Some(ids)
-        } else {
-            None
-        };
+                Some(ids)
+            } else {
+                None
+            };
 
-    let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
-    context.require_session(effective_session_id)?;
-    // Ensure domains are enabled on the iframe session (defensive fallback
-    // in case the attach-time enable in execute_command was missed).
-    if effective_session_id != session_id {
-        let _ = client
-            .send_command_no_params("DOM.enable", Some(effective_session_id))
-            .await;
-        let _ = client
-            .send_command_no_params("Accessibility.enable", Some(effective_session_id))
-            .await;
+        Ok::<_, String>(selector_backend_ids)
+    };
+    let (projections, cursor, selector_backend_ids) = tokio::join!(ax, cursor, selector);
+    let selected_frame = root.to_owned();
+    Ok(SnapshotBatch {
+        context,
+        selected_frame,
+        projections: projections?,
+        cursor: cursor?,
+        selector_backend_ids: selector_backend_ids?,
+    })
+}
+
+fn render_snapshot_frame(
+    frame: &str,
+    frame_id: Option<&str>,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    observation: &super::sensitive::Observation,
+    batch: &SnapshotBatch,
+    visited: &mut std::collections::HashSet<String>,
+) -> Result<String, String> {
+    if !visited.insert(frame.to_owned()) {
+        return Err("Repeated snapshot frame binding".into());
     }
-    let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &ax_params,
-            Some(effective_session_id),
-        )
-        .await?;
-
-    Ok((selector_backend_ids, ax_tree, effective_session_id))
-    }).await?;
+    let effective_session_id = batch
+        .context
+        .frames
+        .get(frame)
+        .ok_or("Unrepresented snapshot frame")?;
+    let ax_tree = batch
+        .projections
+        .get(frame)
+        .ok_or("Missing snapshot frame projection")?;
+    let selector_backend_ids = if batch.selected_frame == frame {
+        batch.selector_backend_ids.as_ref()
+    } else {
+        None
+    };
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
     for node in &mut tree_nodes {
         node.name = observation.protect_text(&node.name);
@@ -344,8 +429,7 @@ pub async fn take_snapshot(
             return Err(format!(
                 "No accessibility node found for selector '{}'",
                 options.selector.as_deref().unwrap_or("")
-            )
-            .into());
+            ));
         }
         roots
     } else {
@@ -358,10 +442,11 @@ pub async fn take_snapshot(
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let mut cursor_elements: HashMap<i64, CursorElementInfo> =
-        find_cursor_interactive_elements(client, session_id)
-            .await
-            .unwrap_or_default();
+    let mut cursor_elements = batch
+        .cursor
+        .get(effective_session_id)
+        .ok_or("Missing cursor projection")?
+        .clone();
     for info in cursor_elements.values_mut() {
         info.text = observation.protect_text(&info.text);
         info.hints
@@ -434,70 +519,18 @@ pub async fn take_snapshot(
     ref_map.set_next_ref_num(next_ref);
 
     if options.urls {
-        let link_nodes: Vec<(usize, i64)> = tree_nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.role == "link" && n.has_ref && n.backend_node_id.is_some())
-            .filter_map(|(i, n)| n.backend_node_id.map(|bid| (i, bid)))
-            .collect();
-
-        if !link_nodes.is_empty() {
-            // CDP has no batch resolve API, so we parallelize individual calls.
-            // Phase 1: resolve all backend node IDs to JS object IDs in parallel.
-            let resolve_futs = link_nodes.iter().map(|&(idx, bid)| async move {
-                let resolved = client
-                    .send_command(
-                        "DOM.resolveNode",
-                        Some(serde_json::json!({ "backendNodeId": bid })),
-                        Some(session_id),
-                    )
-                    .await;
-                let obj_id = resolved.ok().and_then(|r| {
-                    r.get("object")
-                        .and_then(|o| o.get("objectId"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                });
-                (idx, obj_id)
-            });
-            let resolved: Vec<(usize, Option<String>)> =
-                futures_util::future::join_all(resolve_futs).await;
-
-            // Phase 2: fetch hrefs for all resolved objects in parallel.
-            let href_futs: Vec<_> = resolved
-                .iter()
-                .filter_map(|(idx, obj_id)| {
-                    let oid = obj_id.as_ref()?;
-                    Some(async move {
-                        let result = client
-                            .send_command(
-                                "Runtime.callFunctionOn",
-                                Some(serde_json::json!({
-                                    "objectId": oid,
-                                    "functionDeclaration": "function() { return this.href || ''; }",
-                                    "returnByValue": true,
-                                })),
-                                Some(session_id),
-                            )
-                            .await;
-                        let href = result.ok().and_then(|r| {
-                            r.get("result")
-                                .and_then(|r| r.get("value"))
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string())
-                        });
-                        (*idx, href)
+        for node in &mut tree_nodes {
+            if node.role == "link" && node.has_ref {
+                node.url = node
+                    .backend_node_id
+                    .and_then(|backend| {
+                        batch
+                            .context
+                            .hrefs
+                            .get(&(effective_session_id.clone(), backend))
+                            .cloned()
                     })
-                })
-                .collect();
-            let hrefs: Vec<(usize, Option<String>)> =
-                futures_util::future::join_all(href_futs).await;
-
-            for (idx, href) in hrefs {
-                if let Some(url) = href {
-                    tree_nodes[idx].url = Some(url);
-                }
+                    .transpose()?;
             }
         }
     }
@@ -507,11 +540,8 @@ pub async fn take_snapshot(
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
-    // Recurse into child iframes: for each Iframe node with a backend_node_id,
-    // resolve the child frame ID and take a snapshot of its content.
-    // We only recurse from the main frame (frame_id == None) to avoid
-    // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Projection is synchronous and follows AX order, independently of reply order.
+    {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
@@ -521,27 +551,25 @@ pub async fn take_snapshot(
                 continue;
             };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                let child = Box::pin(take_snapshot(
-                    client,
-                    session_id,
-                    options,
-                    ref_map,
-                    Some(&child_fid),
-                    iframe_sessions,
-                ))
-                .await;
-                match child {
-                    Ok(child_text) => {
-                        if !child_text.is_empty()
-                            && child_text != "(empty page)"
-                            && child_text != "(no interactive elements)"
-                        {
-                            iframe_snapshots.push((ref_id.to_string(), child_text));
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
+            let child_fid = batch
+                .context
+                .owners
+                .get(&(effective_session_id.clone(), bid))
+                .ok_or("Missing pierced iframe owner binding")?;
+            let child_text = render_snapshot_frame(
+                child_fid,
+                Some(child_fid),
+                options,
+                ref_map,
+                observation,
+                batch,
+                visited,
+            )?;
+            if !child_text.is_empty()
+                && child_text != "(empty page)"
+                && child_text != "(no interactive elements)"
+            {
+                iframe_snapshots.push((ref_id.to_string(), child_text));
             }
         }
 
@@ -593,43 +621,10 @@ pub async fn take_snapshot(
     Ok(observation.protect_text(&trimmed))
 }
 
-/// Resolve the child frame ID for an iframe element given its backendNodeId.
-async fn resolve_iframe_frame_id(
-    client: &CdpClient,
-    session_id: &str,
-    backend_node_id: i64,
-) -> Result<String, String> {
-    // depth: 1 ensures contentDocument is included in the response
-    let describe: Value = client
-        .send_command(
-            "DOM.describeNode",
-            Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 1 })),
-            Some(session_id),
-        )
-        .await?;
-
-    // Try contentDocument.frameId first (standard for iframes)
-    if let Some(frame_id) = describe
-        .get("node")
-        .and_then(|n| n.get("contentDocument"))
-        .and_then(|cd| cd.get("frameId"))
-        .and_then(|v| v.as_str())
-    {
-        return Ok(frame_id.to_string());
-    }
-
-    // Fallback: the node itself may have a frameId
-    describe
-        .get("node")
-        .and_then(|n| n.get("frameId"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
-}
-
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
+    root_node: Option<i64>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
@@ -639,7 +634,7 @@ async fn find_cursor_interactive_elements(
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
-    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
+    // - Returns structural selectors without mutating fields or temporary attributes
     let js = r#"
 (function() {
     var results = [];
@@ -704,8 +699,18 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        el.setAttribute('data-__ab-ci', String(results.length));
+        var path = [], current = el;
+        while (current) {
+            var index = 1, sibling = current.previousElementSibling;
+            while (sibling) {
+                if (sibling.tagName === current.tagName) index++;
+                sibling = sibling.previousElementSibling;
+            }
+            path.unshift(current.localName + ':nth-of-type(' + index + ')');
+            current = current.parentElement;
+        }
         results.push({
+            selector: path.join(' > '),
             text: text,
             tagName: tagName,
             hasOnClick: hasOnClick,
@@ -732,111 +737,53 @@ async fn find_cursor_interactive_elements(
         )
         .await?;
 
-    let elements: Vec<Value> = result
-        .result
-        .value
-        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
-        .unwrap_or_default();
+    if result.exception_details.is_some() {
+        return Err("Cursor projection unavailable".into());
+    }
+    let elements: Vec<Value> =
+        serde_json::from_value(result.result.value.ok_or("Cursor projection unavailable")?)
+            .map_err(|_| "Invalid cursor projection".to_owned())?;
 
     if elements.is_empty() {
         return Ok(HashMap::new());
     }
 
-    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
-    // then DOM.querySelectorAll to get all tagged elements in a single call.
-    let doc: Value = client
-        .send_command(
-            "DOM.getDocument",
-            Some(serde_json::json!({ "depth": 0 })),
-            Some(session_id),
-        )
-        .await?;
-
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_i64())
-        .ok_or("DOM.getDocument did not return root nodeId")?;
-
-    let query_result: Value = client
-        .send_command(
-            "DOM.querySelectorAll",
-            Some(serde_json::json!({
-                "nodeId": root_node_id,
-                "selector": "[data-__ab-ci]"
-            })),
-            Some(session_id),
-        )
-        .await?;
-
-    let node_ids: Vec<i64> = query_result
-        .get("nodeIds")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
-        .unwrap_or_default();
-
-    // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
-    let describe_futures: Vec<_> = node_ids
-        .iter()
-        .map(|&node_id| {
-            client.send_command(
-                "DOM.describeNode",
-                Some(serde_json::json!({ "nodeId": node_id })),
+    let root_node = root_node.ok_or("Cursor DOM root unavailable")?;
+    let nodes = futures_util::future::join_all(elements.iter().map(|element| async {
+        let selector = element["selector"]
+            .as_str()
+            .ok_or("Cursor selector unavailable")?;
+        let selected = client
+            .send_command(
+                "DOM.querySelector",
+                Some(serde_json::json!({"nodeId":root_node,"selector":selector})),
                 Some(session_id),
             )
-        })
-        .collect();
-
-    let describe_results = futures_util::future::join_all(describe_futures).await;
-
-    // Build a map from data-__ab-ci index to backendNodeId.
-    let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
-    for desc in describe_results.into_iter().flatten() {
-        let backend_id = desc
-            .get("node")
-            .and_then(|n| n.get("backendNodeId"))
-            .and_then(|v| v.as_i64());
-        let ci_attr = desc
-            .get("node")
-            .and_then(|n| n.get("attributes"))
-            .and_then(|a| a.as_array())
-            .and_then(|attrs| {
-                // attributes is a flat array: [name, value, name, value, ...]
-                attrs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci"))
-                    .and_then(|(i, _)| attrs.get(i + 1))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<usize>().ok())
-            });
-        if let (Some(bid), Some(idx)) = (backend_id, ci_attr) {
-            idx_to_backend.insert(idx, bid);
-        }
-    }
-
-    // Clean up the data attributes we injected for backendNodeId resolution.
-    let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
-    if let Err(e) = client
-        .send_command_typed::<EvaluateParams, EvaluateResult>(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: cleanup_js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await
-    {
-        eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
-    }
+            .await?;
+        let node = selected["nodeId"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or("Cursor node unavailable")?;
+        let described = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({"nodeId":node})),
+                Some(session_id),
+            )
+            .await?;
+        described["node"]["backendNodeId"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| "Cursor backend identity unavailable".to_owned())
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, String>>()?;
 
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
     for (i, elem) in elements.iter().enumerate() {
-        let backend_node_id = idx_to_backend.get(&i).copied();
+        let backend_node_id = nodes.get(i).copied();
 
         // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
         // 'focusable' for tabindex-only elements.

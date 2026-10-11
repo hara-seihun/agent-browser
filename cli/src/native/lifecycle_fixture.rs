@@ -34,6 +34,10 @@ pub(crate) struct FrameInventory {
     pub invalid_control: bool,
     pub ax_generation_labels: bool,
     pub ax_new_owner: Option<String>,
+    pub ax_trees: HashMap<String, Value>,
+    pub unreadable_ax: HashSet<String>,
+    pub cursor_frames: HashSet<String>,
+    pub session_reply_delays: HashMap<(String, String), std::time::Duration>,
     pub objects: HashMap<(String, String), String>,
     held: Vec<Value>,
 }
@@ -235,11 +239,32 @@ impl SyntheticCdp {
                                                 .push(json!({"nodeName":"IFRAME","frameId":frame}));
                                         }
                                     }
-                                    if inventory.ax_generation_labels {
+                                    let frame = command["params"]["frameId"]
+                                        .as_str()
+                                        .unwrap_or(&root_frame);
+                                    if let Some(tree) = inventory.ax_trees.get(frame) {
+                                        tree.clone()
+                                    } else if inventory.ax_generation_labels {
                                         json!({"nodes":[ {"nodeId":"heading","ignored":false,"role":{"type":"role","value":"heading"},"name":{"type":"computedString","value":format!("snapshot-{backend}")},"backendDOMNodeId":1100}]})
                                     } else {
                                         json!({"nodes":[]})
                                     }
+                                }
+                                "Runtime.evaluate"
+                                    if command["params"]["expression"]
+                                        .as_str()
+                                        .is_some_and(|js| js.contains("var allElements")) =>
+                                {
+                                    let value = if inventory.cursor_frames.contains(&root_frame) {
+                                        json!([{"selector":"html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(1)","text":format!("cursor-{root_frame}"),"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}])
+                                    } else {
+                                        json!([])
+                                    };
+                                    json!({"result":{"type":"object","value":value}})
+                                }
+                                "DOM.querySelector" => json!({"nodeId":400}),
+                                "DOM.describeNode" => {
+                                    json!({"node":{"nodeId":400,"backendNodeId":400,"nodeName":"DIV"}})
                                 }
                                 "Runtime.evaluate" => {
                                     json!({"result": {"type": "number", "value": 1}})
@@ -257,13 +282,19 @@ impl SyntheticCdp {
                                     .unwrap_or(1000));
                             }
                             let delay = inventory
-                                .reply_delays
-                                .get(method)
+                                .session_reply_delays
+                                .get(&(session.to_owned(), method.to_owned()))
+                                .or_else(|| inventory.reply_delays.get(method))
                                 .copied()
                                 .unwrap_or(std::time::Duration::ZERO);
-                            let response = if method == "DOM.getDocument"
-                                && inventory.unreadable.contains(&root_frame)
-                            {
+                            let response = if (method == "DOM.getDocument"
+                                && inventory.unreadable.contains(&root_frame))
+                                || (method == "Accessibility.getFullAXTree"
+                                    && inventory.unreadable_ax.contains(
+                                        command["params"]["frameId"]
+                                            .as_str()
+                                            .unwrap_or(&root_frame),
+                                    )) {
                                 json!({"id":command["id"],"error":{"code":-32000,"message":"fixture unreadable document"}})
                             } else {
                                 json!({"id":command["id"],"result":result})

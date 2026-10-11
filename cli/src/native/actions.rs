@@ -14461,6 +14461,334 @@ mod tests {
         fixture.server.await.unwrap();
     }
 
+    fn configure_full_snapshot_fixture(
+        inventory: &mut super::super::lifecycle_fixture::FrameInventory,
+        state: &mut DaemonState,
+    ) {
+        for n in 0..=25 {
+            let frame = if n == 0 {
+                "synthetic-top".to_owned()
+            } else {
+                format!("frame-{n}")
+            };
+            let session = if n == 0 {
+                "synthetic-session".to_owned()
+            } else {
+                format!("session-{n}")
+            };
+            if n > 0 {
+                inventory
+                    .session_roots
+                    .insert(session.clone(), frame.clone());
+                state.iframe_sessions.insert(frame.clone(), session.clone());
+            }
+            let children: Vec<usize> = if n == 0 {
+                (1..=20).collect()
+            } else if n <= 5 {
+                vec![n + 20]
+            } else {
+                vec![]
+            };
+            let mut dom = protected_inventory_controls();
+            dom.push(json!({"nodeName":"A","backendNodeId":300,"attributes":["href","../pay"]}));
+            dom.push(json!({"nodeName":"DIV","backendNodeId":400}));
+            dom.extend(children.iter().map(|child| json!({"nodeName":"IFRAME","backendNodeId":500 + child,"frameId":format!("frame-{child}")})));
+            inventory.documents.insert(frame.clone(), json!({"root":{"nodeName":"#document","nodeId":1,"baseURL":"https://fixture.invalid/base/","children":dom}}));
+            let mut nodes = Vec::new();
+            let mut ids = Vec::new();
+            for (index, kind) in ["cc-number", "cc-exp", "cc-csc"].iter().enumerate() {
+                let id = format!("control-{index}");
+                ids.push(id.clone());
+                nodes.push(json!({"nodeId":id,"ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":format!("{frame}-{kind}")},"value":{"type":"string","value":format!("Synthetic-{session}-{}", index + 11)},"backendDOMNodeId":index + 11}));
+            }
+            ids.extend(["link".into(), "cursor".into()]);
+            nodes.push(json!({"nodeId":"link","ignored":false,"role":{"type":"role","value":"link"},"name":{"type":"computedString","value":format!("link-{frame}")},"backendDOMNodeId":300}));
+            nodes.push(json!({"nodeId":"cursor","ignored":false,"role":{"type":"role","value":"generic"},"name":{"type":"computedString","value":format!("cursor-{frame}")},"backendDOMNodeId":400}));
+            for child in children {
+                let id = format!("owner-{child}");
+                ids.push(id.clone());
+                nodes.push(json!({"nodeId":id,"ignored":false,"role":{"type":"role","value":"Iframe"},"name":{"type":"computedString","value":format!("owner-frame-{child}")},"backendDOMNodeId":500 + child}));
+            }
+            nodes.insert(0, json!({"nodeId":"root","ignored":false,"role":{"type":"role","value":"RootWebArea"},"name":{"type":"computedString","value":frame},"childIds":ids}));
+            inventory
+                .ax_trees
+                .insert(frame.clone(), json!({"nodes":nodes}));
+            inventory.cursor_frames.insert(frame);
+        }
+        inventory
+            .session_roots
+            .insert("unrepresented-session".into(), "unrepresented".into());
+        inventory.unreadable.insert("unrepresented".into());
+        state
+            .iframe_sessions
+            .insert("unrepresented".into(), "unrepresented-session".into());
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_full_snapshot_remote_frames_refs_cursor_links_fit_deadline() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_full_snapshot_fixture(&mut inventory, &mut state);
+            for method in [
+                "Page.getFrameTree",
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+                "Accessibility.getFullAXTree",
+                "Runtime.evaluate",
+                "DOM.querySelector",
+                "DOM.describeNode",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(100));
+            }
+            inventory.reply_delays.insert(
+                "DOM.getDocument".into(),
+                std::time::Duration::from_millis(300),
+            );
+        }
+        state.browser = Some(fixture.manager);
+        let options = SnapshotOptions {
+            urls: true,
+            ..SnapshotOptions::default()
+        };
+        let mut previous = None;
+        for reverse in [false, true] {
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                for n in 1..=25 {
+                    inventory.session_reply_delays.insert(
+                        (format!("session-{n}"), "Accessibility.getFullAXTree".into()),
+                        std::time::Duration::from_millis(if (n % 2 == 0) == reverse {
+                            120
+                        } else {
+                            100
+                        }),
+                    );
+                }
+            }
+            let start = std::time::Instant::now();
+            let (tree, refs) = protected_snapshot(&mut state, &session, &options, None)
+                .await
+                .unwrap();
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            assert!(!tree.contains("Synthetic-"));
+            assert!(tree.contains("https://fixture.invalid/pay"));
+            assert_eq!(tree.matches("cursor:pointer").count(), 26);
+            for n in 1..=25 {
+                for kind in ["cc-number", "cc-exp", "cc-csc"] {
+                    let name = format!("frame-{n}-{kind}");
+                    let entry = refs
+                        .entries_sorted()
+                        .into_iter()
+                        .find(|(_, entry)| entry.name == name)
+                        .unwrap()
+                        .1;
+                    assert_eq!(
+                        entry.frame_id.as_deref(),
+                        Some(format!("frame-{n}").as_str())
+                    );
+                }
+            }
+            assert_eq!(tree.matches("[redacted: cc-number]").count(), 26);
+            let signature = refs
+                .entries_sorted()
+                .iter()
+                .map(|(id, entry)| {
+                    (
+                        id.clone(),
+                        entry.backend_node_id,
+                        entry.frame_id.clone(),
+                        entry.name.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some((previous_tree, previous_signature)) = previous.take() {
+                assert_eq!(tree, previous_tree);
+                assert_eq!(signature, previous_signature);
+            }
+            previous = Some((tree, signature));
+            let mut calls = HashMap::<String, usize>::new();
+            let mut deep = 0;
+            let mut shallow = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap();
+                *calls.entry(method.into()).or_insert(0) += 1;
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                assert!(
+                    !method.starts_with("Input.")
+                        && !matches!(
+                            method,
+                            "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                        )
+                );
+                if method == "DOM.getDocument" {
+                    if command["params"]["depth"] == -1 {
+                        deep += 1;
+                    } else {
+                        shallow += 1;
+                    }
+                }
+                if method == "DOM.describeNode" {
+                    assert!(command["params"].get("backendNodeId").is_none());
+                }
+                if method == "Runtime.evaluate" {
+                    assert!(!command["params"]["expression"]
+                        .as_str()
+                        .unwrap()
+                        .contains("setAttribute"));
+                }
+            }
+            assert_eq!((deep, shallow), (26, 26));
+            for method in [
+                "Accessibility.getFullAXTree",
+                "Runtime.evaluate",
+                "DOM.querySelector",
+                "DOM.describeNode",
+            ] {
+                assert_eq!(calls[method], 26);
+            }
+            for method in [
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+            ] {
+                assert_eq!(calls[method], 78);
+            }
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+        }
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_full_snapshot_child_refusal_and_cancel_publish_no_refs() {
+        for cancelled in [false, true] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_full_snapshot_fixture(&mut inventory, &mut state);
+                if cancelled {
+                    inventory.hold_method = Some("Accessibility.getFullAXTree".into());
+                } else {
+                    inventory.unreadable_ax.insert("frame-24".into());
+                }
+            }
+            let mut refs = RefMap::new();
+            refs.add("e1".into(), Some(999), "button", "previous", None);
+            refs.set_next_ref_num(2);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                snapshot::take_snapshot(
+                    &client,
+                    &session,
+                    &SnapshotOptions::default(),
+                    &mut refs,
+                    None,
+                    &state.iframe_sessions,
+                ),
+            )
+            .await;
+            if cancelled {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_err());
+            }
+            assert_eq!(refs.entries_sorted().len(), 1);
+            assert_eq!(refs.get("e1").unwrap().name, "previous");
+            assert_eq!(refs.next_ref_num(), 2);
+            client.settle_object_cleanup().await.unwrap();
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+            let mut ax = 0;
+            let mut late_reads = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                if command["method"] == "Accessibility.getFullAXTree" {
+                    ax += 1;
+                }
+            }
+            assert_eq!(ax, 26);
+            fixture.frame_inventory.lock().unwrap().hold_method = None;
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "Runtime.callFunctionOn" {
+                    late_reads += 1;
+                }
+            }
+            assert_eq!(late_reads, 0);
+            assert_eq!(client.pending_len().await, 0);
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_full_snapshot_embedded_frame_uses_owner_session_context() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.documents.insert("synthetic-top".into(), json!({"root":{"nodeName":"#document","nodeId":1,"children":[{"nodeName":"IFRAME","backendNodeId":500,"frameId":"embedded","contentDocument":{"nodeName":"#document","nodeId":2,"backendNodeId":2000,"frameId":"embedded","children":[{"nodeName":"INPUT","backendNodeId":21,"attributes":["autocomplete","cc-number"]}]}}]}}));
+            inventory.frame_trees.insert("synthetic-top".into(), json!({"frameTree":{"frame":{"id":"synthetic-top","loaderId":"root-loader"},"childFrames":[{"frame":{"id":"embedded","parentId":"synthetic-top","loaderId":"child-loader"}}]}}));
+            inventory.ax_trees.insert("synthetic-top".into(), json!({"nodes":[{"nodeId":"owner","ignored":false,"role":{"type":"role","value":"Iframe"},"name":{"type":"computedString","value":"embedded-owner"},"backendDOMNodeId":500}]}));
+            inventory.ax_trees.insert("embedded".into(), json!({"nodes":[{"nodeId":"control","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"embedded-control"},"value":{"type":"string","value":"Synthetic-synthetic-session-21"},"backendDOMNodeId":21}]}));
+        }
+        let mut refs = RefMap::new();
+        let tree = snapshot::take_snapshot(
+            &client,
+            &session,
+            &SnapshotOptions::default(),
+            &mut refs,
+            None,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(tree.contains("embedded-control"));
+        assert!(tree.contains("[redacted: cc-number]"));
+        assert!(!tree.contains("Synthetic-"));
+        let entry = refs
+            .entries_sorted()
+            .into_iter()
+            .find(|(_, entry)| entry.name == "embedded-control")
+            .unwrap()
+            .1;
+        assert_eq!(entry.frame_id.as_deref(), Some("embedded"));
+        let mut ax_frames = HashSet::new();
+        let mut deep = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_ne!(command["method"], "Target.attachToTarget");
+            if command["method"] == "Accessibility.getFullAXTree" {
+                assert_eq!(command["sessionId"], session);
+                ax_frames.insert(command["params"]["frameId"].as_str().unwrap().to_owned());
+            }
+            if command["method"] == "DOM.getDocument" && command["params"]["depth"] == -1 {
+                deep += 1;
+            }
+        }
+        assert_eq!(
+            ax_frames,
+            HashSet::from(["synthetic-top".to_owned(), "embedded".to_owned()])
+        );
+        assert_eq!(deep, 1);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_protected_inventory_binding_projection_accepts_metadata_and_sibling_order() {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
@@ -14683,7 +15011,7 @@ mod tests {
                 attaches += 1;
             }
         }
-        assert_eq!((ax, attaches), (2, 1));
+        assert_eq!((ax, attaches), (3, 1));
         assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         assert_eq!(client.object_cleanup_len().await, 0);
         client.close().await;
