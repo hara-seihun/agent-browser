@@ -16,6 +16,35 @@ async fn delayed_reply(response: Value, delay: std::time::Duration) -> Value {
     response
 }
 
+fn fixture_structural_selector(document: &Value, backend: i64) -> Option<String> {
+    fn find(node: &Value, backend: i64, path: &str) -> Option<String> {
+        if node["backendNodeId"] == backend {
+            return Some(path.to_owned());
+        }
+        let mut siblings = HashMap::<String, usize>::new();
+        for child in node["children"].as_array()? {
+            let tag = child["nodeName"].as_str()?;
+            if tag.starts_with('#') {
+                continue;
+            }
+            let tag = tag.to_ascii_lowercase();
+            let index = siblings.entry(tag.clone()).or_insert(0);
+            *index += 1;
+            let step = format!("{tag}:nth-of-type({index})");
+            let selector = if path.is_empty() {
+                step
+            } else {
+                format!("{path} > {step}")
+            };
+            if let Some(selector) = find(child, backend, &selector) {
+                return Some(selector);
+            }
+        }
+        None
+    }
+    find(&document["root"], backend, "")
+}
+
 #[derive(Default)]
 pub(crate) struct FrameInventory {
     pub owners: Vec<String>,
@@ -258,12 +287,20 @@ impl SyntheticCdp {
                                         .as_str()
                                         .is_some_and(|js| js.contains("var allElements")) =>
                                 {
-                                    let value = if inventory.cursor_frames.contains(&root_frame) {
-                                        json!([{"selector":"html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(1)","text":format!("cursor-{root_frame}"),"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}])
+                                    if inventory.cursor_frames.contains(&root_frame) {
+                                        match inventory.documents.get(&root_frame).and_then(
+                                            |document| fixture_structural_selector(document, 400),
+                                        ) {
+                                            Some(selector) => {
+                                                json!({"result":{"type":"object","value":[{"selector":selector,"text":format!("cursor-{root_frame}"),"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
+                                            }
+                                            None => {
+                                                json!({"exceptionDetails":{"text":"synthetic cursor DOM unavailable"}})
+                                            }
+                                        }
                                     } else {
-                                        json!([])
-                                    };
-                                    json!({"result":{"type":"object","value":value}})
+                                        json!({"result":{"type":"object","value":[]}})
+                                    }
                                 }
                                 "DOM.querySelector" => json!({"nodeId":400}),
                                 "DOM.describeNode" => {

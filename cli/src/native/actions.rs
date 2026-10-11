@@ -14560,9 +14560,10 @@ mod tests {
             let children = children(n);
             let mut dom = protected_inventory_controls();
             dom.push(json!({"nodeName":"A","backendNodeId":300,"attributes":["href","../pay"]}));
+            dom.push(json!({"nodeName":"DIV","backendNodeId":401}));
             dom.push(json!({"nodeName":"DIV","backendNodeId":400}));
             dom.extend(children.iter().map(|child| json!({"nodeName":"IFRAME","backendNodeId":500 + child,"frameId":format!("frame-{child}")})));
-            inventory.documents.insert(frame.clone(), json!({"root":{"nodeName":"#document","nodeId":1,"baseURL":"https://fixture.invalid/base/","children":dom}}));
+            inventory.documents.insert(frame.clone(), json!({"root":{"nodeName":"#document","nodeId":1,"baseURL":"https://fixture.invalid/base/","children":[{"nodeName":"HTML","backendNodeId":2,"children":[{"nodeName":"BODY","backendNodeId":3,"children":dom}]}]}}));
             let mut nodes = Vec::new();
             let mut ids = Vec::new();
             for (index, kind) in ["cc-number", "cc-exp", "cc-csc"].iter().enumerate() {
@@ -14714,13 +14715,11 @@ mod tests {
                 }
             }
             assert_eq!((deep, shallow), (26, 26));
-            for method in [
-                "Accessibility.getFullAXTree",
-                "Runtime.evaluate",
-                "DOM.querySelector",
-                "DOM.describeNode",
-            ] {
+            for method in ["Accessibility.getFullAXTree", "Runtime.evaluate"] {
                 assert_eq!(calls[method], 26);
+            }
+            for method in ["DOM.querySelector", "DOM.describeNode"] {
+                assert_eq!(calls.get(method).copied().unwrap_or(0), 0);
             }
             for method in [
                 "DOM.resolveNode",
@@ -15158,7 +15157,8 @@ mod tests {
             for n in 2..=17 {
                 let frame = format!("frame-{n}");
                 let keep = if n == 2 { 1 } else { 0 };
-                inventory.documents.get_mut(&frame).unwrap()["root"]["children"]
+                inventory.documents.get_mut(&frame).unwrap()["root"]["children"][0]["children"][0]
+                    ["children"]
                     .as_array_mut()
                     .unwrap()
                     .retain(|node| {
@@ -15256,12 +15256,18 @@ mod tests {
             for n in 1..=17 {
                 let frame = format!("frame-{n}");
                 let entries = refs.entries_sorted();
-                let entry = &entries
-                    .iter()
-                    .find(|(_, entry)| entry.name == format!("link-{frame}"))
-                    .unwrap()
-                    .1;
-                assert_eq!(entry.frame_id.as_deref(), Some(frame.as_str()));
+                for (name, backend) in [
+                    (format!("link-{frame}"), 300),
+                    (format!("cursor-{frame}"), 400),
+                ] {
+                    let entry = &entries
+                        .iter()
+                        .find(|(_, entry)| entry.name == name)
+                        .unwrap()
+                        .1;
+                    assert_eq!(entry.frame_id.as_deref(), Some(frame.as_str()));
+                    assert_eq!(entry.backend_node_id, Some(backend));
+                }
             }
             let signature = refs
                 .entries_sorted()
@@ -15317,13 +15323,17 @@ mod tests {
                 } else {
                     format!("session-{n}")
                 };
-                for method in [
-                    "Accessibility.getFullAXTree",
-                    "Runtime.evaluate",
-                    "DOM.querySelector",
-                    "DOM.describeNode",
-                ] {
+                for method in ["Accessibility.getFullAXTree", "Runtime.evaluate"] {
                     assert_eq!(counts[&(sid.clone(), method.into())], 1);
+                }
+                for method in ["DOM.querySelector", "DOM.describeNode"] {
+                    assert_eq!(
+                        counts
+                            .get(&(sid.clone(), method.into()))
+                            .copied()
+                            .unwrap_or(0),
+                        0
+                    );
                 }
                 assert_eq!(counts[&(sid.clone(), "Page.getFrameTree".into())], 2);
                 for method in [
