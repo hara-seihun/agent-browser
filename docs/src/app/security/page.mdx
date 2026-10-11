@@ -6,7 +6,7 @@ Native sensitive form input protection is always active. Other security controls
 
 ## Native sensitive form inputs
 
-Native `snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with typed markers. Live fields stay unchanged, including during filling and submission. Shadow DOM and cross-origin out-of-process iframes are covered.
+Native `snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with typed markers. Live fields stay unchanged, including during filling and submission. Shadow DOM and cross-origin out-of-process iframes are covered. Protected inventory has a two-second total admission window. Independent represented frames and sensitive control reads run concurrently, with live frame trees and document identities rechecked before success. Changed or unknown document identities refuse; unrelated cached sessions are never queried.
 
 <table>
   <thead><tr><th>Input kind</th><th>Output marker</th></tr></thead>

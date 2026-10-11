@@ -3796,7 +3796,9 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
     [redacted: cc-number], [redacted: cc-exp], [redacted: cc-exp-month],
     [redacted: cc-exp-year], [redacted: cc-csc], [redacted: password],
     [redacted: one-time-code]. cc-name stays public; live fields stay unchanged.
-  Covers shadow DOM and cross-origin out-of-process iframes.
+  Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory
+  has a two-second total admission window; independent represented frames and
+  controls run concurrently. Changed/unknown document identities fail closed.
   This is native form-input protection, not general secret detection in page text.
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
   inspect/expose, addinitscript.

@@ -3,6 +3,7 @@
 //! Observation responses are protected before output or artifact publication.
 use std::collections::{HashMap, HashSet};
 
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
 use super::cdp::client::CdpClient;
@@ -454,8 +455,133 @@ pub async fn observe(
         .map_err(InventoryError::into_message)
 }
 
+struct InventoryDocument {
+    session: String,
+    tree: Value,
+    root: Value,
+    backend: i64,
+}
+
+async fn inventory_document(
+    client: &CdpClient,
+    session: String,
+    expected_frame: Option<String>,
+) -> Result<InventoryDocument, InventoryError> {
+    let live = client
+        .send_command_no_params("Page.getFrameTree", Some(&session))
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
+    let root_frame = live["frameTree"]["frame"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
+    if expected_frame
+        .as_deref()
+        .is_some_and(|frame| frame != root_frame)
+    {
+        return Err(format!("{UNSUPPORTED}: frame session association changed").into());
+    }
+    let document = client
+        .send_command(
+            "DOM.getDocument",
+            Some(json!({ "depth": -1, "pierce": true })),
+            Some(&session),
+        )
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
+    let root = document
+        .get("root")
+        .filter(|root| root["nodeName"] == "#document")
+        .ok_or_else(|| format!("{UNSUPPORTED}: DOM root unavailable"))?;
+    let backend = root["backendNodeId"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| format!("{UNSUPPORTED}: document identity unavailable"))?;
+    if root["frameId"]
+        .as_str()
+        .is_some_and(|frame| frame != root_frame)
+    {
+        return Err(format!("{UNSUPPORTED}: document frame association changed").into());
+    }
+    Ok(InventoryDocument {
+        session,
+        tree: live["frameTree"].clone(),
+        root: root.clone(),
+        backend,
+    })
+}
+
+async fn inventory_control(
+    client: &CdpClient,
+    control: &Control,
+) -> Result<Vec<String>, InventoryError> {
+    let resolved = client.send_command("DOM.resolveNode", Some(json!({ "backendNodeId": control.backend, "objectGroup": "agent-browser-sensitive" })), Some(&control.session)).await
+        .map_err(|_| format!("{UNSUPPORTED}: sensitive control unavailable"))?;
+    let object = resolved["object"]["objectId"]
+        .as_str()
+        .ok_or_else(|| format!("{UNSUPPORTED}: sensitive control handle unavailable"))?;
+    let values = async {
+        let values = client.send_command("Runtime.callFunctionOn", Some(json!({
+            "objectId": object,
+            "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', this.tagName === 'TEXTAREA' ? this.textContent : '']; }",
+            "returnByValue": true,
+        })), Some(&control.session)).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
+        if values.get("exceptionDetails").is_some() {
+            return Err(format!("{UNSUPPORTED}: sensitive control observation failed").into());
+        }
+        values["result"]["value"]
+            .as_array()
+            .ok_or_else(|| format!("{UNSUPPORTED}: sensitive control values unavailable"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{UNSUPPORTED}: invalid control observation").into())
+            })
+            .collect::<Result<Vec<String>, InventoryError>>()
+    }
+    .await;
+    client
+        .send_command(
+            "Runtime.releaseObject",
+            Some(json!({ "objectId": object })),
+            Some(&control.session),
+        )
+        .await
+        .map_err(|_| format!("{UNSUPPORTED}: sensitive observation cleanup failed"))?;
+    values
+}
+
+async fn validate_inventory_document(
+    client: &CdpClient,
+    document: &InventoryDocument,
+) -> Result<(), InventoryError> {
+    let (live, root) = tokio::join!(
+        client.send_command_no_params("Page.getFrameTree", Some(&document.session)),
+        client.send_command(
+            "DOM.getDocument",
+            Some(json!({ "depth": 0, "pierce": true })),
+            Some(&document.session),
+        )
+    );
+    let live = live.map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
+    let root = root.map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
+    if live["frameTree"] != document.tree
+        || root["root"]["backendNodeId"].as_i64() != Some(document.backend)
+        || root["root"]["nodeName"] != "#document"
+        || root["root"]["frameId"]
+            .as_str()
+            .is_some_and(|frame| Some(frame) != document.tree["frame"]["id"].as_str())
+    {
+        return Err(format!("{UNSUPPORTED}: observed document changed").into());
+    }
+    Ok(())
+}
+
 /// Follow only frame-tree claims and pierced-DOM owners of this tab. An OOPIF
 /// may be absent from its parent's frame tree while its DOM owner is present.
+/// Independent represented sessions and sensitive controls are observed concurrently,
+/// with tree and document identities rechecked before admitting the complete result.
 /// Cached sessions from unrelated tabs are not evidence of membership.
 pub(crate) async fn observe_inventory(
     client: &CdpClient,
@@ -466,45 +592,26 @@ pub(crate) async fn observe_inventory(
     let mut covered = HashMap::new();
     let mut owners = HashSet::new();
     let mut controls = Vec::new();
-    let mut sessions: Vec<(String, Option<String>)> = vec![(top_session.to_owned(), None)];
+    let mut sessions = FuturesUnordered::new();
+    sessions.push(inventory_document(client, top_session.to_owned(), None));
+    let mut documents = Vec::new();
     let mut visited = HashSet::from([top_session.to_owned()]);
-    while let Some((session, expected_frame)) = sessions.pop() {
-        let live = client
-            .send_command_no_params("Page.getFrameTree", Some(&session))
-            .await
-            .map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
-        let root_frame = live["frameTree"]["frame"]["id"]
-            .as_str()
-            .ok_or_else(|| format!("{UNSUPPORTED}: frame inventory unavailable"))?;
-        if expected_frame
-            .as_deref()
-            .is_some_and(|frame| frame != root_frame)
-        {
-            return Err(format!("{UNSUPPORTED}: frame session association changed").into());
-        }
-        collect_tree_frames(&live["frameTree"], &session, iframe_sessions, &mut frames)?;
-        let document = client
-            .send_command(
-                "DOM.getDocument",
-                Some(json!({ "depth": -1, "pierce": true })),
-                Some(&session),
-            )
-            .await
-            .map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
-        let root = document
-            .get("root")
-            .filter(|root| root.is_object())
-            .ok_or_else(|| format!("{UNSUPPORTED}: DOM root unavailable"))?;
+    while let Some(document) = sessions.next().await {
+        let document = document?;
+        let session = &document.session;
+        let root_frame = document.tree["frame"]["id"].as_str().unwrap();
+        collect_tree_frames(&document.tree, session, iframe_sessions, &mut frames)?;
         covered.insert(root_frame.to_owned(), session.clone());
-        collect_document_frames(root, &session, &mut covered, &mut owners);
-        collect_nodes(root, &session, &mut controls, &mut HashSet::new());
+        collect_document_frames(&document.root, session, &mut covered, &mut owners);
+        collect_nodes(&document.root, session, &mut controls, &mut HashSet::new());
         for frame in frames.keys().chain(owners.iter()) {
             if let Some(sid) = iframe_sessions.get(frame) {
                 if visited.insert(sid.clone()) {
-                    sessions.push((sid.clone(), Some(frame.clone())));
+                    sessions.push(inventory_document(client, sid.clone(), Some(frame.clone())));
                 }
             }
         }
+        documents.push(document);
     }
     let mut missing_owners: Vec<_> = owners
         .iter()
@@ -533,49 +640,31 @@ pub(crate) async fn observe_inventory(
             .collect(),
         ..Observation::default()
     };
-    for control in controls {
+    let values = futures_util::future::join_all(
+        controls
+            .iter()
+            .map(|control| inventory_control(client, control)),
+    )
+    .await;
+    for (control, values) in controls.iter().zip(values) {
         let redacted = marker(control.kind);
         observation
             .controls
             .insert((control.session.clone(), control.backend), redacted.clone());
-        let resolved = client.send_command("DOM.resolveNode", Some(json!({ "backendNodeId": control.backend, "objectGroup": "agent-browser-sensitive" })), Some(&control.session)).await
-            .map_err(|_| format!("{UNSUPPORTED}: sensitive control unavailable"))?;
-        let object = resolved
-            .get("object")
-            .and_then(|v| v.get("objectId"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("{UNSUPPORTED}: sensitive control handle unavailable"))?;
-        let values = client.send_command("Runtime.callFunctionOn", Some(json!({
-            "objectId": object,
-            "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', this.tagName === 'TEXTAREA' ? this.textContent : '']; }",
-            "returnByValue": true,
-        })), Some(&control.session)).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
-        if values.get("exceptionDetails").is_some() {
-            return Err(format!("{UNSUPPORTED}: sensitive control observation failed").into());
-        }
-        let values = values
-            .get("result")
-            .and_then(|v| v.get("value"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("{UNSUPPORTED}: sensitive control values unavailable"))?;
-        for value in values {
-            let value = value
-                .as_str()
-                .ok_or_else(|| format!("{UNSUPPORTED}: invalid control observation"))?;
+        for value in values? {
             if !value.is_empty() {
-                observation
-                    .secrets
-                    .push((value.to_string(), redacted.clone()));
+                observation.secrets.push((value, redacted.clone()));
             }
         }
-        client
-            .send_command(
-                "Runtime.releaseObject",
-                Some(json!({ "objectId": object })),
-                Some(&control.session),
-            )
-            .await
-            .map_err(|_| format!("{UNSUPPORTED}: sensitive observation cleanup failed"))?;
+    }
+    for validation in futures_util::future::join_all(
+        documents
+            .iter()
+            .map(|document| validate_inventory_document(client, document)),
+    )
+    .await
+    {
+        validation?;
     }
     observation
         .secrets
@@ -682,10 +771,10 @@ mod tests {
                         json!({"frameTree":{"frame":{"id":"payment", "parentId":"top"}}})
                     }
                     "DOM.getDocument" if session == "top-session" => {
-                        json!({"root":{"nodeName":"#document", "children":[{"nodeName":"IFRAME", "frameId":"payment"}]}})
+                        json!({"root":{"nodeName":"#document", "backendNodeId":100, "children":[{"nodeName":"IFRAME", "frameId":"payment"}]}})
                     }
                     "DOM.getDocument" => {
-                        json!({"root":{"nodeName":"#document", "children":[{"nodeName":"INPUT", "backendNodeId":1, "attributes":["autocomplete","cc-number"]}]}})
+                        json!({"root":{"nodeName":"#document", "backendNodeId":101, "children":[{"nodeName":"INPUT", "backendNodeId":1, "attributes":["autocomplete","cc-number"]}]}})
                     }
                     "DOM.resolveNode" => json!({"object":{"objectId":"synthetic-card"}}),
                     "Runtime.callFunctionOn" => {

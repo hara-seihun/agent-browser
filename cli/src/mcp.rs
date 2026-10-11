@@ -2106,7 +2106,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
@@ -2116,7 +2116,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
         }
     }
-    "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag."
+    "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities."
 }
 
 fn sensitive_tool_action(name: &str) -> Option<&'static str> {
@@ -5191,6 +5191,10 @@ mod tests {
             let description = sensitive_tool_description(name);
             assert!(description.contains("canonical CLI"));
             assert!(description.contains("No bypass flag"));
+            if name == TOOL_GET_VALUE {
+                assert!(description.contains("two-second total admission window"));
+                assert!(description.contains("changed or unknown document identities"));
+            }
             if let Some(action) = sensitive_tool_action(name) {
                 assert_eq!(
                     description.contains("Always refused"),

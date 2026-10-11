@@ -14322,6 +14322,228 @@ mod tests {
         fixture.server.await.unwrap();
     }
 
+    fn protected_inventory_controls() -> Vec<Value> {
+        ["cc-number", "cc-exp", "cc-csc"]
+            .iter()
+            .enumerate()
+            .map(|(n, kind)| json!({"nodeName":"INPUT","backendNodeId":n + 11,"attributes":["autocomplete",kind]}))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_remote_siblings_nested_controls_fit_total_deadline() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.owners = (1..=20).map(|n| format!("frame-{n}")).collect();
+            inventory.frame_trees.insert("synthetic-top".into(), json!({"frameTree":{
+                "frame":{"id":"synthetic-top","loaderId":"top-document"},
+                "childFrames":(1..=5).map(|n| json!({"frame":{"id":format!("frame-{n}"),"loaderId":format!("document-{n}")}})).collect::<Vec<_>>()
+            }}));
+            let top_document = json!({"root":{
+                "nodeName":"#document",
+                "children":protected_inventory_controls().into_iter().chain(inventory.owners.iter().map(|frame| json!({"nodeName":"IFRAME","frameId":frame}))).collect::<Vec<_>>()
+            }});
+            inventory
+                .documents
+                .insert("synthetic-top".into(), top_document);
+            for n in 1..=25 {
+                let frame = format!("frame-{n}");
+                let sid = format!("session-{n}");
+                inventory.session_roots.insert(sid.clone(), frame.clone());
+                state.iframe_sessions.insert(frame.clone(), sid);
+                let mut children = protected_inventory_controls();
+                if n <= 5 {
+                    children
+                        .push(json!({"nodeName":"IFRAME","frameId":format!("frame-{}", n + 20)}));
+                }
+                inventory.documents.insert(
+                    frame,
+                    json!({"root":{"nodeName":"#document","children":children}}),
+                );
+            }
+            state
+                .iframe_sessions
+                .insert("unrepresented".into(), "unrepresented-session".into());
+            inventory
+                .session_roots
+                .insert("unrepresented-session".into(), "unrepresented".into());
+            inventory.unreadable.insert("unrepresented".into());
+            for method in [
+                "Page.getFrameTree",
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(100));
+            }
+            inventory.reply_delays.insert(
+                "DOM.getDocument".into(),
+                std::time::Duration::from_millis(300),
+            );
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        state.browser = Some(fixture.manager);
+        let start = std::time::Instant::now();
+        let observed = observe_sensitive_tab(&mut state, &session).await.unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(observed.controls.len(), 78);
+        assert_eq!(state.active_iframe_sessions.len(), 25);
+        let mut reads = 0;
+        let mut releases = 0;
+        let mut deep = 0;
+        let mut shallow = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            assert_ne!(command["sessionId"], "unrepresented-session");
+            assert!(
+                !method.starts_with("Input.")
+                    && !matches!(
+                        method,
+                        "Page.navigate"
+                            | "Runtime.evaluate"
+                            | "Page.createIsolatedWorld"
+                            | "Target.attachToTarget"
+                    )
+            );
+            if method == "DOM.getDocument" {
+                if command["params"]["depth"] == -1 {
+                    deep += 1;
+                } else {
+                    shallow += 1;
+                }
+            }
+            if method == "Runtime.releaseObject" {
+                releases += 1;
+            }
+            if method == "Runtime.callFunctionOn" {
+                reads += 1;
+                let secret = format!(
+                    "Synthetic-{}",
+                    command["params"]["objectId"].as_str().unwrap()
+                );
+                assert!(observed.protect_text(&secret).starts_with("[redacted: "));
+            }
+        }
+        assert_eq!((reads, releases, deep, shallow), (78, 78, 26, 26));
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_refuses_replaced_or_misbound_document() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .changed_documents
+            .insert("synthetic-top".into());
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("observed document changed"));
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.changed_documents.clear();
+            inventory.documents.insert("synthetic-top".into(), json!({"root":{"nodeName":"#document","frameId":"wrong-frame","backendNodeId":1000}}));
+        }
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("document frame association changed"));
+        fixture.frame_inventory.lock().unwrap().documents.insert(
+            "synthetic-top".into(),
+            json!({"root":{"nodeName":"#document","backendNodeId":0}}),
+        );
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("document identity unavailable"));
+        assert!(state.active_iframe_sessions.is_empty());
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_concurrent_control_cancellation_and_refusal() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.documents.insert(
+                "synthetic-top".into(),
+                json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}),
+            );
+            inventory.hold_method = Some("Runtime.callFunctionOn".into());
+        }
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let error = observe_sensitive_tab_until(
+            &mut state,
+            &session,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("deadline elapsed"));
+        tokio::task::yield_now().await;
+        assert_eq!(client.pending_len().await, 0);
+        let mut reads = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            if command["method"] == "Runtime.callFunctionOn" {
+                reads += 1;
+            }
+            assert!(!command["method"].as_str().unwrap().starts_with("Input."));
+        }
+        assert_eq!(reads, 3);
+        let info = execute_command(
+            &json!({"id":"controls-cancel-metadata","action":"session_info"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(info["success"], true);
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            inventory.hold_method = None;
+            inventory.invalid_control = true;
+        }
+        client
+            .send_command_no_params("Fixture.release", None)
+            .await
+            .unwrap();
+        let error = observe_sensitive_tab(&mut state, &session)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("sensitive control observation failed"));
+        assert!(!error.contains("Synthetic-"));
+        let mut releases = 0;
+        while let Ok(command) = fixture.commands.try_recv() {
+            if command["method"] == "Runtime.releaseObject" {
+                releases += 1;
+            }
+        }
+        assert_eq!(releases, 3);
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_protected_inventory_refuses_unknown_and_unrelated_targets() {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;

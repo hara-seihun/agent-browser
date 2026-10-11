@@ -2,12 +2,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::browser::BrowserManager;
+
+async fn delayed_reply(response: Value, delay: std::time::Duration) -> Value {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    response
+}
 
 #[derive(Default)]
 pub(crate) struct FrameInventory {
@@ -15,8 +22,12 @@ pub(crate) struct FrameInventory {
     pub targets: Vec<(String, String)>,
     pub session_roots: HashMap<String, String>,
     pub documents: HashMap<String, Value>,
+    pub frame_trees: HashMap<String, Value>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
+    pub reply_delays: HashMap<String, std::time::Duration>,
+    pub changed_documents: HashSet<String>,
+    pub invalid_control: bool,
     held: Vec<Value>,
 }
 
@@ -45,8 +56,23 @@ impl SyntheticCdp {
         let (tx, mut commands) = mpsc::unbounded_channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            while let Some(Ok(message)) = ws.next().await {
+            let mut replies = FuturesUnordered::new();
+            loop {
+                let message = tokio::select! {
+                    message = ws.next() => match message {
+                        Some(Ok(message)) => message,
+                        _ => break,
+                    },
+                    response = replies.next(), if !replies.is_empty() => {
+                        let response: Value = response.unwrap();
+                        if ws.send(Message::Text(response.to_string())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
                 match message {
                     Message::Text(text) => {
                         let command: Value = serde_json::from_str(&text).unwrap();
@@ -55,7 +81,7 @@ impl SyntheticCdp {
                             continue;
                         }
                         let method = command["method"].as_str().unwrap();
-                        let (response, released) = {
+                        let (response, released, delay) = {
                             let mut inventory = inventory_server.lock().unwrap();
                             let session = command["sessionId"].as_str().unwrap_or("");
                             let root_frame = inventory
@@ -88,11 +114,30 @@ impl SyntheticCdp {
                                 "Page.getFrameTree" => {
                                     // Kernel can omit the OOPIF from the parent's tree
                                     // and omit parentId from the OOPIF's own root.
-                                    json!({"frameTree":{"frame":{"id":root_frame}}})
+                                    inventory
+                                        .frame_trees
+                                        .get(&root_frame)
+                                        .cloned()
+                                        .unwrap_or_else(
+                                            || json!({"frameTree":{"frame":{"id":root_frame}}}),
+                                        )
                                 }
                                 "DOM.getDocument" => {
-                                    server_observations.fetch_add(1, Ordering::SeqCst);
-                                    if let Some(document) = inventory.documents.get(&root_frame) {
+                                    let shallow = command["params"]["depth"] == 0;
+                                    if !shallow {
+                                        server_observations.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    if shallow {
+                                        let backend =
+                                            if inventory.changed_documents.contains(&root_frame) {
+                                                1001
+                                            } else {
+                                                1000
+                                            };
+                                        json!({"root":{"nodeName":"#document","backendNodeId":backend}})
+                                    } else if let Some(document) =
+                                        inventory.documents.get(&root_frame)
+                                    {
                                         document.clone()
                                     } else {
                                         let missing = server_failures
@@ -113,11 +158,32 @@ impl SyntheticCdp {
                                         json!({"root":{"nodeName":"#document","children":children}})
                                     }
                                 }
+                                "DOM.resolveNode" => {
+                                    json!({"object":{"objectId":format!("{session}-{}", command["params"]["backendNodeId"])}})
+                                }
+                                "Runtime.callFunctionOn" => {
+                                    if inventory.invalid_control {
+                                        json!({"exceptionDetails":{"text":"synthetic control unavailable"}})
+                                    } else {
+                                        json!({"result":{"value":[format!("Synthetic-{}", command["params"]["objectId"].as_str().unwrap()), "", ""]}})
+                                    }
+                                }
                                 "Runtime.evaluate" => {
                                     json!({"result": {"type": "number", "value": 1}})
                                 }
                                 _ => json!({}),
                             };
+                            let mut result = result;
+                            if method == "DOM.getDocument"
+                                && result["root"]["backendNodeId"].is_null()
+                            {
+                                result["root"]["backendNodeId"] = json!(1000);
+                            }
+                            let delay = inventory
+                                .reply_delays
+                                .get(method)
+                                .copied()
+                                .unwrap_or(std::time::Duration::ZERO);
                             let response = if method == "DOM.getDocument"
                                 && inventory.unreadable.contains(&root_frame)
                             {
@@ -132,21 +198,13 @@ impl SyntheticCdp {
                             };
                             if inventory.hold_method.as_deref() == Some(method) {
                                 inventory.held.push(response);
-                                (None, released)
+                                (None, released, delay)
                             } else {
-                                (Some(response), released)
+                                (Some(response), released, delay)
                             }
                         };
-                        for response in released {
-                            if ws.send(Message::Text(response.to_string())).await.is_err() {
-                                return;
-                            }
-                        }
-                        let Some(response) = response else {
-                            continue;
-                        };
-                        if ws.send(Message::Text(response.to_string())).await.is_err() {
-                            break;
+                        for response in released.into_iter().chain(response) {
+                            replies.push(delayed_reply(response, delay));
                         }
                     }
                     Message::Close(_) => break,
