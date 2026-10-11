@@ -27,8 +27,10 @@ pub(crate) struct FrameInventory {
     frame_tree_reads: HashMap<String, usize>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
+    pub held_session_methods: HashSet<(String, String)>,
     pub hold_shallow_document: bool,
     pub reply_delays: HashMap<String, std::time::Duration>,
+    pub document_reply_delays: HashMap<(String, i64), std::time::Duration>,
     pub changed_documents: HashSet<String>,
     pub replace_documents_once: HashSet<String>,
     document_backends: HashMap<String, i64>,
@@ -282,9 +284,21 @@ impl SyntheticCdp {
                                     .copied()
                                     .unwrap_or(1000));
                             }
-                            let delay = inventory
-                                .session_reply_delays
-                                .get(&(session.to_owned(), method.to_owned()))
+                            let document_delay = if method == "DOM.getDocument" {
+                                command["params"]["depth"].as_i64().and_then(|depth| {
+                                    inventory
+                                        .document_reply_delays
+                                        .get(&(session.to_owned(), depth))
+                                })
+                            } else {
+                                None
+                            };
+                            let delay = document_delay
+                                .or_else(|| {
+                                    inventory
+                                        .session_reply_delays
+                                        .get(&(session.to_owned(), method.to_owned()))
+                                })
                                 .or_else(|| inventory.reply_delays.get(method))
                                 .copied()
                                 .unwrap_or(std::time::Duration::ZERO);
@@ -306,6 +320,9 @@ impl SyntheticCdp {
                                 vec![]
                             };
                             if inventory.hold_method.as_deref() == Some(method)
+                                || inventory
+                                    .held_session_methods
+                                    .contains(&(session.to_owned(), method.to_owned()))
                                 || (inventory.hold_shallow_document
                                     && method == "DOM.getDocument"
                                     && command["params"]["depth"] == 0)

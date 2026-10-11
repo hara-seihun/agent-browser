@@ -14862,6 +14862,481 @@ mod tests {
         fixture.server.await.unwrap();
     }
 
+    async fn wait_for_streamed_control_before_deeper_document(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    ) -> Vec<Value> {
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            let mut seen = Vec::new();
+            let mut deeper = false;
+            let mut resolved = false;
+            let mut read = false;
+            let mut value_received = false;
+            while !(deeper && resolved && read && value_received) {
+                let command = commands.recv().await.unwrap();
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                deeper |= command["sessionId"] == "session-2"
+                    && command["method"] == "DOM.getDocument"
+                    && command["params"]["depth"] == -1;
+                resolved |= command["sessionId"] == "synthetic-session"
+                    && command["method"] == "DOM.resolveNode";
+                read |= command["sessionId"] == "synthetic-session"
+                    && command["method"] == "Runtime.callFunctionOn";
+                value_received |= command["sessionId"] == "synthetic-session"
+                    && command["method"] == "Runtime.releaseObject";
+                seen.push(command);
+            }
+            seen
+        })
+        .await
+        .expect("an earlier bound control must resolve and read while the deeper DOM is held")
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_streams_before_held_deeper_document_without_partial_refs() {
+        for outcome in ["complete", "cancel", "unavailable"] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 2, |n| match n {
+                    0 => vec![1],
+                    1 => vec![2],
+                    _ => vec![],
+                });
+                inventory.held_session_methods.extend([
+                    ("session-2".into(), "DOM.getDocument".into()),
+                    ("synthetic-session".into(), "Runtime.releaseObject".into()),
+                ]);
+                if outcome == "unavailable" {
+                    inventory.unreadable.insert("frame-2".into());
+                }
+            }
+            let snapshot_client = client.clone();
+            let frames = state.iframe_sessions.clone();
+            let observer = tokio::spawn(async move {
+                let mut refs = RefMap::new();
+                refs.add("e1".into(), Some(999), "button", "previous", None);
+                refs.set_next_ref_num(2);
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    snapshot::take_snapshot(
+                        &snapshot_client,
+                        &session,
+                        &SnapshotOptions::default(),
+                        &mut refs,
+                        None,
+                        &frames,
+                    ),
+                )
+                .await;
+                (result, refs)
+            });
+            let mut commands =
+                wait_for_streamed_control_before_deeper_document(&mut fixture.commands).await;
+            assert!(
+                !observer.is_finished(),
+                "held coverage cannot publish a snapshot"
+            );
+            assert!(client.object_cleanup_len().await > 0);
+            if outcome != "cancel" {
+                fixture
+                    .frame_inventory
+                    .lock()
+                    .unwrap()
+                    .held_session_methods
+                    .clear();
+                client
+                    .send_command_no_params("Fixture.release", None)
+                    .await
+                    .unwrap();
+            }
+            let (result, refs) = observer.await.unwrap();
+            match outcome {
+                "complete" => {
+                    let tree = result.unwrap().unwrap();
+                    assert!(!tree.contains("Synthetic-"));
+                    assert_eq!(tree.matches("[redacted: cc-number]").count(), 3);
+                    for frame in ["frame-1", "frame-2"] {
+                        let entries = refs.entries_sorted();
+                        let entry = &entries
+                            .iter()
+                            .find(|(_, entry)| entry.name == format!("{frame}-cc-number"))
+                            .unwrap()
+                            .1;
+                        assert_eq!(entry.frame_id.as_deref(), Some(frame));
+                    }
+                }
+                "cancel" | "unavailable" => {
+                    if outcome == "cancel" {
+                        assert!(result.is_err());
+                    } else {
+                        let error = result.unwrap().unwrap_err();
+                        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+                        assert!(!error.contains("Synthetic-"));
+                    }
+                    assert_eq!(refs.entries_sorted().len(), 1);
+                    assert_eq!(refs.get("e1").unwrap().name, "previous");
+                    assert_eq!(refs.next_ref_num(), 2);
+                }
+                _ => unreachable!(),
+            }
+            client.settle_object_cleanup().await.unwrap();
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+            while let Ok(command) = fixture.commands.try_recv() {
+                commands.push(command);
+            }
+            let mut reads = HashSet::new();
+            let mut group_sessions = HashSet::new();
+            for command in &commands {
+                let method = command["method"].as_str().unwrap();
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                assert!(!method.starts_with("Input.") && method != "Page.navigate");
+                if method == "Runtime.callFunctionOn" {
+                    assert!(
+                        reads.insert((
+                            command["sessionId"].clone().to_string(),
+                            command["params"]["objectId"].clone().to_string()
+                        )),
+                        "control read twice: {command}"
+                    );
+                }
+                if method == "Runtime.releaseObjectGroup" {
+                    group_sessions.insert(command["sessionId"].as_str().unwrap().to_owned());
+                }
+            }
+            assert!(group_sessions.contains("synthetic-session"));
+            if outcome == "complete" {
+                assert_eq!(reads.len(), 9);
+                assert_eq!(group_sessions.len(), 3);
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|command| command["method"] == "Runtime.releaseObject")
+                        .count(),
+                    9
+                );
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|command| command["method"] == "DOM.getDocument"
+                            && command["params"]["depth"] == 0)
+                        .count(),
+                    3
+                );
+            }
+            fixture
+                .frame_inventory
+                .lock()
+                .unwrap()
+                .held_session_methods
+                .clear();
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            client
+                .send_command_no_params("Fixture.ready", None)
+                .await
+                .unwrap();
+            while let Ok(command) = fixture.commands.try_recv() {
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                assert_ne!(
+                    command["method"], "Runtime.callFunctionOn",
+                    "late read after completion/cancellation/refusal"
+                );
+            }
+            assert_eq!(client.pending_len().await, 0);
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_streaming_keeps_typed_coverage_and_identity_errors() {
+        use super::super::sensitive::{DocumentChange, InventoryError};
+        for changed in [false, true] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 2, |n| match n {
+                    0 => vec![1],
+                    1 => vec![2],
+                    _ => vec![],
+                });
+                inventory
+                    .held_session_methods
+                    .insert(("session-2".into(), "DOM.getDocument".into()));
+                if changed {
+                    inventory.changed_documents.insert("synthetic-top".into());
+                } else {
+                    inventory.documents.get_mut("frame-2").unwrap()["root"]["children"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"nodeName":"IFRAME","frameId":"missing-deeper-owner"}));
+                }
+            }
+            let observer_client = client.clone();
+            let frames = state.iframe_sessions.clone();
+            let observer = tokio::spawn(async move {
+                super::super::sensitive::observe_inventory(&observer_client, &session, &frames)
+                    .await
+            });
+            let mut commands =
+                wait_for_streamed_control_before_deeper_document(&mut fixture.commands).await;
+            assert!(!observer.is_finished());
+            fixture
+                .frame_inventory
+                .lock()
+                .unwrap()
+                .held_session_methods
+                .clear();
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(std::time::Duration::from_millis(500), observer)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .unwrap();
+            match (changed, &error) {
+                (true, InventoryError::Changed(DocumentChange::BackendIdentity)) => (),
+                (false, InventoryError::Coverage(gap)) => {
+                    assert_eq!(gap.missing_owners, ["missing-deeper-owner"]);
+                }
+                _ => panic!("unexpected streaming refusal: {error:?}"),
+            }
+            assert!(!error.into_message().contains("Synthetic-"));
+            client.settle_object_cleanup().await.unwrap();
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+            assert_eq!(client.pending_len().await, 0);
+            while let Ok(command) = fixture.commands.try_recv() {
+                commands.push(command);
+            }
+            for command in commands {
+                assert_ne!(command["sessionId"], "unrepresented-session");
+                assert!(!command["method"].as_str().unwrap().starts_with("Input."));
+            }
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_four_waves_streaming_controls_beats_document_barrier() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 17, |n| match n {
+                0 => (1..=13).collect(),
+                1 => vec![14, 15],
+                14 => vec![16, 17],
+                _ => vec![],
+            });
+            // Seven expensive controls live in the earlier represented documents;
+            // the deeper waves still carry real AX, cursor and link projections.
+            for n in 2..=17 {
+                let frame = format!("frame-{n}");
+                let keep = if n == 2 { 1 } else { 0 };
+                inventory.documents.get_mut(&frame).unwrap()["root"]["children"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|node| {
+                        node["nodeName"] != "INPUT"
+                            || node["backendNodeId"].as_u64().unwrap() < 11 + keep
+                    });
+                let nodes = inventory.ax_trees.get_mut(&frame).unwrap()["nodes"]
+                    .as_array_mut()
+                    .unwrap();
+                nodes.retain(|node| {
+                    node["role"]["value"] != "textbox"
+                        || node["backendDOMNodeId"].as_u64().unwrap() < 11 + keep
+                });
+                nodes[0]["childIds"].as_array_mut().unwrap().retain(|id| {
+                    id.as_str()
+                        .unwrap()
+                        .strip_prefix("control-")
+                        .map_or(true, |index| index.parse::<u64>().unwrap() < keep)
+                });
+            }
+            for method in [
+                "Page.getFrameTree",
+                "DOM.getDocument",
+                "DOM.resolveNode",
+                "Runtime.callFunctionOn",
+                "Runtime.releaseObject",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(180));
+            }
+            inventory.document_reply_delays.insert(
+                ("synthetic-session".into(), -1),
+                std::time::Duration::from_millis(786),
+            );
+            for method in [
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "Target.setAutoAttach",
+                "DOM.enable",
+                "Accessibility.enable",
+                "Runtime.runIfWaitingForDebugger",
+                "Accessibility.getFullAXTree",
+                "Runtime.evaluate",
+                "DOM.querySelector",
+                "DOM.describeNode",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(10));
+            }
+        }
+        state.browser = Some(fixture.manager);
+        let options = SnapshotOptions {
+            urls: true,
+            ..SnapshotOptions::default()
+        };
+        let old_barrier_floor = std::time::Duration::from_millis(786 + 3 * 180 + 3 * 180 + 180);
+        assert!(old_barrier_floor > std::time::Duration::from_secs(2));
+        let mut previous = None;
+        for reverse in [false, true] {
+            state.pending_iframe_setup = state
+                .iframe_sessions
+                .values()
+                .filter(|sid| sid.as_str() != "unrepresented-session")
+                .cloned()
+                .collect();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                for n in 1..=13 {
+                    let delay = if (n % 2 == 0) == reverse { 190 } else { 180 };
+                    inventory.document_reply_delays.insert(
+                        (format!("session-{n}"), -1),
+                        std::time::Duration::from_millis(delay),
+                    );
+                }
+            }
+            let start = std::time::Instant::now();
+            let (tree, refs) = protected_snapshot(&mut state, &session, &options, None)
+                .await
+                .unwrap();
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            assert!(state.pending_iframe_setup.is_empty());
+            assert!(!tree.contains("Synthetic-"));
+            assert_eq!(tree.matches("[redacted: cc-number]").count(), 3);
+            assert_eq!(tree.matches("cursor:pointer").count(), 18);
+            assert_eq!(tree.matches("https://fixture.invalid/pay").count(), 18);
+            for n in 1..=17 {
+                let frame = format!("frame-{n}");
+                let entries = refs.entries_sorted();
+                let entry = &entries
+                    .iter()
+                    .find(|(_, entry)| entry.name == format!("link-{frame}"))
+                    .unwrap()
+                    .1;
+                assert_eq!(entry.frame_id.as_deref(), Some(frame.as_str()));
+            }
+            let signature = refs
+                .entries_sorted()
+                .iter()
+                .map(|(id, entry)| {
+                    (
+                        id.clone(),
+                        entry.backend_node_id,
+                        entry.frame_id.clone(),
+                        entry.name.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some((previous_tree, previous_signature)) = previous.take() {
+                assert_eq!(tree, previous_tree);
+                assert_eq!(signature, previous_signature);
+            }
+            previous = Some((tree, signature));
+            let mut counts = HashMap::<(String, String), usize>::new();
+            let mut reads = HashSet::new();
+            let mut deep = 0;
+            let mut shallow = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap();
+                let sid = command["sessionId"].as_str().unwrap_or("");
+                assert_ne!(sid, "unrepresented-session");
+                assert!(
+                    !method.starts_with("Input.")
+                        && !matches!(
+                            method,
+                            "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                        )
+                );
+                *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
+                if method == "DOM.getDocument" {
+                    if command["params"]["depth"] == -1 {
+                        deep += 1;
+                    } else {
+                        shallow += 1;
+                    }
+                }
+                if method == "Runtime.callFunctionOn" {
+                    assert!(reads.insert((
+                        sid.to_owned(),
+                        command["params"]["objectId"].as_str().unwrap().to_owned()
+                    )));
+                }
+            }
+            assert_eq!((deep, shallow, reads.len()), (18, 18, 7));
+            for n in 0..=17 {
+                let sid = if n == 0 {
+                    "synthetic-session".to_owned()
+                } else {
+                    format!("session-{n}")
+                };
+                for method in [
+                    "Accessibility.getFullAXTree",
+                    "Runtime.evaluate",
+                    "DOM.querySelector",
+                    "DOM.describeNode",
+                ] {
+                    assert_eq!(counts[&(sid.clone(), method.into())], 1);
+                }
+                assert_eq!(counts[&(sid.clone(), "Page.getFrameTree".into())], 2);
+                for method in [
+                    "DOM.resolveNode",
+                    "Runtime.callFunctionOn",
+                    "Runtime.releaseObject",
+                ] {
+                    assert_eq!(
+                        counts
+                            .get(&(sid.clone(), method.into()))
+                            .copied()
+                            .unwrap_or(0),
+                        match n {
+                            0 | 1 => 3,
+                            2 => 1,
+                            _ => 0,
+                        }
+                    );
+                }
+            }
+            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
+            assert_eq!(client.object_cleanup_len().await, 0);
+            assert_eq!(client.pending_len().await, 0);
+        }
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_protected_inventory_initial_pair_dispatch_and_cancel_before_either_reply() {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
@@ -14936,6 +15411,9 @@ mod tests {
         for (held, expected_phase, setup, shallow) in [
             ("DOM.getDocument", "initial_document", false, false),
             ("Runtime.callFunctionOn", "controls", false, false),
+            ("DOM.resolveNode", "control_resolve", false, false),
+            ("Runtime.callFunctionOn", "control_values", false, false),
+            ("Runtime.releaseObject", "control_release", false, false),
             ("Accessibility.getFullAXTree", "ax_tree", false, false),
             ("Runtime.evaluate", "cursor_projection", false, false),
             ("", "final_validation", false, true),
