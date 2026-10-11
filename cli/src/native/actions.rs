@@ -2952,13 +2952,10 @@ async fn execute_command_inner(
                 ) =>
             {
                 let session = session.to_string();
-                let current =
-                    match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions)
-                        .await
-                    {
-                        Ok(observation) => observation,
-                        Err(error) => return error_response(&id, &error),
-                    };
+                let current = match observe_sensitive_tab(state, &session).await {
+                    Ok(observation) => observation,
+                    Err(error) => return error_response(&id, &error),
+                };
                 let known = state
                     .sensitive_observations
                     .entry(session.clone())
@@ -3246,18 +3243,20 @@ async fn execute_command_inner(
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    if let Err(e) = state.drain_cdp_events_background().await {
-        resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
-        attach_tab_gone_data(&mut resp, state);
-        inject_lifecycle(
-            &mut resp,
-            state,
-            lifecycle_reused,
-            lifecycle_launched,
-            lifecycle_relaunched_browser,
-        );
+    if !matches!(action, "close" | "session_info") && !lifecycle_confirmation {
+        if let Err(e) = state.drain_cdp_events_background().await {
+            resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
+            attach_tab_gone_data(&mut resp, state);
+            inject_lifecycle(
+                &mut resp,
+                state,
+                lifecycle_reused,
+                lifecycle_launched,
+                lifecycle_relaunched_browser,
+            );
+        }
+        attach_webmcp_availability(&mut resp, action, state).await;
     }
-    attach_webmcp_availability(&mut resp, action, state).await;
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
@@ -3278,9 +3277,8 @@ async fn execute_command_inner(
         // Refresh after effects such as typing. The old and new values are
         // protected before returning JSON, diagnostics or persisted snapshots.
         if action != "auth_fill" {
-            if let Some(mgr) = state.browser.as_ref() {
-                match super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await
-                {
+            if state.browser.is_some() {
+                match observe_sensitive_tab(state, &session).await {
                     Ok(current) => state
                         .sensitive_observations
                         .entry(session.clone())
@@ -4697,6 +4695,9 @@ fn autosave_due(state: &DaemonState, interval_ms: u64) -> bool {
 /// page is mid-navigation; the next interval retries, and
 /// `auto_save_restore_state` records the status either way.
 pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interval_ms: u64) {
+    if state.restore_validation_pending {
+        return;
+    }
     if !autosave_due(state, interval_ms) {
         return;
     }
@@ -4710,6 +4711,39 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
     }
     state.last_autosave_attempt = Some(std::time::Instant::now());
     let _ = auto_save_restore_state(state).await;
+}
+
+async fn observe_sensitive_tab(
+    state: &mut DaemonState,
+    session: &str,
+) -> Result<super::sensitive::Observation, String> {
+    let first = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
+    };
+    match first {
+        Err(error)
+            if error
+                == format!(
+                    "{}: frame document coverage unavailable",
+                    super::sensitive::UNSUPPORTED
+                ) =>
+        {
+            // New OOPIFs can enter the DOM during inventory, after the initial
+            // command drain. Synchronize queued attachments once, then repeat
+            // only observation; the surrounding action has not been replayed.
+            state.drain_cdp_events_background().await?;
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            if mgr.active_session_id()? != session {
+                return Err(format!(
+                    "{}: active observation target changed",
+                    super::sensitive::UNSUPPORTED
+                ));
+            }
+            super::sensitive::observe(&mgr.client, session, &state.iframe_sessions).await
+        }
+        outcome => outcome,
+    }
 }
 
 fn require_restore_export_allowed(state: &mut DaemonState) -> Result<(), String> {
@@ -4800,7 +4834,14 @@ pub(crate) async fn auto_save_restore_state(
             Ok(Some(path))
         }
         Err(err) => {
-            state.restore_save_status = "error".to_string();
+            state.restore_save_status = if err.starts_with("autosave_requires_foreground:") {
+                "requires_foreground"
+            } else if err.starts_with("autosave_observation_incomplete:") {
+                "observation_incomplete"
+            } else {
+                "error"
+            }
+            .to_string();
             state.restore_saved_path = None;
             Err(err)
         }
@@ -13943,6 +13984,16 @@ mod tests {
         assert_eq!(info["success"], true);
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_background_autosave_defers_pending_validation() {
+        let mut state = DaemonState::new();
+        state.restore_validation_pending = true;
+        state.restore_check_fn = Some("throw new Error('Must stay foreground')".into());
+        maybe_autosave_restore_state(&mut state, 1).await;
+        assert!(state.restore_validation_pending);
+        assert!(state.last_autosave_attempt.is_none());
     }
 
     #[tokio::test]
