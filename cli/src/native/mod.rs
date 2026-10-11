@@ -4,6 +4,9 @@ pub mod a11y;
 pub mod actions;
 #[allow(dead_code)]
 pub mod auth;
+pub mod auth_export;
+#[cfg(test)]
+mod auth_export_tests;
 #[allow(dead_code)]
 pub mod auth_fill;
 #[allow(dead_code)]

@@ -122,6 +122,7 @@ const TOOL_CLIPBOARD_PASTE: &str = "agent_browser_clipboard_paste";
 const TOOL_AUTH_SAVE: &str = "agent_browser_auth_save";
 const TOOL_AUTH_LOGIN: &str = "agent_browser_auth_login";
 const TOOL_AUTH_FILL: &str = "agent_browser_auth_fill";
+const TOOL_AUTH_EXPORT: &str = "agent_browser_auth_export";
 const TOOL_AUTH_LIST: &str = "agent_browser_auth_list";
 const TOOL_AUTH_SHOW: &str = "agent_browser_auth_show";
 const TOOL_AUTH_DELETE: &str = "agent_browser_auth_delete";
@@ -1521,6 +1522,19 @@ fn parity_tools() -> Vec<Value> {
             &["credentialProvider", "item", "field", "selector", "target", "frame"],
         ),
         tool(
+            TOOL_AUTH_EXPORT,
+            "Private field export",
+            "Privately export one unique visible input, textarea or text-only field from the exact active target/frame/document to a new own-UID 0600 file. Linux nonroot daemon only; absolute nonsymlink path with own-UID 0700 parent required. Receipt path and byteCount only. Stop captures first; never overwrites or retries.",
+            json!({
+                "selector":{"type":"string","minLength":1},
+                "target":{"type":"string","minLength":1},
+                "frame":{"type":"string","minLength":1},
+                "output":{"type":"string","minLength":1,"description":"Absolute exclusive file path in the daemon owner's private 0700 directory."},
+                "exportTimeoutMs":{"type":"integer","minimum":1,"maximum":300000,"description":"Total operation budget; outer timeoutMs needs 10 seconds IPC margin."}
+            }),
+            &["selector","target","frame","output"],
+        ),
+        tool(
             TOOL_AUTH_LIST,
             "Auth list",
             "List auth profiles.",
@@ -2419,6 +2433,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_AUTH_SAVE => call_auth_save(arguments),
         TOOL_AUTH_LOGIN => call_auth_login(arguments),
         TOOL_AUTH_FILL => call_auth_fill(arguments),
+        TOOL_AUTH_EXPORT => call_auth_export(arguments),
         TOOL_AUTH_LIST => call_literal(arguments, &["auth", "list"]),
         TOOL_AUTH_SHOW => call_one_string(arguments, "auth show", "name"),
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
@@ -3311,6 +3326,29 @@ fn auth_fill_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
         args.push(timeout.to_string());
     }
     Ok(args)
+}
+
+fn auth_export_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["auth".into(), "export".into()];
+    for key in ["selector", "target", "frame", "output"] {
+        args.push(format!("--{key}"));
+        args.push(required_string(arguments, key)?);
+    }
+    if let Some(timeout) = optional_u64(arguments, "exportTimeoutMs")? {
+        args.push("--timeout".into());
+        args.push(timeout.to_string());
+    }
+    Ok(args)
+}
+
+fn call_auth_export(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = auth_export_args(arguments)?;
+    let mut effective = arguments.clone();
+    if effective.get("timeoutMs").is_none() {
+        let budget = optional_u64(arguments, "exportTimeoutMs")?.unwrap_or(180_000);
+        effective["timeoutMs"] = json!(budget.saturating_add(10_000));
+    }
+    call_cli_tool(&effective, args, None)
 }
 
 fn call_auth_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4416,6 +4454,24 @@ mod tests {
             .unwrap(),
             vec!["webmcp", "result", "invocation-1", "--timeout", "250"]
         );
+    }
+
+    #[test]
+    fn private_export_uses_canonical_cli_parser_and_metadata_schema() {
+        let input = json!({"selector":"#key","target":"page","frame":"main","output":"/private/key","exportTimeoutMs":1200});
+        let args = auth_export_args(&input).unwrap();
+        let flags = crate::flags::parse_flags(&[]);
+        let cmd = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(cmd["action"], "auth_export");
+        assert_eq!(cmd["timeout"], 1200);
+        let mut invalid = input.clone();
+        invalid["output"] = json!("relative");
+        assert!(
+            crate::commands::parse_command(&auth_export_args(&invalid).unwrap(), &flags).is_err()
+        );
+        invalid = input.clone();
+        invalid.as_object_mut().unwrap().remove("frame");
+        assert!(auth_export_args(&invalid).is_err());
     }
 
     #[test]

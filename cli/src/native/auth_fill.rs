@@ -65,12 +65,17 @@ fn request(cmd: &Value) -> Result<FillRequest, String> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Binding {
-    session: String,
-    frame_session: Option<String>,
-    frame: String,
-    loader: String,
-    url: String,
+pub(crate) struct Binding {
+    pub(crate) session: String,
+    pub(crate) frame_session: Option<String>,
+    pub(crate) frame: String,
+    pub(crate) loader: String,
+    pub(crate) url: String,
+}
+
+pub(crate) struct FieldLocation {
+    pub(crate) target: String,
+    pub(crate) frame: String,
 }
 
 fn find_frame<'a>(tree: &'a Value, id: &str) -> Option<&'a Value> {
@@ -85,6 +90,20 @@ fn find_frame<'a>(tree: &'a Value, id: &str) -> Option<&'a Value> {
 }
 
 async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String> {
+    bind_location(
+        state,
+        &FieldLocation {
+            target: req.target.clone(),
+            frame: req.frame.clone(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn bind_location(
+    state: &DaemonState,
+    req: &FieldLocation,
+) -> Result<Binding, String> {
     let mgr = state.browser.as_ref().ok_or(BINDING)?;
     let selected = if req.frame == "main" {
         None

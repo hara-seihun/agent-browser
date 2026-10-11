@@ -379,6 +379,18 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
+### Private field export
+
+```bash
+agent-browser auth export --selector '#generated-key' --target TARGET_ID --frame FRAME_ID --output /private/transfer/generated.key --timeout 180000
+```
+
+All four binding/output flags are required. Select the intended tab/frame first, with `frame main` explicitly for the top document. The CSS selector must identify one visible input/textarea value (readonly allowed), or a text-only element with no element children. The daemon pins and rechecks live target/frame/document/field identity before directly publishing a private file. No launch, navigation, submit or replay occurs; stop captures first.
+
+Linux nonroot daemon only. The absolute path cannot contain symlinks or dot/dot-dot components; its existing parent must belong to the daemon UID with exact `0700` permissions. Publication creates a new exclusive `0600` file; an existing leaf, including a symlink, refuses. Receipt data contains only `path` and `byteCount`, never the value or its hash. The value is registered for subsequent scoped/global redaction. No privileged or other-UID writer is used.
+
+The total timeout accepts 1..300000ms, initially 180000ms unless an action timeout is configured; caller disconnect cancellation and the ten-second IPC margin apply. MCP `agent_browser_auth_export` provides `exportTimeoutMs` plus outer `timeoutMs`. A lost response or `auth_export_commit_uncertain` may leave a published file. Inspect only existence/metadata at the requested path; never replay or read the credential into model output.
+
 ### Private field fill
 
 `auth fill` resolves one vault field without exposing its value in tool arguments or output. Select the intended tab and frame, then supply their returned IDs. For the top document select `frame main` first. An existing native browser is required. The daemon pins the input/document, verifies exact active target and live selected-frame association before and after lookup, then fills once without navigation or submit. CSS selectors are required; snapshot refs are not accepted. Stop recording, tracing, streaming and network capture before lookup.

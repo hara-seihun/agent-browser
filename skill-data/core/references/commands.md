@@ -571,3 +571,7 @@ AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or Web
 AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```
+
+## Private field export
+
+`auth export --selector <css> --target <target-id> --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]` exports one unique visible input/textarea value (readonly allowed), or a text-only element, through pinned live document/field identity. CSS only; all four flags required. No launch/navigation/submit/retry. Linux nonroot daemon, no symlink components, existing exact0700 own-UID parent; new exclusive0600 file. Receipt only `path`/`byteCount`; values/hashes never printed. Stop captures. Timeout1..300000ms, initial180000ms unless configured; outer tools allow ten-second IPC margin. MCP `agent_browser_auth_export` adds `exportTimeoutMs`. Lost response/commit uncertainty requires metadata-only path reconciliation, never replay. See [authentication.md](authentication.md#private-field-export).

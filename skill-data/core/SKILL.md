@@ -20,6 +20,8 @@ Recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspec
 
 No bypass flag exists. MCP, tool profiles, action approval, and `extraArgs` enforce the same canonical CLI behavior. Use protected APIs instead of retrying refused channels. Always-refused command examples describe syntax only; guarded examples require a benign tab with no remembered detection. See [Trust boundaries](references/trust-boundaries.md).
 
+For generated credentials that must reach a private file, use native `auth export --selector CSS --target TARGET --frame FRAME --output ABSOLUTE_PATH`; it pins one exact unique field and publishes an exclusive own-UID0600 file, returning only path/byteCount. Linux nonroot daemon with an existing nonsymlink own-UID0700 parent is required. Never recover secrets through eval, screenshots, clipboard or normal output. See [Private field export](references/authentication.md#private-field-export).
+
 ## The core loop
 
 Open the page, inspect the protected snapshot, and interact through native refs. Arbitrary page-tool result channels are guarded and are not substitutes for protected APIs on sensitive tabs:

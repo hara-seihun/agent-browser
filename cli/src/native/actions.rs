@@ -2584,6 +2584,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "auth_delete"
             | "auth_list"
             | "auth_fill"
+            | "auth_export"
             | "confirm"
             | "deny"
             | "state_list"
@@ -2602,7 +2603,10 @@ fn skip_launch_action(action: &str) -> bool {
 }
 
 fn should_validate_restore_after_action(action: &str) -> bool {
-    !matches!(action, "launch" | "session_info" | "close" | "auth_fill")
+    !matches!(
+        action,
+        "launch" | "session_info" | "close" | "auth_fill" | "auth_export"
+    )
 }
 
 fn policy_actions_for_command(
@@ -2659,7 +2663,7 @@ fn policy_actions_for_command(
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
-    if !matches!(action, "auth_login" | "auth_fill") {
+    if !matches!(action, "auth_login" | "auth_fill" | "auth_export") {
         return Box::pin(execute_command_inner(cmd, state, None)).await;
     }
     let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
@@ -2680,6 +2684,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     )
     .await
     {
+        Ok(response) if action == "auth_export" => {
+            if response["success"] == true {
+                success_response(
+                    id,
+                    json!({"path":response["data"]["path"],"byteCount":response["data"]["byteCount"]}),
+                )
+            } else {
+                let message =
+                    super::auth_export::public_error(response["error"].as_str().unwrap_or(""));
+                error_response(id, message)
+            }
+        }
         Ok(response) => response,
         Err(_) => {
             let mut response = error_response(id, &format!("{action}_timeout: credential operation deadline expired; dispatched effects may still settle; outcome unknown; not replayed"));
@@ -2704,7 +2720,7 @@ async fn execute_command_inner(
         });
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
-    let auth_login_no_navigate = action == "auth_fill"
+    let auth_login_no_navigate = matches!(action, "auth_fill" | "auth_export")
         || (action == "auth_login"
             && cmd
                 .get("noNavigate")
@@ -3054,7 +3070,9 @@ async fn execute_command_inner(
     // and MCP. Inventory errors do not downgrade to an unprotected response.
     let observation_session = if let Some(mgr) = state.browser.as_ref() {
         match mgr.active_session_id() {
-            Ok(session) if action == "auth_fill" => Some(session.to_string()),
+            Ok(session) if matches!(action, "auth_fill" | "auth_export") => {
+                Some(session.to_string())
+            }
             Ok(session)
                 if !matches!(
                     action,
@@ -3283,6 +3301,14 @@ async fn execute_command_inner(
             )
             .await
         }
+        "auth_export" => {
+            super::auth_export::handle_auth_export(
+                cmd,
+                state,
+                auth_deadline.expect("private export deadline established at boundary"),
+            )
+            .await
+        }
         "auth_login" => {
             handle_auth_login(
                 cmd,
@@ -3324,6 +3350,12 @@ async fn execute_command_inner(
     // Persist the session-to-tab binding (write-on-change) so a fresh daemon
     // re-attaches to this session's tab instead of adopting the browser's
     // most recently active one.
+    if action == "auth_export" {
+        return match result {
+            Ok(data) => success_response(&id, data),
+            Err(error) => error_response(&id, &error),
+        };
+    }
     let persist_error = if !skip_launch {
         maybe_persist_tab_binding(state)
     } else {
@@ -3397,7 +3429,7 @@ async fn execute_command_inner(
     if let Some(session) = observation_session {
         // Refresh after effects such as typing. The old and new values are
         // protected before returning JSON, diagnostics or persisted snapshots.
-        if action != "auth_fill" {
+        if !matches!(action, "auth_fill" | "auth_export") {
             if state.browser.is_some() {
                 match observe_sensitive_tab(state, &session).await {
                     Ok(current) => state

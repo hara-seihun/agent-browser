@@ -2758,6 +2758,19 @@ Private fill behavior:
   Login deadline, disconnect cleanup and IPC margin apply; never replayed.
   MCP agent_browser_auth_fill uses fillTimeoutMs plus outer timeoutMs.
 
+Private export:
+  auth export --selector <css> --target <target-id> --frame <frame-id|main>
+              --output <absolute-path> [--timeout <ms>]
+  One unique visible input/textarea value (readonly allowed) or text-only element.
+  Pins live target/frame/document/field; existing browser required, no navigation.
+  Linux nonroot daemon only. No symlink path components; output parent must be
+  owned by the daemon UID with exact0700 permissions. New file is exclusive0600.
+  Receipt contains only path and byteCount; never prints or hashes the value.
+  Stop captures first. Values are registered for scoped and global redaction.
+  Same total deadline/IPC margin as private fill; no overwrite or replay.
+  Lost response/commit uncertainty: inspect path existence without reading value.
+  MCP agent_browser_auth_export uses exportTimeoutMs plus outer timeoutMs.
+
 Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
   --timeout <ms> covers all stages (1..300000ms; initial budget 180000ms
@@ -3984,6 +3997,9 @@ Auth Vault:
             --selector <css> --target <target-id> --frame <frame-id|main>
             [--format mm/yy] [--timeout <ms>]
                              Private pinned fill, metadata only, no submit/retry
+  auth export --selector <css> --target <target-id> --frame <frame-id|main>
+              --output <absolute-path> [--timeout <ms>]
+                             Private exclusive0600 file, path/byteCount only
   auth login <name> [--timeout <ms>]  Login with one total lookup/form deadline
   auth login <name> --no-navigate
                              Use active page after verifying credential URL origin

@@ -1060,6 +1060,81 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
+                Some("export") => {
+                    const USAGE: &str = "agent-browser auth export --selector <css> --target <target-id> --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]";
+                    let mut cmd = json!({"id":id,"action":"auth_export","timeout":flags.default_timeout.unwrap_or(180_000)});
+                    let mut seen = std::collections::HashSet::new();
+                    let mut j = 1;
+                    while j < rest.len() {
+                        let key = match rest[j] {
+                            "--selector" => "selector",
+                            "--target" => "target",
+                            "--frame" => "frame",
+                            "--output" => "output",
+                            "--timeout" => "timeout",
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: "unknown argument for auth export".into(),
+                                    usage: USAGE,
+                                })
+                            }
+                        };
+                        if !seen.insert(key) {
+                            return Err(ParseError::InvalidValue {
+                                message: "duplicate flag for auth export".into(),
+                                usage: USAGE,
+                            });
+                        }
+                        let value = rest
+                            .get(j + 1)
+                            .filter(|v| !v.starts_with("--") && !v.trim().is_empty())
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "auth export".into(),
+                                usage: USAGE,
+                            })?;
+                        if key == "timeout" {
+                            let ms = value
+                                .parse::<u64>()
+                                .ok()
+                                .filter(|ms| *ms > 0 && *ms <= 300_000)
+                                .ok_or_else(|| ParseError::InvalidValue {
+                                    message: "auth export timeout must be 1..300000ms".into(),
+                                    usage: USAGE,
+                                })?;
+                            cmd[key] = json!(ms);
+                        } else {
+                            cmd[key] = json!(value);
+                        }
+                        j += 2;
+                    }
+                    if ["selector", "target", "frame", "output"]
+                        .iter()
+                        .any(|key| cmd.get(*key).is_none())
+                    {
+                        return Err(ParseError::MissingArguments {
+                            context: "auth export".into(),
+                            usage: USAGE,
+                        });
+                    }
+                    let selector = cmd["selector"].as_str().expect("validated string");
+                    if selector.starts_with('@')
+                        || selector.starts_with("xpath=")
+                        || selector.starts_with("//")
+                        || !std::path::Path::new(cmd["output"].as_str().expect("validated string"))
+                            .is_absolute()
+                        || !cmd["timeout"]
+                            .as_u64()
+                            .is_some_and(|ms| ms > 0 && ms <= 300_000)
+                    {
+                        return Err(ParseError::InvalidValue {
+                            message:
+                                "auth export requires CSS, an absolute output and a valid timeout"
+                                    .into(),
+                            usage: USAGE,
+                        });
+                    }
+                    Ok(cmd)
+                }
                 Some("fill") => {
                     const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]";
                     let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": flags.default_timeout.unwrap_or(180_000)});
@@ -6543,6 +6618,34 @@ mod tests {
     fn test_batch_no_args_no_commands_field() {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert!(cmd.get("commands").is_none());
+    }
+
+    #[test]
+    fn private_export_parser_requires_exact_binding_and_excludes_values() {
+        let flags = crate::flags::parse_flags(&[]);
+        let base = "auth export --selector #key --target page --frame main --output /private/key";
+        let cmd = parse_command(&args(base), &flags).unwrap();
+        assert_eq!(cmd["action"], "auth_export");
+        assert_eq!(cmd["output"], "/private/key");
+        for extra in [
+            " --value synthetic-secret",
+            " --selector #other",
+            " --timeout 0",
+            " --timeout 300001",
+        ] {
+            assert!(parse_command(&args(&format!("{base}{extra}")), &flags).is_err());
+        }
+        assert!(parse_command(
+            &args("auth export --selector @e1 --target page --frame main --output /private/key"),
+            &flags
+        )
+        .is_err());
+        assert!(parse_command(
+            &args("auth export --selector #key --target page --frame main --output relative"),
+            &flags
+        )
+        .is_err());
+        assert!(parse_command(&args("auth export --selector #key"), &flags).is_err());
     }
 
     #[test]

@@ -622,20 +622,21 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = if matches!(action.as_str(), "auth_login" | "auth_fill") {
-                    let command =
-                        dispatch_command(&cmd, &state, &idle_activity, &maintenance_active);
-                    tokio::pin!(command);
-                    tokio::select! {
-                        response = &mut command => response,
-                        next = buf_reader.fill_buf() => match next {
-                            Ok(bytes) if !bytes.is_empty() => command.await,
-                            _ => return,
-                        },
-                    }
-                } else {
-                    dispatch_command(&cmd, &state, &idle_activity, &maintenance_active).await
-                };
+                let response =
+                    if matches!(action.as_str(), "auth_login" | "auth_fill" | "auth_export") {
+                        let command =
+                            dispatch_command(&cmd, &state, &idle_activity, &maintenance_active);
+                        tokio::pin!(command);
+                        tokio::select! {
+                            response = &mut command => response,
+                            next = buf_reader.fill_buf() => match next {
+                                Ok(bytes) if !bytes.is_empty() => command.await,
+                                _ => return,
+                            },
+                        }
+                    } else {
+                        dispatch_command(&cmd, &state, &idle_activity, &maintenance_active).await
+                    };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');

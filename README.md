@@ -704,6 +704,18 @@ agent-browser auth fill --credential-provider vault --item "Payment Card" --fiel
 
 The daemon verifies live target/frame/document association before and after lookup, pins the editable input and its document, and fills once under its native operation lock. Retention accepts spaces/hyphens added to `number` and spaces added to `expiration_date`; every other field must retain the exact value. For segmented controls, select the first box: a complete group of 2..32 visible editable same-type `maxlength=1` inputs is pinned before dispatch and checked collectively after the single setter/event pair. Missing, rejected or replaced segments never report success. Every pinned box stays protected: scoped getters honor backend identity, and snapshots overlay those markers before rendering. Bulk `content` and `read` refuse on known private credential controls; use snapshots and typed scoped getters. Global value matching ignores fragments shorter than three Unicode characters; short sensitive control values still receive scoped redaction markers. It does not navigate, submit, restore another session, or retry. Stop recording, tracing, streaming and network capture first. Results and errors contain metadata only; both supplied and rendered private values are remembered for subsequent output redaction. The existing auth-login disconnect cancellation, subprocess cleanup and IPC margin also apply. A lost response or deadline after dispatch is an unknown outcome, never an instruction to replay. MCP exposes `agent_browser_auth_fill` with `fillTimeoutMs` and outer `timeoutMs`.
 
+### Private field export
+
+Use `auth export` when a generated credential must reach a file without appearing in model-visible arguments, output or logs. Select the intended tab and frame first, then supply their exact returned IDs and one unique CSS selector. It accepts a visible input/textarea value (readonly allowed), or the exact text content of an element with no element children. The daemon pins and revalidates the live document and field before publishing; it does not launch, navigate, submit or replay.
+
+```bash
+agent-browser auth export --selector '#generated-key' --target TARGET_ID --frame FRAME_ID --output /private/transfer/generated.key --timeout 180000
+```
+
+`--selector`, `--target`, `--frame` and `--output` are required; refs and XPath are rejected. `--output` must be an absolute path without symlink, dot or dot-dot components, in an existing directory owned by the nonroot Linux daemon UID with exact `0700` permissions. A new `0600` file is published atomically and exclusively; any existing file or symlink refuses, including a retry after a lost success response. No privileged or other-UID writer is used. Non-Linux daemons refuse explicitly. Stop recording, tracing, streaming and network capture before export.
+
+The receipt is exactly `{"path":"/private/transfer/generated.key","byteCount":123}`; neither values nor value hashes are returned. The private value is registered for subsequent scoped/global redaction. Total `--timeout` accepts 1..300000ms, initially 180000ms unless an action timeout is configured; caller disconnect cancellation and the ten-second IPC margin apply. A lost response or `auth_export_commit_uncertain` may mean the exclusive file was published. Inspect only the requested path's existence/metadata, never replay or read the credential into model output. MCP exposes `agent_browser_auth_export` with `exportTimeoutMs` and outer `timeoutMs`.
+
 ### Import auth from your browser
 
 If you are already logged in to a site in Chrome, you can grab that auth state and reuse it:
