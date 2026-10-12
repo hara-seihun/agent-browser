@@ -272,7 +272,7 @@ impl CdpClient {
         let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
             request,
             Some(ws_config),
-            false,
+            true, // Dispatch independent CDP requests without Nagle/delayed-ACK stalls.
             connector,
         )
         .await
