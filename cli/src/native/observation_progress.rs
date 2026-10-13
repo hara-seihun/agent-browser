@@ -230,8 +230,11 @@ impl ObservationProgress {
         tokio::pin!(operation);
         tokio::select! {
             biased;
-            output = &mut operation => Ok(output),
+            // An expired owning deadline wins over a nested observer's result.
+            // Otherwise a nested string error can erase the outer typed diagnostic
+            // when both timers become ready in the same scheduler tick.
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(self.diagnostic()),
+            output = &mut operation => Ok(output),
         }
     }
 }
@@ -239,6 +242,17 @@ impl ObservationProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expired_deadline_wins_over_ready_nested_result() {
+        let progress = ObservationProgress::default();
+        let result = progress
+            .before(Instant::now(), async {
+                Err::<(), _>("nested string error")
+            })
+            .await;
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn cancelled_phase_retires_its_active_count_without_becoming_completed() {
