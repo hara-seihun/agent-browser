@@ -227,6 +227,9 @@ impl ObservationProgress {
         operation: impl Future<Output = T>,
     ) -> Result<T, DeadlineDiagnostic> {
         let _scope = self.scope(deadline);
+        if Instant::now() >= deadline {
+            return Err(self.diagnostic());
+        }
         tokio::pin!(operation);
         tokio::select! {
             biased;
@@ -234,7 +237,13 @@ impl ObservationProgress {
             // Otherwise a nested string error can erase the outer typed diagnostic
             // when both timers become ready in the same scheduler tick.
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(self.diagnostic()),
-            output = &mut operation => Ok(output),
+            output = &mut operation => {
+                if Instant::now() >= deadline {
+                    Err(self.diagnostic())
+                } else {
+                    Ok(output)
+                }
+            },
         }
     }
 }
