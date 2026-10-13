@@ -2120,7 +2120,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Initial frame-tree and pierced DOM requests overlap within each exact represented session. Pending iframe domains share one RTT wave; mandatory admissions and network controls complete before resume. Snapshot recovery consumes its proven coverage gap directly before fresh complete inventory, without throwaway getter inventories. Deadline errors append safe phase diagnostic JSON with the original budget, elapsed time, attempts and concurrent phase counts/timings, without DOM, URLs, target/frame/session IDs or control values. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Initial frame-tree and pierced DOM requests overlap within each exact represented session. Pending iframe domains share one RTT wave; mandatory admissions and network controls complete before resume. Snapshot recovery consumes its proven coverage gap directly before fresh complete inventory, without throwaway getter inventories. Snapshots return observation.status incomplete on unavailable protected inventory, no page content or refs, and safe reason/phase metadata in CLI and MCP text and JSON; complete snapshots carry observation.status complete. Diff and annotated screenshots require complete inventory and invalidate old refs on incomplete capture. Deadline errors append safe phase diagnostic JSON with the original budget, elapsed time, attempts and concurrent phase counts/timings, without DOM, URLs, target/frame/session IDs or control values. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
@@ -4236,6 +4236,9 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            if let Some(incomplete) = crate::output::format_incomplete_snapshot(data) {
+                return Some(incomplete);
+            }
             // Accessibility reports carry a URL alongside their findings. Use
             // the same report formatter as the CLI before the generic string
             // field fallback turns the MCP text content into only that URL.
@@ -5328,6 +5331,23 @@ mod tests {
             .unwrap()
             .contains("SENSITIVE_OUTPUT_UNSUPPORTED"));
         assert_eq!(result["structuredContent"]["response"], response);
+    }
+
+    #[test]
+    fn incomplete_snapshot_survives_canonical_mcp_rendering() {
+        let response = json!({"success":true,"data":{
+            "snapshot":"placeholder", "refs":{},
+            "observation":{"status":"incomplete","contentPublished":false,
+                "reason":{"kind":"deadline","diagnostic":{"budgetMs":2000}}}
+        }});
+        let text = response_text(&response).unwrap();
+        assert!(text.contains("Snapshot incomplete"));
+        assert!(text.contains("deadline") && text.contains("2000"));
+        assert!(!text.contains("placeholder"));
+        assert_eq!(
+            crate::output::format_incomplete_snapshot(&response["data"]).unwrap(),
+            text
+        );
     }
 
     #[tokio::test]

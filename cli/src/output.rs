@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::sync::OnceLock;
 
 use crate::color;
@@ -671,6 +672,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             }
         }
         let origin = data.get("origin").and_then(|v| v.as_str());
+        if let Some(incomplete) = format_incomplete_snapshot(data) {
+            println!("{}", incomplete);
+            return;
+        }
         // Snapshot
         if let Some(snapshot) = data.get("snapshot").and_then(|v| v.as_str()) {
             print_with_boundaries(snapshot, origin, opts);
@@ -3836,6 +3841,9 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Deadline errors append safe JSON: original budget, elapsed time, attempts,
   and phase counts/timings, including all concurrent in-flight phases.
   No document data, URLs, target/frame/session IDs or control values are included.
+  Snapshot observation.status is complete or incomplete. Incomplete inventory
+  returns safe reason/phase metadata only, no page content/origin/refs. CLI/MCP
+  text preserves that status. Only a fresh complete snapshot provides refs.
   Complete snapshots reuse one inventory: frame AX/cursor/selector reads overlap
   controls, validate once, then render deterministic children and frame-bound refs.
   Pierced owner/link/base-URL data are reused; cursor reads create no attributes.
@@ -4286,6 +4294,18 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios tap @e1                             # Touch element
 "#
     );
+}
+
+/// Incomplete observation metadata must survive text-only CLI/MCP consumers.
+pub(crate) fn format_incomplete_snapshot(data: &Value) -> Option<String> {
+    let observation = data.get("observation")?;
+    if observation.get("status").and_then(Value::as_str) != Some("incomplete") {
+        return None;
+    }
+    Some(format!(
+        "Snapshot incomplete; no page content or actionable refs published.\n{}",
+        serde_json::to_string(observation).expect("observation JSON serializes")
+    ))
 }
 
 fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {

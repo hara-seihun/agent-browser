@@ -2083,3 +2083,8 @@ Apache-2.0
 Pending iframe domain admissions overlap within each exact session and across frames. All mandatory domains and child auto-attachment must be confirmed, then network controls installed, before any debugger resume. Snapshot coverage recovery uses the already-proven missing-frame gap instead of constructing throwaway getter inventories; it still discards incomplete projections and takes a fresh complete, identity-validated snapshot. Setup, recovery, controls and projections remain inside the same original two-second deadline. Unknown coverage or missed deadline refuses; no partial success or longer cloud-browser budget is introduced.
 
 CDP WebSocket connections enable TCP_NODELAY so independent small commands are dispatched without Nagle/delayed-ACK batching. Cloud RTT fixtures retain their delays and original admission deadline; every required domain response still precedes frame resume.
+
+
+### Incomplete protected snapshots
+
+Snapshot JSON reports `observation.status` as `complete` or `incomplete`. At the unchanged two-second protected observation deadline, unfinished setup/discovery returns a typed incomplete result with safe phase counts/timings and no page content, origin, or actionable refs. Unavailable inventory also returns a metadata-only incomplete reason. CLI and MCP text preserve this status and diagnostic; a successful command does not imply complete inventory. Only a fresh complete snapshot supplies actionable refs. Diffs and annotated screenshots require complete inventory; incomplete capture clears old refs and never bypasses protection. Read-only observation can be retried after setup progresses; effects are never retried by this behavior.

@@ -563,3 +563,8 @@ Native direct/ref/semantic clicks, double-clicks and `--new-tab` refuse disabled
 ## Cloud protected-frame scheduling
 
 Native pending iframe domain admissions share one RTT wave; mandatory domain/child-attachment confirmation and network controls precede debugger resume. Snapshot recovery consumes its proven coverage gap directly and then takes a fresh complete inventory/projection. All stages retain the original two-second deadline, complete redaction and exact document/frame validation; timeout remains an explicit refusal, not partial output.
+
+
+### Incomplete protected snapshots
+
+Snapshot JSON reports `observation.status` as `complete` or `incomplete`. At the unchanged two-second protected observation deadline, unfinished setup/discovery returns a typed incomplete result with safe phase counts/timings and no page content, origin, or actionable refs. Unavailable inventory also returns a metadata-only incomplete reason. CLI and MCP text preserve this status and diagnostic; a successful command does not imply complete inventory. Only a fresh complete snapshot supplies actionable refs. Diffs and annotated screenshots require complete inventory; incomplete capture clears old refs and never bypasses protection. Read-only observation can be retried after setup progresses; effects are never retried by this behavior.

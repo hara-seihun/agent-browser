@@ -217,3 +217,8 @@ agent-browser snapshot @e5
 # Or use get text for content-only extraction
 agent-browser get text @e5
 ```
+
+
+### Incomplete protected snapshots
+
+Snapshot JSON reports `observation.status` as `complete` or `incomplete`. At the unchanged two-second protected observation deadline, unfinished setup/discovery returns a typed incomplete result with safe phase counts/timings and no page content, origin, or actionable refs. Unavailable inventory also returns a metadata-only incomplete reason. CLI and MCP text preserve this status and diagnostic; a successful command does not imply complete inventory. Only a fresh complete snapshot supplies actionable refs. Diffs and annotated screenshots require complete inventory; incomplete capture clears old refs and never bypasses protection. Read-only observation can be retried after setup progresses; effects are never retried by this behavior.

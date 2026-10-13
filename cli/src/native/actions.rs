@@ -2795,7 +2795,7 @@ async fn execute_command_inner(
     }
 
     // Lifecycle commands must not wait for renderer or iframe setup events.
-    if !matches!(action, "session_info" | "close") && !lifecycle_confirmation {
+    if !matches!(action, "snapshot" | "session_info" | "close") && !lifecycle_confirmation {
         if let Err(e) = state.drain_cdp_events_background().await {
             return error_response(&id, &super::browser::to_ai_friendly_error(&e));
         }
@@ -3072,7 +3072,12 @@ async fn execute_command_inner(
 
     // All observation/export routes share this boundary, including CLI batch
     // and MCP. Inventory errors do not downgrade to an unprotected response.
-    let observation_session = if let Some(mgr) = state.browser.as_ref() {
+    // Snapshot owns the complete protected inventory/projection under one deadline.
+    // A throwaway preflight/postflight would spend separate budgets and erase its
+    // useful incomplete result, while exposing no additional protected content.
+    let observation_session = if action == "snapshot" {
+        None
+    } else if let Some(mgr) = state.browser.as_ref() {
         match mgr.active_session_id() {
             Ok(session) if matches!(action, "auth_fill" | "auth_export") => {
                 Some(session.to_string())
@@ -3340,6 +3345,17 @@ async fn execute_command_inner(
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
+    // An incomplete read is metadata-only. Do not turn it into another inventory
+    // attempt or append page/dialog/lifecycle data after its deadline.
+    if action == "snapshot" {
+        if let Ok(data) = &result {
+            if data["observation"]["status"] == "incomplete" {
+                state.last_command_finished = Some(std::time::Instant::now());
+                return success_response(&id, data.clone());
+            }
+        }
+    }
+
     if result.is_ok() && should_validate_restore_after_action(action) {
         validate_restore_if_pending(state).await;
     }
@@ -3400,7 +3416,7 @@ async fn execute_command_inner(
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    if !matches!(action, "close" | "session_info") && !lifecycle_confirmation {
+    if !matches!(action, "snapshot" | "close" | "session_info") && !lifecycle_confirmation {
         if let Err(e) = state.drain_cdp_events_background().await {
             resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
             attach_tab_gone_data(&mut resp, state);
@@ -3456,6 +3472,18 @@ async fn execute_command_inner(
                 );
             }
             known.protect(&mut resp);
+        }
+    }
+
+    if action == "snapshot" {
+        if let Some(session) = state
+            .browser
+            .as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok())
+        {
+            if let Some(known) = state.sensitive_observations.get(session) {
+                known.protect(&mut resp);
+            }
         }
     }
 
@@ -6072,73 +6100,117 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 
 /// The daemon owns one deadline across coverage recovery and every discarded
 /// AX/control/ref batch; effects and navigation are never part of this retry.
-async fn protected_snapshot(
+async fn protected_snapshot_observation(
     state: &mut DaemonState,
     session: &str,
     options: &SnapshotOptions,
     frame: Option<&str>,
-) -> Result<(String, RefMap), String> {
+) -> Result<(String, RefMap), super::sensitive::InventoryError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let progress = state.protected_observation_progress();
     let (private_controls, private_text_nodes) = match state.sensitive_observations.get(session) {
         Some(known) => (known.controls.clone(), known.private_text_nodes.clone()),
         None => (HashMap::new(), HashSet::new()),
     };
-    protected_inventory_before(deadline, &progress, async {
-        loop {
+    state.ref_map.clear();
+    progress
+        .before(deadline, async {
             progress
                 .track(
-                    super::observation_progress::Phase::AttachmentHarvest,
-                    state.harvest_iframe_attachments(),
+                    super::observation_progress::Phase::DrainEvents,
+                    state.drain_cdp_events_background(),
                 )
                 .await?;
-            state.prepare_pending_iframes().await?;
-            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-            if mgr.active_session_id()? != session {
-                return Err(format!(
-                    "{}: active observation target changed",
-                    super::sensitive::UNSUPPORTED
-                ));
+            loop {
+                progress
+                    .track(
+                        super::observation_progress::Phase::AttachmentHarvest,
+                        state.harvest_iframe_attachments(),
+                    )
+                    .await?;
+                state.prepare_pending_iframes().await?;
+                let mgr = state
+                    .browser
+                    .as_ref()
+                    .ok_or_else(|| "Browser not launched".to_string())?;
+                if mgr.active_session_id()? != session {
+                    return Err(super::sensitive::InventoryError::Unavailable(format!(
+                        "{}: active observation target changed",
+                        super::sensitive::UNSUPPORTED
+                    )));
+                }
+                let mut refs = RefMap::new();
+                match snapshot::take_snapshot_with_controls(
+                    &mgr.client,
+                    session,
+                    options,
+                    &mut refs,
+                    frame,
+                    &state.iframe_sessions,
+                    &private_controls,
+                    &private_text_nodes,
+                )
+                .await
+                {
+                    Ok((tree, observation)) => {
+                        state.active_iframe_sessions = observation.frame_sessions.clone();
+                        state
+                            .sensitive_observations
+                            .entry(session.to_owned())
+                            .or_default()
+                            .merge(observation);
+                        return Ok((tree, refs));
+                    }
+                    Err(super::sensitive::InventoryError::Coverage(gap)) => {
+                        recover_sensitive_frames(state, gap).await?;
+                    }
+                    Err(super::sensitive::InventoryError::Changed(_)) => {
+                        progress
+                            .track(
+                                super::observation_progress::Phase::DrainEvents,
+                                state.drain_cdp_events_background(),
+                            )
+                            .await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+                tokio::task::yield_now().await;
             }
-            let mut refs = RefMap::new();
-            match snapshot::take_snapshot_with_controls(
-                &mgr.client,
-                session,
-                options,
-                &mut refs,
-                frame,
-                &state.iframe_sessions,
-                &private_controls,
-                &private_text_nodes,
-            )
-            .await
-            {
-                Ok((tree, observation)) => {
-                    state.active_iframe_sessions = observation.frame_sessions.clone();
-                    state
-                        .sensitive_observations
-                        .entry(session.to_owned())
-                        .or_default()
-                        .merge(observation);
-                    return Ok((tree, refs));
-                }
-                Err(super::sensitive::InventoryError::Coverage(gap)) => {
-                    recover_sensitive_frames(state, gap).await?;
-                }
-                Err(super::sensitive::InventoryError::Changed(_)) => {
-                    progress
-                        .track(
-                            super::observation_progress::Phase::DrainEvents,
-                            state.drain_cdp_events_background(),
-                        )
-                        .await?;
-                }
-                Err(error) => return Err(error.into_message()),
-            }
-            tokio::task::yield_now().await;
-        }
+        })
+        .await
+        .map_err(super::sensitive::InventoryError::Deadline)?
+}
+
+// Consumers requiring complete content never receive an incomplete tree.
+async fn protected_snapshot(
+    state: &mut DaemonState,
+    session: &str,
+    options: &SnapshotOptions,
+    frame: Option<&str>,
+) -> Result<(String, RefMap), String> {
+    protected_snapshot_observation(state, session, options, frame)
+        .await
+        .map_err(super::sensitive::InventoryError::into_message)
+}
+
+/// No page data is safe until the complete protected batch is validated.
+/// A deadline is useful observation metadata, never permission to bypass inventory.
+fn incomplete_snapshot(error: super::sensitive::InventoryError) -> Value {
+    use super::sensitive::InventoryError;
+    let reason = match error {
+        InventoryError::Deadline(diagnostic) => json!({
+            "kind": "deadline", "diagnostic": diagnostic
+        }),
+        InventoryError::Coverage(_) => json!({"kind": "coverage_unavailable"}),
+        InventoryError::Changed(_) => json!({"kind": "document_changed"}),
+        // CDP/provider messages can carry identifiers or values. Keep them internal.
+        InventoryError::Unavailable(_) => json!({"kind": "inventory_unavailable"}),
+    };
+    json!({
+        "snapshot": "[snapshot incomplete: protected frame inventory unavailable; no content or actionable refs published]",
+        "refs": {},
+        "observation": {"status": "incomplete", "contentPublished": false, "reason": reason}
     })
-    .await
 }
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -6167,7 +6239,17 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     state.ref_map.clear();
     let frame = state.active_frame_id.clone();
-    let (tree, refs) = protected_snapshot(state, &session_id, &options, frame.as_deref()).await?;
+    let (tree, refs) = match protected_snapshot_observation(
+        state,
+        &session_id,
+        &options,
+        frame.as_deref(),
+    )
+    .await
+    {
+        Ok(complete) => complete,
+        Err(error) => return Ok(incomplete_snapshot(error)),
+    };
     state.ref_map = refs;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url = mgr.get_url().await.unwrap_or_default();
@@ -6184,7 +6266,9 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         })
         .collect();
 
-    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+    Ok(
+        json!({ "snapshot": tree, "origin": url, "refs": refs, "observation": {"status": "complete"} }),
+    )
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7530,7 +7614,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         ..SnapshotOptions::default()
     };
     // Start from the same ref base as a normal baseline snapshot so unchanged lines align.
-    // Build the replacement separately so a failed diff leaves the existing refs usable.
+    // Invalidate the old batch before capture; incomplete inventories cannot leave actionable refs.
     let frame = state.active_frame_id.clone();
     let (current, current_ref_map) =
         protected_snapshot(state, &session_id, &options, frame.as_deref()).await?;
@@ -15976,6 +16060,97 @@ mod tests {
             client.close().await;
             fixture.server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_incomplete_snapshot_safe_deadline_and_ref_retirement() {
+        for (held, setup) in [
+            ("DOM.enable", true),
+            ("DOM.getDocument", false),
+            ("Accessibility.getFullAXTree", false),
+        ] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                    if n == 0 {
+                        vec![1]
+                    } else {
+                        vec![]
+                    }
+                });
+                inventory.hold_method = Some(held.into());
+            }
+            if setup {
+                state.pending_iframe_setup.insert("session-1".into());
+            }
+            state
+                .ref_map
+                .add("e1".into(), Some(999), "button", "previous-secret", None);
+            state.browser = Some(fixture.manager);
+            let start = std::time::Instant::now();
+            let result =
+                execute_command_inner(&json!({"action":"snapshot","id":"test"}), &mut state, None)
+                    .await;
+            assert_eq!(result["success"], true);
+            let response = &result["data"];
+            assert!(start.elapsed() >= std::time::Duration::from_millis(1900));
+            assert!(start.elapsed() < std::time::Duration::from_millis(2400));
+            assert_eq!(response["observation"]["status"], "incomplete");
+            assert_eq!(response["observation"]["reason"]["kind"], "deadline");
+            assert_eq!(
+                response["observation"]["reason"]["diagnostic"]["budgetMs"],
+                2000
+            );
+            assert!(response["refs"].as_object().unwrap().is_empty());
+            assert!(state.ref_map.entries_sorted().is_empty());
+            assert!(response.get("origin").is_none());
+            let encoded = response.to_string();
+            for private in [
+                "previous-secret",
+                "Synthetic-",
+                "session-1",
+                "frame-1",
+                "https://",
+                "backendNodeId",
+            ] {
+                assert!(!encoded.contains(private), "leaked {private}");
+            }
+            client.settle_object_cleanup().await.unwrap();
+            assert_eq!(client.pending_len().await, 0);
+            assert_eq!(client.object_cleanup_len().await, 0);
+            while let Ok(command) = fixture.commands.try_recv() {
+                let method = command["method"].as_str().unwrap();
+                assert!(!method.starts_with("Input.") && method != "Page.navigate");
+            }
+            fixture.frame_inventory.lock().unwrap().hold_method = None;
+            client
+                .send_command_no_params("Fixture.release", None)
+                .await
+                .unwrap();
+            let complete = handle_snapshot(&json!({"action":"snapshot"}), &mut state)
+                .await
+                .unwrap();
+            assert_eq!(complete["observation"]["status"], "complete");
+            assert!(!state.ref_map.entries_sorted().is_empty());
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn test_protected_inventory_incomplete_snapshot_unavailable_scrubs_raw_errors() {
+        let response = incomplete_snapshot(super::super::sensitive::InventoryError::Unavailable(
+            "private-provider-secret https://private.invalid frame-id".into(),
+        ));
+        assert_eq!(
+            response["observation"]["reason"]["kind"],
+            "inventory_unavailable"
+        );
+        assert!(!response.to_string().contains("private"));
+        assert!(response["refs"].as_object().unwrap().is_empty());
     }
 
     #[tokio::test]

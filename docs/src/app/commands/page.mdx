@@ -791,3 +791,8 @@ See [Files & Clipboard](/files) for local files, uploads, downloads, screenshots
 ## Protected cloud frame admission
 
 Pending iframe domain admissions overlap per exact session and across frames. Required domain and child-attachment confirmations and network controls complete before debugger resume. Snapshot recovery consumes the already-proven coverage gap directly, then takes a fresh complete inventory and projection rather than duplicate throwaway getter inventories. Setup, recovery, controls and projection retain the original two-second deadline and exact document/frame validation; unknown coverage or timeout refuses without partial output.
+
+
+### Incomplete protected snapshots
+
+Snapshot JSON reports `observation.status` as `complete` or `incomplete`. At the unchanged two-second protected observation deadline, unfinished setup/discovery returns a typed incomplete result with safe phase counts/timings and no page content, origin, or actionable refs. Unavailable inventory also returns a metadata-only incomplete reason. CLI and MCP text preserve this status and diagnostic; a successful command does not imply complete inventory. Only a fresh complete snapshot supplies actionable refs. Diffs and annotated screenshots require complete inventory; incomplete capture clears old refs and never bypasses protection. Read-only observation can be retried after setup progresses; effects are never retried by this behavior.
