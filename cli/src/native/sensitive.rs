@@ -170,12 +170,14 @@ pub fn classifier_js() -> String {
     )
 }
 
-/// A safe DOM projection, executed before returning any value to CDP. Live form
-/// values and attributes are untouched, including fields needed for submission.
+/// A safe DOM projection, executed before returning any value to CDP. Rendered
+/// text uses native innerText as its whitespace/visibility authority and masks
+/// only mapped control spans. An unmappable span returns a typed refusal. Live
+/// DOM, form values and attributes are untouched, including submission fields.
 pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
     let read = match operation {
         "value" => "return this.value || '';".to_string(),
-        "text" => "return safeText(this, Boolean(this.innerText));".to_string(),
+        "text" => "return safeText(this, true);".to_string(),
         "innertext" => "return safeText(this, true);".to_string(),
         "html" => {
             "const clone = this.cloneNode(true); sanitize(this, clone); return clone.innerHTML;"
@@ -205,25 +207,64 @@ pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
           }}
         }}
       }}
+      const mappingError = () => {{
+        throw new Error('SENSITIVE_OUTPUT_UNSUPPORTED: protected rendered text mapping unavailable');
+      }};
+      const nativeText = el => {{
+        if (typeof el.innerText !== 'string') mappingError();
+        return el.innerText;
+      }};
       const safeText = (el, visible) => {{
         const k = kindOf(el);
         if (k) return '[redacted: ' + k + ']';
-        if (!protectedAncestors.has(el)) return visible ? (el.innerText || '') : (el.textContent || '');
-        const style = getComputedStyle(el);
-        if (visible && (style.display === 'none' || style.visibility === 'hidden')) return '';
-        let result = '';
+        const source = nativeText(el);
+        if (!protectedAncestors.has(el)) return source;
+        const rendered = visible && (getComputedStyle(el).display === 'contents' || el.getClientRects().length > 0);
+        if (!rendered) mappingError();
+        let cursor = 0;
+        const edits = [];
         for (const child of el.childNodes) {{
-          if (child.nodeType === 3) result += child.textContent || '';
-          else if (child.nodeType === 1) {{
-            const text = safeText(child, visible);
-            const display = getComputedStyle(child).display;
-            const block = visible && ['block', 'flex', 'grid', 'table', 'list-item'].includes(display);
-            if (block && result && !result.endsWith('\n')) result += '\n';
-            result += text;
-            if (block && text && !result.endsWith('\n')) result += '\n';
+          let original, projected;
+          if (child.nodeType === 3) {{
+            if (rendered && getComputedStyle(el).visibility !== 'visible') continue;
+            original = child.textContent || '';
+            if (rendered) {{
+              const transform = getComputedStyle(el).textTransform;
+              if (transform === 'uppercase') original = original.toLocaleUpperCase(el.lang || undefined);
+              else if (transform === 'lowercase') original = original.toLocaleLowerCase(el.lang || undefined);
+            }}
+            projected = original;
+          }} else if (child.nodeType === 1) {{
+            if (rendered && getComputedStyle(child).display === 'none') continue;
+            original = nativeText(child);
+            projected = safeText(child, rendered);
+          }} else continue;
+          const core = original.trim();
+          if (!core) continue;
+          let start = source.indexOf(core, cursor);
+          let end = start + core.length;
+          // Whitespace-only gaps are native block/table/BR boundaries. Public
+          // text nodes may have collapsed whitespace; never regenerate that text.
+          if (start < cursor || !/^\s*$/.test(source.slice(cursor, start))) {{
+            if (projected !== original) mappingError();
+            const escaped = core.split(/\s+/).map(part => part.replace(/[.*+?^${{}}()|[\]\\]/g, '\\$&')).join('\\s+');
+            const match = source.slice(cursor).match(new RegExp('^(\\s*)(' + escaped + ')'));
+            if (!match) mappingError();
+            start = cursor + match[1].length;
+            end = start + match[2].length;
           }}
+          if (projected !== original) edits.push([start, end, projected.trim()]);
+          cursor = end;
         }}
-        return result;
+        if (!/^\s*$/.test(source.slice(cursor))) mappingError();
+        // Apply disjoint, DOM-ordered spans to the original browser-rendered text.
+        // All characters outside the protected spans remain byte-for-byte native.
+        let result = '', offset = 0;
+        for (const [start, end, text] of edits) {{
+          result += source.slice(offset, start) + text;
+          offset = end;
+        }}
+        return result + source.slice(offset);
       }};
       const sanitize = (original, clone) => {{
         const k = kindOf(original);

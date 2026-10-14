@@ -3832,6 +3832,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   and MM/YY placeholders.
   Remembered combined expiry echoes tolerate whitespace before AX refs commit;
   split short month/year values and option names remain scoped to controls.
+  Text getters preserve native innerText outside mapped protected spans;
+  unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED.
   Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory
   has a two-second total admission window; independent represented frames and
   controls run concurrently. Frame/loader/parent/member/backend bindings are exact;

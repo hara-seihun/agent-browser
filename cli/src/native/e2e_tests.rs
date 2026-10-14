@@ -479,7 +479,11 @@ async fn e2e_sensitive_inputs() {
 
         for (id, _, kind) in SENSITIVE_INPUT_CASES {
             let selector = if surface == "shadow" || surface == "closed-shadow" {
-                let name = format!("{surface} {id}");
+                let name = if *id == "slot-a" {
+                    "Expiration date".to_string()
+                } else {
+                    format!("{surface} {id}")
+                };
                 let (reference, _) = state
                     .ref_map
                     .entries_sorted()
