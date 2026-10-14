@@ -16119,6 +16119,9 @@ mod tests {
                 assert!(!encoded.contains(private), "leaked {private}");
             }
             client.settle_object_cleanup().await.unwrap();
+            // PendingGuard owns cancellation removal as a scheduled task; allow
+            // that task to run before asserting the final transport state.
+            tokio::task::yield_now().await;
             assert_eq!(client.pending_len().await, 0);
             assert_eq!(client.object_cleanup_len().await, 0);
             while let Ok(command) = fixture.commands.try_recv() {
