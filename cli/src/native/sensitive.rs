@@ -117,9 +117,12 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
             return None;
         }
     }
-    for key in ["name", "id"] {
+    for key in ["name", "id", "aria-label", "placeholder", "label"] {
         if let Some(value) = attributes.get(key) {
             let normalized = normalize(value);
+            if matches!(normalized.as_str(), "mmyy" | "mmyyyy") {
+                return Some("cc-exp");
+            }
             for (kind, names) in IDENTIFIERS {
                 if names.iter().any(|name| normalized.contains(name)) {
                     return Some(kind);
@@ -135,15 +138,29 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 pub fn classifier_js() -> String {
     format!(
         r#"const kindOf = el => {{
-      if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return null;
+      if (!el || el.nodeType !== 1 || (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && !el.isContentEditable)) return null;
       if ((el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
       const autos = {};
       for (const token of tokens) if (autos[token]) return autos[token];
       if (tokens.includes('cc-name')) return null;
       const rules = {};
-      for (const key of ['name', 'id']) {{
-        const name = (el.getAttribute(key) || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const root = el.getRootNode();
+      const labels = Array.from(el.labels || []).map(label => label.textContent || '');
+      if (el.isContentEditable && el.id) {{
+        for (const label of root.querySelectorAll('label[for]')) {{
+          if (label.htmlFor === el.id) labels.push(label.textContent || '');
+        }}
+      }}
+      const wrapping = el.closest('label');
+      if (wrapping) labels.push(wrapping.textContent || '');
+      for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) {{
+        if (id) labels.push(root.getElementById(id)?.textContent || '');
+      }}
+      const hints = ['name', 'id', 'aria-label', 'placeholder'].map(key => el.getAttribute(key) || '').concat(labels);
+      for (const hint of hints) {{
+        const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (['mmyy', 'mmyyyy'].includes(name)) return 'cc-exp';
         for (const [kind, names] of rules) if (names.some(n => name.includes(n))) return kind;
       }}
       return null;
@@ -158,8 +175,8 @@ pub fn classifier_js() -> String {
 pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
     let read = match operation {
         "value" => "return this.value || '';".to_string(),
-        "text" => "return this.innerText || this.textContent || '';".to_string(),
-        "innertext" => "return this.innerText || '';".to_string(),
+        "text" => "return safeText(this, Boolean(this.innerText));".to_string(),
+        "innertext" => "return safeText(this, true);".to_string(),
         "html" => {
             "const clone = this.cloneNode(true); sanitize(this, clone); return clone.innerHTML;"
                 .to_string()
@@ -175,6 +192,39 @@ pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
       {}
       const kind = kindOf(this);
       if (kind) return '[redacted: ' + kind + ']';
+      // Keep short select/contenteditable text protection scoped to its DOM subtree.
+      // Public subtrees keep their native text; no short-value global substitution.
+      const protectedAncestors = new Set();
+      if (['text', 'innertext'].includes({})) {{
+        for (const el of this.querySelectorAll('*')) {{
+          if (kindOf(el)) {{
+            for (let parent = el.parentElement; parent && this.contains(parent); parent = parent.parentElement) {{
+              if (protectedAncestors.has(parent)) break;
+              protectedAncestors.add(parent);
+            }}
+          }}
+        }}
+      }}
+      const safeText = (el, visible) => {{
+        const k = kindOf(el);
+        if (k) return '[redacted: ' + k + ']';
+        if (!protectedAncestors.has(el)) return visible ? (el.innerText || '') : (el.textContent || '');
+        const style = getComputedStyle(el);
+        if (visible && (style.display === 'none' || style.visibility === 'hidden')) return '';
+        let result = '';
+        for (const child of el.childNodes) {{
+          if (child.nodeType === 3) result += child.textContent || '';
+          else if (child.nodeType === 1) {{
+            const text = safeText(child, visible);
+            const display = getComputedStyle(child).display;
+            const block = visible && ['block', 'flex', 'grid', 'table', 'list-item'].includes(display);
+            if (block && result && !result.endsWith('\n')) result += '\n';
+            result += text;
+            if (block && text && !result.endsWith('\n')) result += '\n';
+          }}
+        }}
+        return result;
+      }};
       const sanitize = (original, clone) => {{
         const k = kindOf(original);
         if (k) {{
@@ -191,6 +241,7 @@ pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
       {}
     }}"#,
         classifier_js(),
+        json!(operation),
         read
     )
 }
@@ -216,12 +267,13 @@ pub fn guarded_eval(script: &str) -> String {
     )
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Observation {
     pub(crate) frame_sessions: HashSet<String>,
     pub controls: HashMap<(String, i64), String>,
     pub(crate) private_text_nodes: HashSet<(String, i64)>,
     secrets: Vec<(String, String)>,
+    expiry_echoes: Vec<(String, String)>,
 }
 
 impl Observation {
@@ -233,12 +285,45 @@ impl Observation {
         let redacted = marker(kind);
         self.controls
             .insert((session.to_owned(), backend), redacted.clone());
+        if kind == "cc-exp" {
+            self.remember_expiry_echo(value, &redacted);
+        }
         if useful_secret(value) {
             self.secrets.push((value.to_owned(), redacted));
             self.secrets
                 .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
             self.secrets.dedup_by(|a, b| a.0 == b.0);
         }
+    }
+
+    /// A known combined expiry may be echoed with whitespace outside its control.
+    /// Month/year fragments never enter this global matcher.
+    fn remember_expiry_echo(&mut self, value: &str, redacted: &str) {
+        let compact: String = value.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let bytes = compact.as_bytes();
+        if matches!(bytes.len(), 5 | 7)
+            && bytes[2] == b'/'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 2 || b.is_ascii_digit())
+            && matches!(compact[..2].parse::<u8>(), Ok(1..=12))
+        {
+            let pair = (compact, redacted.to_owned());
+            if !self.expiry_echoes.contains(&pair) {
+                self.expiry_echoes.push(pair);
+            }
+        }
+    }
+
+    pub(crate) fn remember_private_expiry_value(
+        &mut self,
+        session: &str,
+        backend: i64,
+        value: &str,
+    ) {
+        self.remember_private_value(session, backend, "credential", value);
+        self.remember_expiry_echo(value, &marker("credential"));
     }
 
     /// Text-only exported fields protect AX names/descendants as well as values.
@@ -290,6 +375,13 @@ impl Observation {
             {
                 out.push_str(marker);
                 start += secret.len();
+            } else if let Some((length, marker)) =
+                self.expiry_echoes.iter().find_map(|(expiry, marker)| {
+                    expiry_echo_length(&text[start..], expiry).map(|length| (length, marker))
+                })
+            {
+                out.push_str(marker);
+                start += length;
             } else {
                 let ch = text[start..].chars().next().unwrap();
                 out.push(ch);
@@ -314,16 +406,46 @@ impl Observation {
         }
     }
 
-    pub fn merge(&mut self, other: Self) {
-        self.frame_sessions = other.frame_sessions;
-        self.controls.extend(other.controls);
-        self.private_text_nodes.extend(other.private_text_nodes);
-        self.secrets.extend(other.secrets);
+    /// Import sticky protection without replacing the current inventory's frame coverage.
+    pub(crate) fn inherit_private(&mut self, known: &Self) {
+        self.controls.extend(known.controls.clone());
+        self.private_text_nodes
+            .extend(known.private_text_nodes.clone());
+        self.secrets.extend(known.secrets.clone());
+        self.expiry_echoes.extend(known.expiry_echoes.clone());
+        self.expiry_echoes.sort();
+        self.expiry_echoes.dedup();
         self.prune_secret_fragments();
         self.secrets
             .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
         self.secrets.dedup_by(|a, b| a.0 == b.0);
     }
+
+    pub fn merge(&mut self, other: Self) {
+        self.frame_sessions = other.frame_sessions.clone();
+        self.inherit_private(&other);
+    }
+}
+
+fn expiry_echo_length(text: &str, expiry: &str) -> Option<usize> {
+    let mut chars = text.char_indices().peekable();
+    let mut end = 0;
+    for (index, expected) in expiry.chars().enumerate() {
+        if index > 0 {
+            while chars.peek().is_some_and(|(_, ch)| ch.is_whitespace()) {
+                chars.next();
+            }
+        }
+        let (offset, actual) = chars.next()?;
+        if actual != expected {
+            return None;
+        }
+        end = offset + actual.len_utf8();
+    }
+    if chars.peek().is_some_and(|(_, ch)| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(end)
 }
 
 struct Control {
@@ -332,48 +454,131 @@ struct Control {
     kind: &'static str,
 }
 
+fn node_attributes(node: &Value) -> HashMap<String, String> {
+    match node["attributes"].as_array() {
+        Some(attributes) => attributes
+            .chunks_exact(2)
+            .filter_map(|pair| Some((pair[0].as_str()?.to_owned(), pair[1].as_str()?.to_owned())))
+            .collect(),
+        None => HashMap::new(),
+    }
+}
+
+fn node_text(node: &Value) -> String {
+    let mut text = node["nodeValue"].as_str().unwrap_or("").to_owned();
+    for child in node["children"].as_array().into_iter().flatten() {
+        text.push_str(&node_text(child));
+    }
+    text
+}
+
+/// Label identities are scoped to each document/shadow root, like DOM label lookup.
 fn collect_nodes(
     node: &Value,
     session: &str,
     controls: &mut Vec<Control>,
     seen: &mut HashSet<i64>,
 ) {
-    if let Some(backend) = node.get("backendNodeId").and_then(Value::as_i64) {
-        if seen.insert(backend)
-            && node
-                .get("nodeName")
-                .and_then(Value::as_str)
-                .is_some_and(|s| matches!(s, "INPUT" | "TEXTAREA" | "SELECT"))
+    fn labels<'a>(
+        node: &'a Value,
+        ids: &mut HashMap<String, &'a Value>,
+        targets: &mut HashMap<String, String>,
+    ) {
+        let attrs = node_attributes(node);
+        if let Some(id) = attrs.get("id") {
+            ids.insert(id.clone(), node);
+        }
+        if node["nodeName"] == "LABEL" {
+            if let Some(target) = attrs.get("for") {
+                targets
+                    .entry(target.clone())
+                    .or_default()
+                    .push_str(&node_text(node));
+            }
+        }
+        for key in ["children", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                labels(child, ids, targets);
+            }
+        }
+    }
+    fn walk(
+        node: &Value,
+        session: &str,
+        controls: &mut Vec<Control>,
+        seen: &mut HashSet<i64>,
+        ids: &HashMap<String, &Value>,
+        targets: &HashMap<String, String>,
+        inherited: &str,
+        parent_editable: bool,
+    ) {
+        let mut attrs = node_attributes(node);
+        let editable = match attrs
+            .get("contenteditable")
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
         {
-            let mut attrs = HashMap::new();
-            if let Some(attributes) = node.get("attributes").and_then(Value::as_array) {
-                for pair in attributes.chunks_exact(2) {
-                    if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
-                        attrs.insert(k.to_string(), v.to_string());
-                    }
+            Some("" | "true" | "plaintext-only") => true,
+            Some("false") => false,
+            _ => parent_editable,
+        };
+        let wrapping = if node["nodeName"] == "LABEL" {
+            node_text(node)
+        } else {
+            inherited.to_owned()
+        };
+        let mut label = wrapping.clone();
+        if let Some(text) = attrs.get("id").and_then(|id| targets.get(id)) {
+            label.push_str(text);
+        }
+        if let Some(references) = attrs.get("aria-labelledby") {
+            for id in references.split_whitespace() {
+                if let Some(text) = ids.get(id) {
+                    label.push_str(&node_text(text));
                 }
             }
-            if let Some(kind) = classify(&attrs) {
-                controls.push(Control {
-                    session: session.to_string(),
-                    backend,
-                    kind,
-                });
+        }
+        attrs.insert("label".into(), label);
+        if let Some(backend) = node["backendNodeId"].as_i64() {
+            if seen.insert(backend)
+                && ((editable
+                    && node["nodeName"]
+                        .as_str()
+                        .is_some_and(|name| !name.starts_with('#')))
+                    || matches!(
+                        node["nodeName"].as_str(),
+                        Some("INPUT" | "TEXTAREA" | "SELECT")
+                    ))
+            {
+                if let Some(kind) = classify(&attrs) {
+                    controls.push(Control {
+                        session: session.to_owned(),
+                        backend,
+                        kind,
+                    });
+                }
+            }
+        }
+        for key in ["children", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                walk(
+                    child, session, controls, seen, ids, targets, &wrapping, editable,
+                );
+            }
+        }
+        for root in node["shadowRoots"].as_array().into_iter().flatten() {
+            collect_nodes(root, session, controls, seen);
+        }
+        for key in ["contentDocument", "templateContent"] {
+            if let Some(root) = node.get(key) {
+                collect_nodes(root, session, controls, seen);
             }
         }
     }
-    for key in ["children", "shadowRoots", "pseudoElements"] {
-        if let Some(children) = node.get(key).and_then(Value::as_array) {
-            for child in children {
-                collect_nodes(child, session, controls, seen);
-            }
-        }
-    }
-    for key in ["contentDocument", "templateContent"] {
-        if let Some(doc) = node.get(key) {
-            collect_nodes(doc, session, controls, seen);
-        }
-    }
+    let mut ids = HashMap::new();
+    let mut targets = HashMap::new();
+    labels(node, &mut ids, &mut targets);
+    walk(node, session, controls, seen, &ids, &targets, "", false);
 }
 
 fn collect_document_frames(
@@ -820,7 +1025,7 @@ async fn inventory_control(
         let values = client.observation_progress.track(Phase::ControlValues,
             client.send_command("Runtime.callFunctionOn", Some(json!({
                 "objectId": object,
-                "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', this.tagName === 'TEXTAREA' ? this.textContent : '']; }",
+                "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }",
                 "returnByValue": true,
             })), Some(&control.session)),
         ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
@@ -1044,9 +1249,12 @@ where
             .controls
             .insert((control.session.clone(), control.backend), redacted.clone());
         for value in values? {
-            if useful_secret(&value) {
-                observation.secrets.push((value, redacted.clone()));
-            }
+            observation.remember_private_value(
+                &control.session,
+                control.backend,
+                control.kind,
+                &value,
+            );
         }
     }
 
@@ -1183,6 +1391,74 @@ mod tests {
         observed.secrets.push(("O".into(), marker("credential")));
         observed.merge(incoming);
         assert_eq!(observed.secret_count(), 2);
+    }
+
+    #[test]
+    fn expiry_echo_whitespace_and_split_fragments() {
+        let mut known = Observation::default();
+        known.remember_private_expiry_value("synthetic", 1, "12/34");
+        for value in ["12/34", "12 / 34", "12\u{a0}/\u{2009}34"] {
+            assert_eq!(
+                known.protect_text(&format!("Echo {value}")),
+                "Echo [redacted: credential]"
+            );
+        }
+        let mut split = Observation::default();
+        split.remember_private_value("synthetic", 2, "cc-exp-month", "12");
+        split.remember_private_value("synthetic", 3, "cc-exp-year", "34");
+        assert_eq!(
+            split.protect_text("Open @e12: 12 items and 34 rows"),
+            "Open @e12: 12 items and 34 rows"
+        );
+        assert_eq!(
+            split.controls[&("synthetic".into(), 2)],
+            marker("cc-exp-month")
+        );
+        assert_eq!(
+            split.controls[&("synthetic".into(), 3)],
+            marker("cc-exp-year")
+        );
+        split.frame_sessions.insert("current".into());
+        known.frame_sessions.insert("retired".into());
+        split.inherit_private(&known);
+        assert_eq!(split.frame_sessions, HashSet::from(["current".into()]));
+        assert_eq!(split.protect_text("12 / 34"), marker("credential"));
+        assert_eq!(split.protect_text("12 / 340"), "12 / 340");
+    }
+
+    #[test]
+    fn expiry_labels_and_structural_scope() {
+        let root = json!({"nodeName":"#document","children":[
+            {"nodeName":"LABEL","attributes":["for","slot"],"children":[{"nodeName":"#text","nodeValue":"Expiration date"}]},
+            {"nodeName":"INPUT","backendNodeId":1,"attributes":["id","slot"]},
+            {"nodeName":"INPUT","backendNodeId":2,"attributes":["aria-label","Expiry date"]},
+            {"nodeName":"INPUT","backendNodeId":3,"attributes":["placeholder","MM / YY"]},
+            {"nodeName":"LABEL","children":[{"nodeName":"#text","nodeValue":"Expiry month"},{"nodeName":"SELECT","backendNodeId":4}]},
+            {"nodeName":"SPAN","attributes":["id","year-label"],"children":[{"nodeName":"#text","nodeValue":"Expiration year"}]},
+            {"nodeName":"SELECT","backendNodeId":5,"attributes":["aria-labelledby","year-label"]},
+            {"nodeName":"INPUT","backendNodeId":6,"attributes":["autocomplete","cc-name","aria-label","Card number"]},
+            {"nodeName":"DIV","shadowRoots":[{"nodeName":"#document-fragment","children":[{"nodeName":"INPUT","backendNodeId":7,"attributes":["id","slot"]}]}]},
+            {"nodeName":"INPUT","backendNodeId":8,"attributes":["aria-label","Ordinary date"]},
+            {"nodeName":"DIV","backendNodeId":9,"attributes":["contenteditable","true","aria-label","Expiration date"],"children":[{"nodeName":"#text","backendNodeId":10,"nodeValue":"12/34"}]},
+            {"nodeName":"LABEL","children":[{"nodeName":"#text","backendNodeId":11,"nodeValue":"Expiration date"},{"nodeName":"DIV","backendNodeId":12,"attributes":["contenteditable","true"],"children":[{"nodeName":"#text","backendNodeId":13,"nodeValue":"12/34"}]}]}
+        ]});
+        let mut controls = Vec::new();
+        collect_nodes(&root, "synthetic", &mut controls, &mut HashSet::new());
+        assert_eq!(
+            controls
+                .iter()
+                .map(|control| (control.backend, control.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "cc-exp"),
+                (2, "cc-exp"),
+                (3, "cc-exp"),
+                (4, "cc-exp-month"),
+                (5, "cc-exp-year"),
+                (9, "cc-exp"),
+                (12, "cc-exp")
+            ]
+        );
     }
 
     use super::*;
@@ -1534,6 +1810,7 @@ mod tests {
             frame_sessions: HashSet::new(),
             controls: HashMap::new(),
             private_text_nodes: HashSet::new(),
+            expiry_echoes: Vec::new(),
             secrets: vec![
                 ("4242424242424242".into(), marker("cc-number")),
                 ("12".into(), marker("cc-exp-month")),

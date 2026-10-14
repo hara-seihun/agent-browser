@@ -237,43 +237,34 @@ pub async fn take_snapshot(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, super::sensitive::InventoryError> {
-    take_snapshot_with_controls(
+    take_snapshot_with_observation(
         client,
         session_id,
         options,
         ref_map,
         frame_id,
         iframe_sessions,
-        &HashMap::new(),
-        &std::collections::HashSet::new(),
+        &super::sensitive::Observation::default(),
     )
     .await
     .map(|(output, _)| output)
 }
 
-pub(crate) async fn take_snapshot_with_controls(
+pub(crate) async fn take_snapshot_with_observation(
     client: &Arc<CdpClient>,
     session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-    private_controls: &HashMap<(String, i64), String>,
-    private_text_nodes: &std::collections::HashSet<(String, i64)>,
+    private_observation: &super::sensitive::Observation,
 ) -> Result<(String, super::sensitive::Observation), super::sensitive::InventoryError> {
     let (mut observation, batch) =
         super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
             collect_snapshot_batch(client, options, frame_id, context)
         })
         .await?;
-    observation.controls.extend(
-        private_controls
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
-    observation
-        .private_text_nodes
-        .extend(private_text_nodes.iter().cloned());
+    observation.inherit_private(private_observation);
     let root = frame_id.unwrap_or(&batch.context.top_frame);
     let mut candidate_refs = ref_map.clone();
     let output = render_snapshot_frame(
@@ -923,7 +914,7 @@ fn promote_hidden_inputs(
     }
 }
 
-/// Protect source AX names before tree aggregation can merge text-node identity.
+/// Protect remembered echoes and control descendants before AX aggregation loses identity.
 fn protect_private_text_nodes(
     nodes: &[AXNode],
     observation: &super::sensitive::Observation,
@@ -934,29 +925,34 @@ fn protect_private_text_nodes(
         .enumerate()
         .map(|(i, n)| (n.node_id.as_str(), i))
         .collect();
-    let mut pending: Vec<_> = nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, n)| {
-            n.backend_d_o_m_node_id
-                .filter(|backend| {
-                    observation
-                        .private_text_nodes
-                        .contains(&(session.to_owned(), *backend))
-                })
-                .map(|_| i)
-        })
-        .collect();
-    let mut protected = std::collections::HashSet::new();
-    while let Some(i) = pending.pop() {
-        if !protected.insert(i) {
+    let mut pending = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        let Some(backend) = node.backend_d_o_m_node_id else {
+            continue;
+        };
+        let key = (session.to_owned(), backend);
+        if observation.private_text_nodes.contains(&key) {
+            pending.push((i, super::sensitive::marker("credential")));
+        } else if let Some(marker) = observation.controls.get(&key) {
+            if let Some(children) = &node.child_ids {
+                pending.extend(
+                    children
+                        .iter()
+                        .filter_map(|id| indices.get(id.as_str()).map(|i| (*i, marker.clone()))),
+                );
+            }
+        }
+    }
+    let mut protected = HashMap::new();
+    while let Some((i, marker)) = pending.pop() {
+        if protected.insert(i, marker.clone()).is_some() {
             continue;
         }
         if let Some(children) = &nodes[i].child_ids {
             pending.extend(
                 children
                     .iter()
-                    .filter_map(|id| indices.get(id.as_str()).copied()),
+                    .filter_map(|id| indices.get(id.as_str()).map(|i| (*i, marker.clone()))),
             );
         }
     }
@@ -965,10 +961,18 @@ fn protect_private_text_nodes(
         .enumerate()
         .map(|(i, node)| {
             let mut node = node.clone();
-            if protected.contains(&i) {
+            for value in [&mut node.name, &mut node.value, &mut node.description]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(Value::String(text)) = &mut value.value {
+                    *text = observation.protect_text(text);
+                }
+            }
+            if let Some(marker) = protected.get(&i) {
                 let redacted = AXValue {
                     value_type: "string".into(),
-                    value: Some(Value::String(super::sensitive::marker("credential"))),
+                    value: Some(Value::String(marker.clone())),
                 };
                 node.name = Some(redacted.clone());
                 node.value = Some(redacted);
@@ -1518,6 +1522,39 @@ mod tests {
         let (tree, _) = build_tree(&sanitized);
         assert!(tree.iter().all(|node| !node.name.contains('界')));
         assert_eq!(known.secret_count(), 1);
+    }
+
+    #[test]
+    fn expiry_static_echo_and_split_option_names_protected_before_refs() {
+        let nodes: Vec<AXNode> = serde_json::from_value(serde_json::json!([
+            {"nodeId":"root","role":{"type":"string","value":"RootWebArea"},"childIds":["echo","select","public"]},
+            {"nodeId":"echo","backendDOMNodeId":20,"role":{"type":"string","value":"StaticText"},"name":{"type":"string","value":"12 / 34"}},
+            {"nodeId":"select","backendDOMNodeId":30,"role":{"type":"string","value":"combobox"},"name":{"type":"string","value":"Expiry month"},"childIds":["option"]},
+            {"nodeId":"option","backendDOMNodeId":31,"role":{"type":"string","value":"option"},"name":{"type":"string","value":"12"}},
+            {"nodeId":"public","role":{"type":"string","value":"StaticText"},"name":{"type":"string","value":"12 items and 34 rows"}}
+        ])).unwrap();
+        let mut known = super::super::sensitive::Observation::default();
+        // The filled textbox is absent from AX; its remembered value still protects a sibling echo.
+        known.remember_private_expiry_value("frame", 10, "12/34");
+        known.remember_private_value("frame", 30, "cc-exp-month", "12");
+        let protected = protect_private_text_nodes(&nodes, &known, "frame");
+        assert_eq!(
+            extract_ax_string(&protected[1].name),
+            "[redacted: credential]"
+        );
+        assert_eq!(extract_ax_string(&protected[2].name), "Expiry month");
+        assert_eq!(
+            extract_ax_string(&protected[3].name),
+            "[redacted: cc-exp-month]"
+        );
+        assert_eq!(
+            extract_ax_string(&protected[4].name),
+            "12 items and 34 rows"
+        );
+        let (tree, _) = build_tree(&protected);
+        assert!(tree.iter().all(|node| !node.name.contains("12 / 34")));
+        let other = protect_private_text_nodes(&nodes, &known, "other-frame");
+        assert_eq!(extract_ax_string(&other[3].name), "12");
     }
 
     #[test]

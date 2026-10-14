@@ -101,6 +101,8 @@ const SENSITIVE_INPUT_CASES: &[(&str, &str, &str)] = &[
     ("named-cvc", "name='cvc'", "cc-csc"),
     ("named-cvv", "name='cvv'", "cc-csc"),
     ("named-security", "name='securitycode'", "cc-csc"),
+    ("slot-a", "aria-label='Expiration date'", "cc-exp"),
+    ("slot-b", "placeholder='MM / YY'", "cc-exp"),
 ];
 
 fn sensitive_fixture_value(surface: &str, id: &str, kind: &str) -> String {

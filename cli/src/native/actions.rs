@@ -6108,10 +6108,11 @@ async fn protected_snapshot_observation(
 ) -> Result<(String, RefMap), super::sensitive::InventoryError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let progress = state.protected_observation_progress();
-    let (private_controls, private_text_nodes) = match state.sensitive_observations.get(session) {
-        Some(known) => (known.controls.clone(), known.private_text_nodes.clone()),
-        None => (HashMap::new(), HashSet::new()),
-    };
+    let private_observation = state
+        .sensitive_observations
+        .get(session)
+        .cloned()
+        .unwrap_or_default();
     state.ref_map.clear();
     progress
         .before(deadline, async {
@@ -6140,15 +6141,14 @@ async fn protected_snapshot_observation(
                     )));
                 }
                 let mut refs = RefMap::new();
-                match snapshot::take_snapshot_with_controls(
+                match snapshot::take_snapshot_with_observation(
                     &mgr.client,
                     session,
                     options,
                     &mut refs,
                     frame,
                     &state.iframe_sessions,
-                    &private_controls,
-                    &private_text_nodes,
+                    &private_observation,
                 )
                 .await
                 {

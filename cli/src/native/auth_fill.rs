@@ -392,11 +392,15 @@ where
         return Err(BINDING.into());
     }
     for id in backends {
-        state
+        let observation = state
             .sensitive_observations
             .entry(bound.session.clone())
-            .or_default()
-            .remember_private_value(&object_session, id, "credential", &value);
+            .or_default();
+        if req.field == "expiration_date" {
+            observation.remember_private_expiry_value(&object_session, id, &value);
+        } else {
+            observation.remember_private_value(&object_session, id, "credential", &value);
+        }
     }
     let filled = client
         .send_command(
@@ -423,11 +427,15 @@ where
         .as_str()
         .filter(|value| !value.is_empty())
     {
-        state
+        let observation = state
             .sensitive_observations
             .entry(bound.session.clone())
-            .or_default()
-            .remember_private_value(&object_session, backend, "credential", rendered);
+            .or_default();
+        if req.field == "expiration_date" {
+            observation.remember_private_expiry_value(&object_session, backend, rendered);
+        } else {
+            observation.remember_private_value(&object_session, backend, "credential", rendered);
+        }
     } else if filled["result"]["value"]["status"].as_str() == Some("filled") {
         return Err(PAGE.into());
     }

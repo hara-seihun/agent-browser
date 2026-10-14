@@ -1,5 +1,7 @@
 # Snapshot and Refs
 
+Known expiry hints for native form controls and contenteditable fields also include aria-label, aria-labelledby, associated or wrapping labels, and MM/YY placeholders. Snapshots protect remembered combined expiry echoes before AX aggregation/ref construction, including whitespace-formatted sibling StaticText after a textbox disappears. Split month/year controls and their AX descendants are scoped; short fragments never become global text substitutions.
+
 Compact element references that reduce context usage dramatically for AI agents. Native snapshots and `get value/text/html/attr` replace protected form values with typed `[redacted: …]` markers without changing live fields. `cc-name` remains public. Shadow DOM and cross-origin out-of-process iframes are covered. This is form-input protection, not general secret detection in arbitrary page text. See [trust-boundaries.md](trust-boundaries.md#native-sensitive-form-input-contract) for exact markers, guarded channels, and sticky tab detection.
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.

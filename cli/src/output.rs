@@ -3828,6 +3828,10 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
     [redacted: cc-number], [redacted: cc-exp], [redacted: cc-exp-month],
     [redacted: cc-exp-year], [redacted: cc-csc], [redacted: password],
     [redacted: one-time-code]. cc-name stays public; live fields stay unchanged.
+  Form/contenteditable expiry hints include ARIA/associated/wrapping labels
+  and MM/YY placeholders.
+  Remembered combined expiry echoes tolerate whitespace before AX refs commit;
+  split short month/year values and option names remain scoped to controls.
   Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory
   has a two-second total admission window; independent represented frames and
   controls run concurrently. Frame/loader/parent/member/backend bindings are exact;
