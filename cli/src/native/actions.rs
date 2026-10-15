@@ -6354,9 +6354,9 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         Err(error) => return Ok(incomplete_snapshot(error)),
     };
     state.ref_map = refs;
+    let progress = state.protected_observation_progress();
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = match state
-        .protected_observation_progress()
+    let url = match progress
         .track(
             super::observation_progress::Phase::OriginProjection,
             mgr.get_url(),

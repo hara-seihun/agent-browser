@@ -14,9 +14,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 use tokio::sync::{Notify, RwLock};
 
+#[cfg(test)]
+use super::actions::execute_command;
 use super::actions::{
-    close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, save_restore_state_for_shutdown, DaemonState,
+    close_all_browser_backends, close_current_browser, maybe_autosave_restore_state,
+    save_restore_state_for_shutdown, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
