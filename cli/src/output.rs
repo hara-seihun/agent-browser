@@ -497,7 +497,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
 fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
-        if opts.content_boundaries {
+        if opts.content_boundaries
+            && !resp
+                .data
+                .as_ref()
+                .is_some_and(|data| format_incomplete_snapshot(data).is_some())
+        {
             let mut json_val = serde_json::to_value(resp).unwrap_or_default();
             if let Some(obj) = json_val.as_object_mut() {
                 let nonce = get_boundary_nonce();
@@ -531,6 +536,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // is the most common cause of commands timing out
         if let Some(ref warning) = resp.warning {
             eprintln!("{} {}", color::warning_indicator(), warning);
+        }
+        if let Some(code) = &resp.code {
+            eprintln!("code: {}", code);
+        }
+        if let Some(executed) = resp.executed {
+            eprintln!("executed: {}", executed);
         }
         return;
     }
@@ -3835,7 +3846,7 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Text getters preserve native innerText outside mapped protected spans;
   unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED.
   Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory
-  has a two-second total admission window; independent represented frames and
+  shares the native command deadline; independent represented frames and
   controls run concurrently. Frame/loader/parent/member/backend bindings are exact;
   metadata and sibling order are not identity. Changed observations are discarded
   and re-inventoried within that deadline; unknown identities fail closed.
@@ -3843,10 +3854,13 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Pending iframe domains share one RTT wave; mandatory replies and network
   controls complete before debugger resume. Snapshot recovery uses its proven
   coverage gap directly, then a fresh complete inventory/projection, avoiding
-  throwaway getter inventories within the unchanged original two-second budget.
+  throwaway getter inventories within the original command budget.
   Deadline errors append safe JSON: original budget, elapsed time, attempts,
   and phase counts/timings, including all concurrent in-flight phases.
   No document data, URLs, target/frame/session IDs or control values are included.
+  Lock expiry: code daemon_busy, executed:false, exit 3; no effects dispatched.
+  Started command deadline errors never replay effects. Snapshot expiry includes
+  origin projection and clears refs. Diffs/annotated captures require complete data.
   Snapshot observation.status is complete or incomplete. Incomplete inventory
   returns safe reason/phase metadata only, no page content/origin/refs. CLI/MCP
   text preserves that status. Only a fresh complete snapshot provides refs.
@@ -4149,6 +4163,10 @@ Options:
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
+  --timeout <ms>            Total native command budget; positive integer ms
+                             (AGENT_BROWSER_DEFAULT_TIMEOUT; initial 25000, auth 180000)
+                             Includes lock admission, events, observation and action.
+                             Socket receive budget: max(timeout+10000,30000) ms.
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
@@ -4309,7 +4327,7 @@ pub(crate) fn format_incomplete_snapshot(data: &Value) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Snapshot incomplete; no page content or actionable refs published.\n{}",
+        "Snapshot incomplete; no page content, origins or actionable refs published.\n{}",
         serde_json::to_string(observation).expect("observation JSON serializes")
     ))
 }

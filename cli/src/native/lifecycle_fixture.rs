@@ -56,6 +56,7 @@ pub(crate) struct FrameInventory {
     frame_tree_reads: HashMap<String, usize>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
+    pub hold_expression: Option<String>,
     pub held_session_methods: HashSet<(String, String)>,
     pub hold_shallow_document: bool,
     pub reply_delays: HashMap<String, std::time::Duration>,
@@ -313,6 +314,11 @@ impl SyntheticCdp {
                                 "DOM.describeNode" => {
                                     json!({"node":{"nodeId":400,"backendNodeId":400,"nodeName":"DIV"}})
                                 }
+                                "Runtime.evaluate"
+                                    if command["params"]["expression"] == "location.href" =>
+                                {
+                                    json!({"result": {"type": "string", "value": "https://fixture.invalid/"}})
+                                }
                                 "Runtime.evaluate" => {
                                     json!({"result": {"type": "number", "value": 1}})
                                 }
@@ -364,6 +370,10 @@ impl SyntheticCdp {
                                 vec![]
                             };
                             if inventory.hold_method.as_deref() == Some(method)
+                                || (method == "Runtime.evaluate"
+                                    && inventory.hold_expression.as_deref().is_some_and(
+                                        |expression| command["params"]["expression"] == expression,
+                                    ))
                                 || inventory
                                     .held_session_methods
                                     .contains(&(session.to_owned(), method.to_owned()))

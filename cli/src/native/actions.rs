@@ -55,6 +55,12 @@ use super::webmcp;
 /// to appear before filling/clicking.
 pub const AUTH_LOGIN_WAIT_UNTIL: WaitUntil = WaitUntil::Load;
 
+use crate::commands::DEFAULT_COMMAND_TIMEOUT_MS;
+
+tokio::task_local! {
+    static COMMAND_DEADLINE: std::time::Instant;
+}
+
 /// Poll interval used while waiting for auth form selectors to appear.
 const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 
@@ -772,10 +778,7 @@ impl DaemonState {
             // README documents 25s, intentionally below the CLI's 30s IPC
             // read timeout so the daemon reports a proper timeout error
             // instead of the client dying with EAGAIN and retrying.
-            default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(25_000),
+            default_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
             viewport: None,
             session_setup: SessionSetup::default(),
             plugin_init_scripts: Vec::new(),
@@ -809,6 +812,16 @@ impl DaemonState {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
+    }
+
+    fn protected_deadline(&self) -> std::time::Instant {
+        match COMMAND_DEADLINE.try_with(|deadline| *deadline) {
+            Ok(deadline) => deadline,
+            Err(_) => {
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(self.default_timeout_ms)
+            }
+        }
     }
 
     fn reset_input_state(&mut self) {
@@ -1248,7 +1261,7 @@ impl DaemonState {
         self.harvest_iframe_attachments().await?;
         let progress = self.protected_observation_progress();
         protected_inventory_before(
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            self.protected_deadline(),
             &progress,
             self.prepare_pending_iframes(),
         )
@@ -2665,7 +2678,102 @@ fn policy_actions_for_command(
     actions
 }
 
+/// One deadline owns setup, observation, origin projection and response work.
+/// A timed-out effect is never replayed; a timed-out snapshot publishes nothing.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let budget_ms = match crate::commands::command_timeout_ms(cmd) {
+        Ok(ms) => ms,
+        Err(error) => {
+            let mut response = error_response(id, &format!("invalid_timeout: {}", error.format()));
+            response["code"] = json!("invalid_timeout");
+            response["executed"] = json!(false);
+            return response;
+        }
+    };
+    let Some(deadline) =
+        std::time::Instant::now().checked_add(std::time::Duration::from_millis(budget_ms))
+    else {
+        return error_response(
+            id,
+            "invalid_timeout: timeout exceeds the supported clock range",
+        );
+    };
+    let deadline = match COMMAND_DEADLINE.try_with(|parent| *parent) {
+        Ok(parent) => deadline.min(parent),
+        Err(_) => deadline,
+    };
+    if std::time::Instant::now() >= deadline {
+        return command_not_executed_response(cmd);
+    }
+    let progress = state.protected_observation_progress();
+    let result = COMMAND_DEADLINE
+        .scope(
+            deadline,
+            progress.before(deadline, execute_command_owned(cmd, state)),
+        )
+        .await;
+    match result {
+        Ok(response) => response,
+        Err(diagnostic) => {
+            state.last_command_finished = Some(std::time::Instant::now());
+            state.ref_map.clear();
+            if action == "snapshot" {
+                return success_response(
+                    id,
+                    incomplete_snapshot(super::sensitive::InventoryError::Deadline(diagnostic)),
+                );
+            }
+            let mut response = error_response(id, &format!(
+                "{}; command deadline expired; dispatched effects may still settle; outcome unknown; not replayed",
+                diagnostic.into_message()));
+            response["code"] = json!(
+                if matches!(action, "auth_login" | "auth_fill" | "auth_export") {
+                    format!("{action}_timeout")
+                } else {
+                    "command_deadline".into()
+                }
+            );
+            response
+        }
+    }
+}
+
+pub(crate) async fn execute_command_before(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: std::time::Instant,
+) -> Value {
+    COMMAND_DEADLINE
+        .scope(deadline, execute_command(cmd, state))
+        .await
+}
+
+pub(crate) fn command_not_executed_response(cmd: &Value) -> Value {
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    if cmd["action"] == "snapshot" {
+        let mut response = success_response(
+            id,
+            json!({
+                "observation": {"status":"incomplete", "contentPublished":false,
+                    "reason":{"kind":"daemon_busy", "executed":false}},
+                "snapshot":"[snapshot incomplete: command admission deadline expired; command not executed; no content or actionable refs published]",
+                "refs":{}
+            }),
+        );
+        response["code"] = json!("daemon_busy");
+        response["executed"] = json!(false);
+        return response;
+    }
+    let mut response = error_response(id,
+        "daemon_busy: command admission deadline expired; command not executed; no effects dispatched; safe to retry");
+    response["code"] = json!("daemon_busy");
+    response["executed"] = json!(false);
+    response
+}
+
+async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     if !matches!(action, "auth_login" | "auth_fill" | "auth_export") {
         return Box::pin(execute_command_inner(cmd, state, None)).await;
@@ -4902,12 +5010,7 @@ async fn observe_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
-    observe_sensitive_tab_until(
-        state,
-        session,
-        std::time::Instant::now() + std::time::Duration::from_secs(2),
-    )
-    .await
+    observe_sensitive_tab_until(state, session, state.protected_deadline()).await
 }
 
 async fn protected_inventory_before<T>(
@@ -6106,7 +6209,7 @@ async fn protected_snapshot_observation(
     options: &SnapshotOptions,
     frame: Option<&str>,
 ) -> Result<(String, RefMap), super::sensitive::InventoryError> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = state.protected_deadline();
     let progress = state.protected_observation_progress();
     let private_observation = state
         .sensitive_observations
@@ -6252,7 +6355,22 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
     state.ref_map = refs;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = match state
+        .protected_observation_progress()
+        .track(
+            super::observation_progress::Phase::OriginProjection,
+            mgr.get_url(),
+        )
+        .await
+    {
+        Ok(url) if !url.is_empty() => url,
+        _ => {
+            state.ref_map.clear();
+            return Ok(incomplete_snapshot(
+                super::sensitive::InventoryError::Unavailable("Snapshot origin unavailable".into()),
+            ));
+        }
+    };
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -14780,6 +14898,93 @@ mod tests {
         fixture.server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn command_deadline_origin_withheld_is_incomplete_and_recovers() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 0, |_| vec![]);
+            inventory.hold_expression = Some("location.href".into());
+        }
+        state.browser = Some(fixture.manager);
+        let start = std::time::Instant::now();
+        let response = execute_command(
+            &json!({"id":"withheld-origin", "action":"snapshot", "timeout":200}),
+            &mut state,
+        )
+        .await;
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            response["data"]["observation"]["status"], "incomplete",
+            "{response}"
+        );
+        assert_eq!(response["data"]["observation"]["contentPublished"], false);
+        assert_eq!(response["data"]["refs"], json!({}));
+        assert!(response["data"].get("origin").is_none());
+        assert!(!response.to_string().contains("Synthetic-"));
+        assert!(state.ref_map.entries_sorted().is_empty());
+        assert_eq!(client.pending_len().await, 0);
+        fixture.frame_inventory.lock().unwrap().hold_expression = None;
+        let recovered = execute_command(
+            &json!({"id":"recovery", "action":"snapshot", "timeout":2000}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            recovered["data"]["observation"]["status"], "complete",
+            "{recovered}"
+        );
+        assert_eq!(recovered["data"]["origin"], "https://fixture.invalid/");
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn command_deadline_finite_multiframe_work_can_exceed_two_seconds() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        {
+            let mut inventory = fixture.frame_inventory.lock().unwrap();
+            configure_snapshot_fixture_graph(&mut inventory, &mut state, 4, |n| {
+                if n == 0 {
+                    vec![1, 2, 3, 4]
+                } else {
+                    vec![]
+                }
+            });
+            for method in [
+                "DOM.getDocument",
+                "Page.getFrameTree",
+                "Accessibility.getFullAXTree",
+            ] {
+                inventory
+                    .reply_delays
+                    .insert(method.into(), std::time::Duration::from_millis(400));
+            }
+        }
+        state.browser = Some(fixture.manager);
+        let start = std::time::Instant::now();
+        let response = execute_command(
+            &json!({"id":"finite", "action":"snapshot", "timeout":10000}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            response["data"]["observation"]["status"], "complete",
+            "{response}"
+        );
+        assert!(start.elapsed() > std::time::Duration::from_secs(2));
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!response["data"]["refs"].as_object().unwrap().is_empty());
+        assert!(!response.to_string().contains("Synthetic-"));
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
     fn configure_full_snapshot_fixture(
         inventory: &mut super::super::lifecycle_fixture::FrameInventory,
         state: &mut DaemonState,
@@ -16072,6 +16277,7 @@ mod tests {
             let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
             let client = fixture.manager.client.clone();
             let mut state = DaemonState::new();
+            state.default_timeout_ms = 2000;
             {
                 let mut inventory = fixture.frame_inventory.lock().unwrap();
                 configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {

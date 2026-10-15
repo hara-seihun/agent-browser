@@ -39,8 +39,22 @@ pub struct Response {
     /// when a pinned session's bound tab no longer exists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+impl Response {
+    pub fn exit_code(&self) -> i32 {
+        if self.code.as_deref() == Some("daemon_busy") {
+            3
+        } else if self.success {
+            0
+        } else {
+            1
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1061,28 +1075,19 @@ fn has_os_error(error: &str, code: u32) -> bool {
     error.contains(&format!("(os error {})", code))
 }
 
-/// Socket read timeout for one request. Ordinary commands get a 30s floor.
-/// Commands carrying an operation timeout (the wait family, which
-/// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
-/// --timeout is given) get that timeout plus margin, so the daemon can report
-/// a proper operation timeout instead of the client dying with EAGAIN at 30s
-/// and the retry loop re-sending the whole long-running command.
-///
-/// The env var is deliberately NOT consulted here. Reading it would apply a
-/// long wait budget to every command, so a genuinely hung daemon on a simple
-/// `url`/`title`/`snapshot` call would take the full budget to surface
-/// instead of 30s. Only commands that actually carry a `timeout` field get
-/// the extended budget, and that field is set client-side per invocation,
-/// avoiding the daemon's spawn-time env snapshot drifting from the client.
-fn read_timeout_for(cmd: &Value) -> Duration {
-    let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
-    Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
+/// Use the same invocation budget as the native command deadline, plus IPC margin.
+/// Numeric waits retain their sleep duration in `timeout` and carry a separate budget.
+fn read_timeout_for(cmd: &Value) -> Result<Duration, String> {
+    let op_ms = crate::commands::command_timeout_ms(cmd).map_err(|error| error.format())?;
+    Ok(Duration::from_millis((op_ms + 10_000).max(30_000)))
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
+    stream
+        .set_read_timeout(Some(read_timeout_for(cmd)?))
+        .map_err(|error| format!("Failed to set command read timeout: {}", error))?;
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
@@ -1426,9 +1431,42 @@ mod tests {
     #[test]
     fn test_auth_transport_budget_exceeds_operation_deadline() {
         assert_eq!(
-            read_timeout_for(&serde_json::json!({"timeout":180000})),
+            read_timeout_for(&serde_json::json!({"timeout":180000})).unwrap(),
             Duration::from_secs(190)
         );
+    }
+
+    #[test]
+    fn command_receive_budget_and_busy_metadata_round_trip() {
+        for (command, expected) in [
+            (serde_json::json!({"action":"snapshot"}), 35000),
+            (
+                serde_json::json!({"action":"snapshot", "timeout":9000}),
+                30000,
+            ),
+            (
+                serde_json::json!({"action":"wait", "timeout":120000}),
+                140000,
+            ),
+            (
+                serde_json::json!({"action":"wait", "timeout":5000, "commandTimeoutMs":7000}),
+                30000,
+            ),
+        ] {
+            assert_eq!(
+                read_timeout_for(&command).unwrap(),
+                Duration::from_millis(expected)
+            );
+        }
+        assert!(read_timeout_for(&serde_json::json!({"timeout":0})).is_err());
+        for success in [true, false] {
+            let input = serde_json::json!({"success":success,"code":"daemon_busy","executed":false,"data":{"refs":{},"observation":{"status":"incomplete"}}});
+            let response: Response = serde_json::from_value(input).unwrap();
+            assert_eq!(response.exit_code(), 3);
+            let output = serde_json::to_value(response).unwrap();
+            assert_eq!(output["code"], "daemon_busy");
+            assert_eq!(output["executed"], false);
+        }
     }
 
     // === Transport Error Classification Tests ===

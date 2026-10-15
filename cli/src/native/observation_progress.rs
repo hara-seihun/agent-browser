@@ -21,6 +21,7 @@ pub(crate) enum Phase {
     ControlRelease,
     AxTree,
     CursorProjection,
+    OriginProjection,
     SelectorProjection,
     FinalValidation,
     ObjectCleanup,

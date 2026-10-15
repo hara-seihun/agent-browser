@@ -2078,7 +2078,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments for this command, preserving full CLI parity."
+            "description": "Advanced: extra CLI arguments, including --timeout <positive-ms> for the total native command deadline. Preserves CLI parity; timeoutMs is a separate outer process limit."
         }),
     );
     props.insert(
@@ -2087,7 +2087,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
             "type": "integer",
             "minimum": 1,
             "default": DEFAULT_TIMEOUT_MS,
-            "description": "Maximum time to wait for this tool call."
+            "description": "Outer child-process limit in ms, distinct from the native command budget. Allow at least max(command timeout + 10000, 30000); set the native deadline with extraArgs --timeout."
         }),
     );
 
@@ -2120,7 +2120,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             | TOOL_GET_ATTR
             | TOOL_DIFF_SNAPSHOT
     ) {
-        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Known expiry hints for native form controls and contenteditable fields also include aria-label, aria-labelledby, associated or wrapping labels, and MM/YY placeholders. Snapshots protect remembered combined expiry echoes before AX aggregation/ref construction, including whitespace-formatted sibling StaticText after a textbox disappears. Split month/year controls and their AX descendants are scoped; short fragments never become global text substitutions. Rendered text getters preserve native innerText layout outside mapped protected spans without changing live DOM or controls; unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Initial frame-tree and pierced DOM requests overlap within each exact represented session. Pending iframe domains share one RTT wave; mandatory admissions and network controls complete before resume. Snapshot recovery consumes its proven coverage gap directly before fresh complete inventory, without throwaway getter inventories. Snapshots return observation.status incomplete on unavailable protected inventory, no page content or refs, and safe reason/phase metadata in CLI and MCP text and JSON; complete snapshots carry observation.status complete. Diff and annotated screenshots require complete inventory and invalidate old refs on incomplete capture. Deadline errors append safe phase diagnostic JSON with the original budget, elapsed time, attempts and concurrent phase counts/timings, without DOM, URLs, target/frame/session IDs or control values. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        return "Native form values use typed [redacted: kind] markers for cc-number, cc-exp, cc-exp-month, cc-exp-year, cc-csc, password and one-time-code; cc-name stays public, live values unchanged. Known expiry hints for native form controls and contenteditable fields also include aria-label, aria-labelledby, associated or wrapping labels, and MM/YY placeholders. Snapshots protect remembered combined expiry echoes before AX aggregation/ref construction, including whitespace-formatted sibling StaticText after a textbox disappears. Split month/year controls and their AX descendants are scoped; short fragments never become global text substitutions. Rendered text getters preserve native innerText layout outside mapped protected spans without changing live DOM or controls; unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED. Covers shadow DOM and cross-origin out-of-process iframes. Protected inventory shares the native command deadline (explicit --timeout or AGENT_BROWSER_DEFAULT_TIMEOUT, initially 25000ms), observes independent represented frames and controls concurrently, and checks exact frame/loader/parent/member/backend bindings rather than metadata or sibling ordering. Changed observations are discarded and wholly re-inventoried inside the original deadline; unknown or misassociated identities refuse. Initial frame-tree and pierced DOM requests overlap within each exact represented session. Pending iframe domains share one RTT wave; mandatory admissions and network controls complete before resume. Snapshot recovery consumes its proven coverage gap directly before fresh complete inventory, without throwaway getter inventories. Snapshots return metadata-only observation.status incomplete on unavailable inventory or deadline expiry, including origin projection; daemon_busy means executed:false/no effects and CLI exit3. Started-command deadline errors never replay effects. Incomplete snapshots publish no page content, origins or refs, and safe reason/phase metadata in CLI and MCP text and JSON; complete snapshots carry observation.status complete. Diff and annotated screenshots require complete inventory and invalidate old refs on incomplete capture. Deadline errors append safe phase diagnostic JSON with the original budget, elapsed time, attempts and concurrent phase counts/timings, without DOM, URLs, target/frame/session IDs or control values. Complete snapshots reuse one inventory, collect all frame AX/cursor/selector projections concurrently with controls, validate once, then render deterministic children and exact frame-bound refs transactionally. Pierced owner/link/base-URL data are reused; cursor reads create no attributes. Snapshot/ref/diff batches retain typed coverage gaps, reconcile only live represented iframe targets and recollect all projections within one deadline; post-capture guards never retry. Cancelled renderer handles retain connection-owned cleanup with a 500ms bound; unresolved cleanup refuses observation until connection close. Not general secret detection in page text. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
     }
     if let Some(action) = sensitive_tool_action(name) {
         if crate::native::sensitive::always_denied(action) {
@@ -2130,7 +2130,7 @@ fn sensitive_tool_description(name: &str) -> &'static str {
             return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. Deadline errors preserve safe phase diagnostic JSON with numeric counts/timings and no DOM, URLs, IDs or control values. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
         }
     }
-    "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag. Protected inventory has a two-second total admission window, observes independent represented frames and controls concurrently, and refuses changed or unknown document identities."
+    "MCP delegates to the canonical CLI, including extraArgs. Native sensitive form input protection has no bypass flag. Protected inventory shares the native command deadline (explicit --timeout or AGENT_BROWSER_DEFAULT_TIMEOUT, initially 25000ms), observes independent represented frames and controls concurrently, and refuses changed or unknown document identities."
 }
 
 fn sensitive_tool_action(name: &str) -> Option<&'static str> {
@@ -4136,7 +4136,10 @@ fn tool_result_from_run(run: CliRun) -> Value {
         .and_then(|v| v.get("success"))
         .and_then(|v| v.as_bool())
         .unwrap_or_else(|| run.exit_code == Some(0));
-    let success = run.exit_code == Some(0) && cli_success;
+    let busy = parsed
+        .as_ref()
+        .is_some_and(|response| response["code"] == "daemon_busy");
+    let success = run.exit_code == Some(0) && cli_success && !busy;
     let mut content = vec![json!({
         "type": "text",
         "text": tool_text(parsed.as_ref(), &run.stdout, &run.stderr),
@@ -4229,10 +4232,16 @@ fn take_webmcp_context(data: &mut Value) -> Option<String> {
 fn response_text(value: &Value) -> Option<String> {
     if let Some(obj) = value.as_object() {
         if obj.get("success").and_then(|v| v.as_bool()) == Some(false) {
-            return obj
-                .get("error")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string);
+            return obj.get("error").and_then(Value::as_str).map(|error| {
+                let mut text = error.to_string();
+                if let Some(code) = obj.get("code").and_then(Value::as_str) {
+                    text.push_str(&format!("\ncode: {}", code));
+                }
+                if let Some(executed) = obj.get("executed").and_then(Value::as_bool) {
+                    text.push_str(&format!("\nexecuted: {}", executed));
+                }
+                text
+            });
         }
 
         if let Some(data) = obj.get("data") {
@@ -5263,7 +5272,7 @@ mod tests {
             assert!(description.contains("canonical CLI"));
             assert!(description.contains("No bypass flag"));
             if name == TOOL_GET_VALUE {
-                assert!(description.contains("two-second total admission window"));
+                assert!(description.contains("command deadline"));
                 assert!(description.contains("Complete snapshots reuse one inventory"));
                 assert!(description.contains("frame-bound refs transactionally"));
                 assert!(description.contains("exact frame/loader/parent/member/backend bindings"));
@@ -5347,9 +5356,68 @@ mod tests {
             assert!(help.contains("contenteditable"));
             assert!(help.contains("sibling StaticText"));
             assert!(help.contains("Split month/year controls"));
-            assert!(help.contains("two-second"));
+            assert!(help.contains("command deadline"));
             assert!(help.contains("native innerText"));
             assert!(help.contains("ambiguous mapping refuses"));
+        }
+    }
+
+    #[test]
+    fn mcp_extra_args_use_canonical_command_deadlines() {
+        for input in [
+            vec!["snapshot"],
+            vec!["get", "text", "body"],
+            vec!["click", "#submit"],
+            vec!["wait", "5000"],
+            vec!["auth", "login", "fixture"],
+            vec!["read", "example.com"],
+        ] {
+            for (raw, expected) in [("45000", Some(45000)), ("0", None), ("nonsense", None)] {
+                let arguments = json!({"extraArgs":["--timeout",raw]});
+                let cli = cli_tool_args(
+                    &arguments,
+                    input.iter().map(|s| s.to_string()).collect(),
+                    None,
+                )
+                .unwrap();
+                let flags = crate::flags::parse_flags(&cli);
+                let parsed =
+                    crate::commands::parse_command(&crate::flags::clean_args(&cli), &flags);
+                match expected {
+                    Some(expected) => assert_eq!(
+                        crate::commands::command_timeout_ms(&parsed.unwrap()).unwrap(),
+                        expected
+                    ),
+                    None => assert!(matches!(
+                        parsed,
+                        Err(crate::commands::ParseError::InvalidValue { .. })
+                    )),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn busy_snapshot_and_effect_refusal_preserve_metadata_in_mcp() {
+        for success in [true, false] {
+            let response = json!({"success":success,"code":"daemon_busy","executed":false,
+                "error":"command not executed; safe to retry",
+                "data":{"refs":{},"observation":{"status":"incomplete","contentPublished":false,
+                    "reason":{"kind":"daemon_busy","executed":false}}}});
+            let result = tool_result_from_run(CliRun {
+                exit_code: Some(3),
+                stdout: response.to_string(),
+                stderr: String::new(),
+            });
+            assert_eq!(result["isError"], true);
+            assert_eq!(result["structuredContent"]["response"], response);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("daemon_busy") && text.contains("false"));
+            assert!(result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["type"] == "text"));
         }
     }
 
@@ -5358,11 +5426,11 @@ mod tests {
         let response = json!({"success":true,"data":{
             "snapshot":"placeholder", "refs":{},
             "observation":{"status":"incomplete","contentPublished":false,
-                "reason":{"kind":"deadline","diagnostic":{"budgetMs":2000}}}
+                "reason":{"kind":"deadline","diagnostic":{"budgetMs":25000}}}
         }});
         let text = response_text(&response).unwrap();
         assert!(text.contains("Snapshot incomplete"));
-        assert!(text.contains("deadline") && text.contains("2000"));
+        assert!(text.contains("deadline") && text.contains("25000"));
         assert!(!text.contains("placeholder"));
         assert_eq!(
             crate::output::format_incomplete_snapshot(&response["data"]).unwrap(),

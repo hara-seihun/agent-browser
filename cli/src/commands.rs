@@ -328,21 +328,160 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
-pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 25_000;
+const TIMEOUT_USAGE: &str = "<command> [args...] [--timeout <positive-ms>]";
 
-    // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
-    // doesn't already carry an explicit timeout. Centralised here so that new
-    // wait variants automatically inherit the default without per-variant wiring.
-    if let Some(action) = result.get("action").and_then(|a| a.as_str()) {
-        if action.starts_with("wait") && result.get("timeout").is_none() {
-            if let Some(t) = flags.default_timeout {
-                result["timeout"] = json!(t);
-            }
+pub fn parse_timeout_ms(raw: &str) -> Result<u64, ParseError> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|ms| *ms > 0 && *ms <= i64::MAX as u64 - 10_000)
+        .ok_or_else(|| ParseError::InvalidValue {
+            message:
+                "Timeout must be a positive integer in milliseconds with room for the IPC margin"
+                    .into(),
+            usage: TIMEOUT_USAGE,
+        })
+}
+
+fn timeout_value(value: &Value) -> Result<u64, ParseError> {
+    let ms = value.as_u64().ok_or_else(|| ParseError::InvalidValue {
+        message: "Timeout must be a positive integer in milliseconds".into(),
+        usage: TIMEOUT_USAGE,
+    })?;
+    parse_timeout_ms(&ms.to_string())
+}
+
+/// Resolve the command deadline for CLI and direct protocol callers alike.
+/// A bare numeric wait's timeout is its sleep duration, not its command budget.
+pub fn command_timeout_ms(cmd: &Value) -> Result<u64, ParseError> {
+    if let Some(value) = cmd.get("commandTimeoutMs") {
+        return timeout_value(value);
+    }
+    if cmd["action"] == "wait" && cmd.get("selector").is_none() && cmd.get("text").is_none() {
+        if let Some(value) = cmd.get("timeout") {
+            let duration = value.as_u64().ok_or_else(|| ParseError::InvalidValue {
+                message: "Wait duration must be an unsigned integer in milliseconds".into(),
+                usage: TIMEOUT_USAGE,
+            })?;
+            let budget = duration
+                .checked_add(10_000)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: "Wait duration exceeds the supported command budget".into(),
+                    usage: TIMEOUT_USAGE,
+                })?
+                .max(DEFAULT_COMMAND_TIMEOUT_MS);
+            return parse_timeout_ms(&budget.to_string());
         }
     }
-    attach_ca_cert_to_launch_command(&mut result, flags);
+    if let Some(value) = cmd.get("timeout") {
+        return timeout_value(value);
+    }
+    Ok(
+        if matches!(
+            cmd["action"].as_str(),
+            Some("auth_login" | "auth_fill" | "auth_export")
+        ) {
+            180_000
+        } else {
+            DEFAULT_COMMAND_TIMEOUT_MS
+        },
+    )
+}
 
+pub fn configured_timeout(flags: &Flags) -> Result<Option<u64>, ParseError> {
+    flags
+        .default_timeout
+        .as_ref()
+        .copied()
+        .map_err(|message| ParseError::InvalidValue {
+            message: message.clone(),
+            usage: TIMEOUT_USAGE,
+        })
+}
+
+pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    let configured = configured_timeout(flags)?;
+    if let Some(ms) = configured {
+        parse_timeout_ms(&ms.to_string())?;
+    }
+    let mut command_args = Vec::with_capacity(args.len());
+    let mut explicit_timeout = None;
+    let mut i = 0;
+    while i < args.len() {
+        let raw = if args[i] == "--timeout" {
+            i += 1;
+            Some(
+                args.get(i)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "--timeout".into(),
+                        usage: TIMEOUT_USAGE,
+                    })?
+                    .as_str(),
+            )
+        } else {
+            args[i].strip_prefix("--timeout=")
+        };
+        if let Some(raw) = raw {
+            explicit_timeout = Some(parse_timeout_ms(raw)?);
+        } else {
+            command_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+    // These commands validate additional timeout constraints or carry a numeric delay.
+    let owns_timeout = match command_args.first().map(String::as_str) {
+        Some("wait" | "read") => true,
+        Some("auth") => matches!(
+            command_args.get(1).map(String::as_str),
+            Some("login" | "fill" | "export")
+        ),
+        Some("webmcp") => matches!(
+            command_args.get(1).map(String::as_str),
+            Some("invoke" | "result")
+        ),
+        _ => false,
+    };
+    if owns_timeout {
+        if let Some(ms) = explicit_timeout {
+            command_args.extend(["--timeout".to_string(), ms.to_string()]);
+        }
+    }
+    let mut result = parse_command_inner(&command_args, flags)?;
+    let numeric_wait = result["action"] == "wait"
+        && result.get("selector").is_none()
+        && result.get("text").is_none()
+        && result["timeout"].as_u64().is_some();
+    if numeric_wait {
+        let duration = result["timeout"].as_u64().unwrap();
+        let budget = match explicit_timeout.or(configured) {
+            Some(ms) => ms,
+            None => duration
+                .checked_add(10_000)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: "Wait duration exceeds the supported command budget".into(),
+                    usage: TIMEOUT_USAGE,
+                })?
+                .max(DEFAULT_COMMAND_TIMEOUT_MS),
+        };
+        result["commandTimeoutMs"] = json!(parse_timeout_ms(&budget.to_string())?);
+    } else if !owns_timeout || result.get("timeout").is_none() {
+        result["timeout"] = json!(explicit_timeout
+            .or(configured)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS));
+    }
+    if matches!(
+        result["action"].as_str(),
+        Some("auth_login" | "auth_fill" | "auth_export")
+    ) && !result["timeout"]
+        .as_u64()
+        .is_some_and(|ms| ms > 0 && ms <= 300_000)
+    {
+        return Err(ParseError::InvalidValue {
+            message: "Auth timeout must be 1..300000ms".into(),
+            usage: TIMEOUT_USAGE,
+        });
+    }
+    attach_ca_cert_to_launch_command(&mut result, flags);
     Ok(result)
 }
 
@@ -1062,7 +1201,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some("export") => {
                     const USAGE: &str = "agent-browser auth export --selector <css> --target <target-id> --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]";
-                    let mut cmd = json!({"id":id,"action":"auth_export","timeout":flags.default_timeout.unwrap_or(180_000)});
+                    let mut cmd = json!({"id":id,"action":"auth_export","timeout":configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
                     while j < rest.len() {
@@ -1137,7 +1276,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some("fill") => {
                     const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]";
-                    let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": flags.default_timeout.unwrap_or(180_000)});
+                    let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
                     while j < rest.len() {
@@ -1232,7 +1371,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
                     let mut no_navigate = false;
-                    let mut timeout_ms = flags.default_timeout.unwrap_or(180_000);
+                    let mut timeout_ms = configured_timeout(flags)?.unwrap_or(180_000);
 
                     let mut j = 2;
                     while j < rest.len() {
@@ -2448,7 +2587,7 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
     let mut cmd = json!({
         "id": id,
         "action": "read",
-        "timeout": crate::read::default_timeout_ms(),
+        "timeout": configured_timeout(flags)?.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
     });
     let mut url: Option<&str> = None;
     let mut i = 0;
@@ -3751,7 +3890,7 @@ mod tests {
             screenshot_quality: None,
             screenshot_format: None,
             idle_timeout: None,
-            default_timeout: None,
+            default_timeout: Ok(None),
             no_auto_dialog: false,
             model: None,
             plugins: Vec::new(),
@@ -4307,7 +4446,7 @@ mod tests {
         let cmd = parse_command(&args("read example.com/docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "read");
         assert_eq!(cmd["url"], "example.com/docs");
-        assert_eq!(cmd["timeout"], crate::read::default_timeout_ms());
+        assert_eq!(cmd["timeout"], DEFAULT_COMMAND_TIMEOUT_MS);
     }
 
     #[test]
@@ -5025,7 +5164,7 @@ mod tests {
         let cmd = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["text"], "Welcome");
-        assert!(cmd.get("timeout").is_none());
+        assert_eq!(cmd["timeout"], DEFAULT_COMMAND_TIMEOUT_MS);
     }
 
     #[test]
@@ -5737,7 +5876,7 @@ mod tests {
 
     fn flags_with_default_timeout(ms: u64) -> Flags {
         let mut f = default_flags();
-        f.default_timeout = Some(ms);
+        f.default_timeout = Ok(Some(ms));
         f
     }
 
@@ -5799,9 +5938,128 @@ mod tests {
     }
 
     #[test]
-    fn test_wait_no_default_timeout_omits_field() {
+    fn test_wait_no_default_uses_canonical_timeout() {
         let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
-        assert!(cmd.get("timeout").is_none());
+        assert_eq!(cmd["timeout"], DEFAULT_COMMAND_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn command_budgets_cover_observation_effects_and_command_families() {
+        for input in [
+            "snapshot",
+            "get text body",
+            "click #submit",
+            "open example.com",
+            "tab list",
+            "session info",
+            "webmcp list",
+            "read example.com",
+            "wait #ready",
+        ] {
+            for configured in [None, Some(47_000)] {
+                let mut flags = default_flags();
+                flags.default_timeout = Ok(configured);
+                let command = parse_command(&args(input), &flags).unwrap();
+                assert_eq!(
+                    command_timeout_ms(&command).unwrap(),
+                    configured.unwrap_or(25_000),
+                    "{input}"
+                );
+                let explicit =
+                    parse_command(&args(&format!("{input} --timeout 63000")), &flags).unwrap();
+                assert_eq!(command_timeout_ms(&explicit).unwrap(), 63_000, "{input}");
+            }
+        }
+        let auth = parse_command(&args("auth login fixture"), &default_flags()).unwrap();
+        assert_eq!(command_timeout_ms(&auth).unwrap(), 180_000);
+        let auth = parse_command(
+            &args("auth login fixture"),
+            &flags_with_default_timeout(31_000),
+        )
+        .unwrap();
+        assert_eq!(command_timeout_ms(&auth).unwrap(), 31_000);
+    }
+
+    #[test]
+    fn numeric_wait_duration_is_independent_of_its_command_budget() {
+        for (input, configured, duration, budget) in [
+            ("wait 0", None, 0, 25_000),
+            ("wait 120000", None, 120_000, 130_000),
+            ("wait 5000 --timeout 9000", Some(3000), 5000, 9000),
+            ("wait 5000", Some(7000), 5000, 7000),
+        ] {
+            let mut flags = default_flags();
+            flags.default_timeout = Ok(configured);
+            let command = parse_command(&args(input), &flags).unwrap();
+            assert_eq!(command["timeout"], duration);
+            assert_eq!(command["commandTimeoutMs"], budget);
+            assert_eq!(command_timeout_ms(&command).unwrap(), budget);
+        }
+        assert_eq!(
+            command_timeout_ms(&json!({"action":"wait", "timeout":120000})).unwrap(),
+            130_000
+        );
+    }
+
+    #[test]
+    fn invalid_budgets_are_typed_errors_before_dispatch() {
+        for raw in [
+            "",
+            "0",
+            "-1",
+            "1.5",
+            "bad",
+            "18446744073709551615",
+            "9223372036854775807",
+        ] {
+            for input in [
+                "snapshot",
+                "click #submit",
+                "read example.com",
+                "wait #ready",
+                "auth login fixture",
+            ] {
+                let mut input = args(input);
+                input.extend(["--timeout".into(), raw.into()]);
+                assert!(matches!(
+                    parse_command(&input, &default_flags()),
+                    Err(ParseError::InvalidValue { .. })
+                ));
+            }
+        }
+        assert!(matches!(
+            parse_command(&args("snapshot --timeout"), &default_flags()),
+            Err(ParseError::MissingArguments { .. })
+        ));
+        let mut flags = default_flags();
+        flags.default_timeout = Err("invalid configured timeout".into());
+        assert!(matches!(
+            parse_command(&args("snapshot"), &flags),
+            Err(ParseError::InvalidValue { .. })
+        ));
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("25000"),
+            Value::Null,
+            json!(u64::MAX),
+        ] {
+            assert!(command_timeout_ms(&json!({"action":"snapshot", "timeout":value})).is_err());
+            assert!(command_timeout_ms(
+                &json!({"action":"wait", "timeout":5, "commandTimeoutMs":value})
+            )
+            .is_err());
+        }
+        assert!(command_timeout_ms(&json!({"action":"wait", "timeout":u64::MAX})).is_err());
+        assert_eq!(
+            command_timeout_ms(&json!({"action":"auth_fill"})).unwrap(),
+            180_000
+        );
+        assert_eq!(
+            command_timeout_ms(&json!({"action":"snapshot"})).unwrap(),
+            25_000
+        );
     }
 
     // === Connect (CDP) tests ===

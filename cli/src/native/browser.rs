@@ -1255,7 +1255,10 @@ impl BrowserManager {
 
     pub async fn get_url(&self) -> Result<String, String> {
         let result = self.evaluate_simple("location.href").await?;
-        Ok(result.as_str().unwrap_or("").to_string())
+        match result.as_str() {
+            Some(url) if !url.is_empty() => Ok(url.to_owned()),
+            _ => Err("Browser origin projection returned no URL string".into()),
+        }
     }
 
     pub async fn get_title(&self) -> Result<String, String> {

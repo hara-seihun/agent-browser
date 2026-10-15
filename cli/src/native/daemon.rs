@@ -24,6 +24,20 @@ use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 
 pub async fn run_daemon(session: &str) {
+    let default_timeout_ms = match env::var("AGENT_BROWSER_DEFAULT_TIMEOUT") {
+        Ok(raw) => match crate::commands::parse_timeout_ms(&raw) {
+            Ok(ms) => ms,
+            Err(error) => {
+                eprintln!("invalid_timeout: {}", error.format());
+                process::exit(1);
+            }
+        },
+        Err(env::VarError::NotPresent) => crate::commands::DEFAULT_COMMAND_TIMEOUT_MS,
+        Err(env::VarError::NotUnicode(_)) => {
+            eprintln!("invalid_timeout: AGENT_BROWSER_DEFAULT_TIMEOUT must be UTF-8 milliseconds");
+            process::exit(1);
+        }
+    };
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
@@ -114,11 +128,10 @@ pub async fn run_daemon(session: &str) {
 
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
-    let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
-        stream_client,
-        stream_server_instance,
-        idle_activity.clone(),
-    )));
+    let mut initial =
+        DaemonState::new_with_stream(stream_client, stream_server_instance, idle_activity.clone());
+    initial.default_timeout_ms = default_timeout_ms;
+    let state = Arc::new(tokio::sync::Mutex::new(initial));
     let result = run_socket_server(
         &socket_path,
         session,
@@ -532,6 +545,17 @@ async fn dispatch_command(
     maintenance_active: &AtomicBool,
 ) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let budget_ms = match crate::commands::command_timeout_ms(cmd) {
+        Ok(ms) => ms,
+        Err(error) => {
+            return serde_json::json!({"id":id,"success":false,"code":"invalid_timeout", "executed":false,"error":format!("invalid_timeout: {}", error.format())})
+        }
+    };
+    let Some(deadline) = std::time::Instant::now().checked_add(Duration::from_millis(budget_ms))
+    else {
+        return serde_json::json!({"id":id,"success":false,"code":"invalid_timeout", "executed":false,"error":"timeout exceeds the supported clock range"});
+    };
     let mut s = if matches!(
         action,
         "session_info" | "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
@@ -539,7 +563,14 @@ async fn dispatch_command(
         match state.try_lock() {
             Ok(s) => s,
             Err(_) if maintenance_active.load(Ordering::SeqCst) => {
-                match tokio::time::timeout(MAINTENANCE_LOCK_BUDGET, state.lock()).await {
+                match tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(
+                        deadline.min(std::time::Instant::now() + MAINTENANCE_LOCK_BUDGET),
+                    ),
+                    state.lock(),
+                )
+                .await
+                {
                     Ok(s) => s,
                     Err(_) => {
                         return lifecycle_busy_response(
@@ -552,9 +583,16 @@ async fn dispatch_command(
             Err(_) => return lifecycle_busy_response(cmd, false),
         }
     } else {
-        state.lock().await
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), state.lock()).await
+        {
+            Ok(state) if std::time::Instant::now() < deadline => state,
+            _ => return super::actions::command_not_executed_response(cmd),
+        }
     };
-    let response = execute_command(cmd, &mut s).await;
+    if std::time::Instant::now() >= deadline {
+        return super::actions::command_not_executed_response(cmd);
+    }
+    let response = super::actions::execute_command_before(cmd, &mut s, deadline).await;
     idle_activity.mark();
     response
 }
@@ -564,6 +602,7 @@ fn lifecycle_busy_response(cmd: &Value, maintenance: bool) -> Value {
         "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
         "success": false,
         "code": if maintenance { "daemon_maintenance_busy" } else { "daemon_busy" },
+        "executed": false,
         "error": if maintenance {
             "Process cleanup is still in progress; lifecycle state is unavailable. No close was performed."
         } else {
@@ -905,6 +944,41 @@ mod tests {
         daemon_server.abort();
         assert!(daemon_server.await.unwrap_err().is_cancelled());
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn command_deadline_queue_expiry_never_executes_and_recovers() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let held = state.lock().await;
+        for action in ["snapshot", "click"] {
+            let start = std::time::Instant::now();
+            let response = dispatch_command(
+                &serde_json::json!({"id":"queued", "action":action, "timeout":40}),
+                &state,
+                &IdleActivity::new(),
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert!(start.elapsed() < Duration::from_millis(500));
+            assert_eq!(response["code"], "daemon_busy");
+            assert_eq!(response["executed"], false);
+            assert!(!response.to_string().contains("outcome unknown"));
+            if action == "snapshot" {
+                assert_eq!(response["data"]["observation"]["status"], "incomplete");
+                assert_eq!(response["data"]["observation"]["contentPublished"], false);
+                assert_eq!(response["data"]["refs"], serde_json::json!({}));
+            }
+        }
+        assert!(held.browser.is_none());
+        drop(held);
+        let response = dispatch_command(
+            &serde_json::json!({"id":"recovery", "action":"session_info", "timeout":1000}),
+            &state,
+            &IdleActivity::new(),
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert_eq!(response["success"], true, "{response}");
     }
 
     #[tokio::test]

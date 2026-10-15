@@ -413,7 +413,7 @@ pub struct Flags {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
-    pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
+    pub default_timeout: Result<Option<u64>, String>, // Validated AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
@@ -646,9 +646,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
         )
         .or(config.idle_timeout),
-        default_timeout: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok()),
+        default_timeout: match env::var("AGENT_BROWSER_DEFAULT_TIMEOUT") {
+            Ok(raw) => crate::commands::parse_timeout_ms(&raw)
+                .map(Some)
+                .map_err(|error| error.format()),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(env::VarError::NotUnicode(_)) => Err(
+                "AGENT_BROWSER_DEFAULT_TIMEOUT must be a positive integer in milliseconds".into(),
+            ),
+        },
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),

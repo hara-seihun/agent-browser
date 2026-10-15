@@ -452,6 +452,8 @@ Tool calls use the same config files and environment variables as the CLI. Each 
 
 ## Global Options
 
+`--timeout <positive-ms>` applies to every native command. The configured `AGENT_BROWSER_DEFAULT_TIMEOUT` or initial 25000ms budget includes lock admission, inventory, projections, origins and action execution. Auth and numeric waits retain their documented duration semantics. See [trust boundaries](trust-boundaries.md#native-command-deadline).
+
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing

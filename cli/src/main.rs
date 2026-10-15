@@ -1647,6 +1647,7 @@ fn main() {
                 data: Some(data),
                 error: None,
                 code: None,
+                executed: None,
                 warning: None,
             },
             Err(e) => connection::Response {
@@ -1654,6 +1655,7 @@ fn main() {
                 data: None,
                 error: Some(e),
                 code: None,
+                executed: None,
                 warning: None,
             },
         };
@@ -1734,7 +1736,13 @@ fn main() {
         auto_connect: flags.auto_connect,
         pin_tab: flags.pin_tab,
         idle_timeout: flags.idle_timeout.as_deref(),
-        default_timeout: flags.default_timeout,
+        default_timeout: match commands::configured_timeout(&flags) {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                eprintln!("{}", error.format());
+                std::process::exit(1);
+            }
+        },
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
@@ -2099,17 +2107,17 @@ fn main() {
                 if daemon_restarted {
                     mark_restarted_background(&mut resp);
                 }
-                if !resp.success {
-                    exit(1);
+                if resp.exit_code() != 0 {
+                    exit(resp.exit_code());
                 }
                 return;
             }
-            let success = resp.success;
+            let response_exit = resp.exit_code();
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
             print_response_with_opts(&resp, action, &output_opts);
-            if !success {
-                exit(1);
+            if response_exit != 0 {
+                exit(response_exit);
             }
         }
         Err(e) => {
@@ -2194,6 +2202,7 @@ fn run_batch(
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
+    let mut had_busy = false;
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
@@ -2239,6 +2248,7 @@ fn run_batch(
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
+                let response_exit = resp.exit_code();
                 if flags.json {
                     let mut result = json!({
                         "command": cmd_args,
@@ -2255,6 +2265,9 @@ fn run_batch(
                     }
                     // Mirror the single-command serialization: emit `warning`
                     // too, not just `code`.
+                    if let Some(executed) = resp.executed {
+                        result["executed"] = json!(executed);
+                    }
                     if let Some(ref warning) = resp.warning {
                         result["warning"] = json!(warning);
                     }
@@ -2265,11 +2278,12 @@ fn run_batch(
                     }
                     print_response_with_opts(&resp, action.as_deref(), &output_opts);
                 }
-                if !resp.success {
+                if response_exit != 0 {
                     had_error = true;
+                    had_busy |= response_exit == 3;
                     if bail {
                         if !flags.json {
-                            exit(1);
+                            exit(response_exit);
                         }
                         break;
                     }
@@ -2304,7 +2318,7 @@ fn run_batch(
     }
 
     if had_error {
-        exit(1);
+        exit(if had_busy { 3 } else { 1 });
     }
 }
 
@@ -2959,6 +2973,7 @@ mod tests {
         let resp = Response {
             success: true,
             code: None,
+            executed: None,
             data: Some(json!({
                 "confirmed": true,
                 "action": "navigate",
