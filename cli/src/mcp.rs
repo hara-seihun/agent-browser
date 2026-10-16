@@ -2535,6 +2535,7 @@ fn call_tools_profiles(config: &McpConfig) -> Result<Value, ProtocolError> {
 
 /// Preserve the canonical CLI's redaction and refusal responses without running
 /// an alternate MCP-side extraction or capture implementation.
+// Canonical CLI dispatch keeps local vault effects browser/daemon-free.
 fn call_cli_tool(
     arguments: &Value,
     command_args: Vec<String>,

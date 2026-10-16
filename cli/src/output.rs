@@ -4051,7 +4051,7 @@ Auth Vault:
                              Resolve credentials from a configured plugin
   auth login <name> --username-selector <s> --password-selector <s>
                              Override selectors for one login
-  auth list                  List saved auth profiles
+  auth list                  List saved auth profiles (no browser/daemon)
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
 

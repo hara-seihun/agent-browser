@@ -4,6 +4,8 @@ description: Core agent-browser usage guide. Read this before running any agent-
 allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
 ---
 
+Local auth-vault save/list/show/delete and credentials set/get/delete/list run through the native policy dispatcher without starting a daemon or preparing a browser. Browser login/fill/export retain session ownership. A pending policy confirmation continues through the existing session confirmation protocol before any vault effect.
+
 # agent-browser core
 
 Fast browser automation CLI for AI agents. Chrome/Chromium via CDP, no Playwright or Puppeteer dependency. Accessibility-tree snapshots with compact `@eN` refs let agents interact with pages in ~200-400 tokens instead of parsing raw HTML.

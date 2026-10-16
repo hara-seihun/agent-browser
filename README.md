@@ -644,6 +644,8 @@ Tool invocations use the same config files and environment variables as the CLI.
 
 ## Authentication
 
+Local auth-vault save/list/show/delete and credentials set/get/delete/list run through the native policy dispatcher without starting a daemon or preparing a browser. Browser login/fill/export retain session ownership. A pending policy confirmation continues through the existing session confirmation protocol before any vault effect.
+
 agent-browser provides multiple ways to persist login sessions so you don't re-authenticate every run.
 
 ### Quick summary

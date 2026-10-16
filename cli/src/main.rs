@@ -6,6 +6,7 @@ mod connection;
 mod doctor;
 mod flags;
 mod install;
+mod local_vault;
 mod mcp;
 mod native;
 mod output;
@@ -1597,6 +1598,27 @@ fn main() {
             }
             cmd["password"] = json!(pass);
             cmd.as_object_mut().unwrap().remove("passwordStdin");
+        }
+    }
+
+    match local_vault::execute(&cmd, &flags) {
+        Ok(local_vault::Execution::Complete(response)) => {
+            let code = response.exit_code();
+            print_response_with_opts(
+                &response,
+                cmd.get("action").and_then(serde_json::Value::as_str),
+                &OutputOptions::from_flags(&flags),
+            );
+            exit(code);
+        }
+        Ok(local_vault::Execution::SessionRequired) => {}
+        Err(error) => {
+            if flags.json {
+                print_json_error_with_type(error, "local_vault_error");
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
         }
     }
 
