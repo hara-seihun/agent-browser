@@ -69,7 +69,6 @@ function() {
         const allPasswords = query('input[type="password"]');
         const emails = allEmails.filter(editable);
         const passwords = allPasswords.filter(editable);
-        if (allPasswords.length && !passwords.length) return diagnostic('refused', 'password-control-unavailable');
         const challenge = query('[data-challengetype],input[name="totpPin"],input[name="idvPin"],input[name="backupCodePin"],#totpPin,#idvPin,#backupCodePin').filter(visible);
         if (passwords.length) {
             if (passwords.length !== 1) return diagnostic('refused', 'ambiguous-password-controls');
@@ -101,6 +100,22 @@ function() {
             if (!challenge.every(el => forms[0].contains(el))) return diagnostic('refused', 'challenge-form');
             return {state: 'challenge-ready', ...binding};
         }
+        if (!emails.length && allPasswords.length) {
+            if (allPasswords.length !== 1) return diagnostic('refused', 'ambiguous-password-controls');
+            if (!account(true)) return diagnostic('refused', 'account-evidence-missing');
+            const control = allPasswords[0];
+            if (control.name !== 'Passwd') return diagnostic('refused', 'password-control-identity');
+            const buttons = query('#passwordNext button').filter(usable);
+            if (buttons.length !== 1) return diagnostic('refused', 'password-next-unavailable');
+            const binding = formBinding(control, buttons[0]);
+            if (!binding.ok) return diagnostic('refused', binding.reason);
+            const accounts = [...query('[data-identifier]').map(el => el.getAttribute('data-identifier')),
+                ...Array.from(binding.form.querySelectorAll('input[type="hidden"][name="identifier"]')).map(el => el.value)]
+                .filter(value => typeof value === 'string' && value.length > 0);
+            if (!accounts.length) return diagnostic('refused', 'account-evidence-missing');
+            if (accounts.some(value => value !== own)) return diagnostic('refused', 'account-mismatch');
+            return {state: 'waiting', reason: 'password-control-unavailable', control, button: buttons[0], ...binding};
+        }
         if (emails.length !== 1) return diagnostic(allEmails.length ? 'refused' : 'unknown', allEmails.length > 1 ? 'identifier-control-ambiguous' : 'identifier-control-unavailable');
         const control = emails[0];
         if (control.value !== '' && control.value !== own) return diagnostic('refused', 'account-mismatch');
@@ -115,7 +130,7 @@ function() {
         return records.some(record => {
             if (record.type === 'attributes') return (
                 record.target === pinned.form && ['action','method','target','id'].includes(record.attributeName) ||
-                record.target === pinned.control && ['type','name','form','id','disabled','readonly'].includes(record.attributeName) ||
+                record.target === pinned.control && (pinned.state === 'waiting' ? ['type','name','form','id'] : ['type','name','form','id','disabled','readonly']).includes(record.attributeName) ||
                 record.target === pinned.button && ['type','form','formaction','formmethod','formtarget','disabled'].includes(record.attributeName) ||
                 record.attributeName === 'data-identifier' ||
                 pinned.accounts.includes(record.target) && ['value','name','type'].includes(record.attributeName));
@@ -130,32 +145,38 @@ function() {
         const next = classify();
         if (next.state === 'refused' || next.state === 'unknown') { fail(next.reason); return null; }
         const accounts = query('[data-identifier],input[name="identifier"],input[type="email"]');
-        if (next.state !== pinned.state || next.form !== pinned.form ||
+        if ((next.state !== pinned.state && !(pinned.state === 'waiting' && next.state === 'password-ready')) || next.form !== pinned.form ||
             next.control !== pinned.control || next.button !== pinned.button || next.action !== pinned.action ||
             accounts.length !== pinned.accounts.length || accounts.some((el, i) => el !== pinned.accounts[i])) {
             fail('binding-changed'); return null;
         }
+        if (pinned.state === 'waiting' && next.state === 'password-ready') { pinned.state = next.state; cleanup(); }
         return next;
     }
     function inspect() {
         try {
             if (terminal) return terminal;
-            if (pinned) return current() ? result(pinned.state) : terminal;
+            if (pinned) {
+                const next = current();
+                return next ? next.state === 'waiting' ? diagnostic('waiting', next.reason) : result(next.state) : terminal;
+            }
             const next = classify();
-            if (!['identifier-ready','password-ready','challenge-ready'].includes(next.state)) {
+            if (!['identifier-ready','password-ready','challenge-ready','waiting'].includes(next.state)) {
                 terminal = next;
                 cleanup();
                 return terminal;
             }
             pinned = {...next, accounts: query('[data-identifier],input[name="identifier"],input[type="email"]')};
-            if (next.state === 'identifier-ready') {
+            if (next.state === 'identifier-ready' || next.state === 'waiting') {
                 observer = new view.MutationObserver(records => { if (changed(records)) fail('pinned-mutation'); });
                 observer.observe(root, {subtree: true, childList: true, attributes: true});
-                expiry = view.setTimeout(() => { fail('policy-expired'); }, 35000);
+                expiry = next.state === 'waiting'
+                    ? view.setTimeout(() => { fail(next.reason); }, 2000)
+                    : view.setTimeout(() => { fail('policy-expired'); }, 35000);
             } else {
                 cleanup();
             }
-            return result(next.state);
+            return next.state === 'waiting' ? diagnostic('waiting', next.reason) : result(next.state);
         } catch { return fail('policy-exception'); }
     }
     async function fillIdentifier() {
@@ -206,7 +227,7 @@ function() {
         dispose() { return fail('policy-disposed'); },
         readiness() {
             const observation = inspect();
-            cleanup();
+            if (observation.state !== 'waiting') cleanup();
             if (observation.state === 'identifier-ready') {
                 terminal = diagnostic('unknown', 'readiness-not-reached');
                 return terminal;

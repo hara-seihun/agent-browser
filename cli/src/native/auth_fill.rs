@@ -308,6 +308,7 @@ enum WorkStep {
     NextDispatched,
     PasswordReady,
     ChallengeReady,
+    Waiting(WorkReason),
     Refused(WorkReason),
     Unknown(WorkReason),
 }
@@ -327,9 +328,10 @@ impl WorkStep {
             Self::Unknown(reason) => {
                 json!({"kind":"work-readiness", "state":"unknown", "authentication":"not-established", "reason":reason})
             }
-            Self::IdentifierReady | Self::IdentifierFilled | Self::NextDispatched => {
-                Self::Unknown(WorkReason::NativeProtocol).public()
-            }
+            Self::IdentifierReady
+            | Self::IdentifierFilled
+            | Self::NextDispatched
+            | Self::Waiting(_) => Self::Unknown(WorkReason::NativeProtocol).public(),
         }
     }
 
@@ -341,6 +343,16 @@ impl WorkStep {
             (Some("next-dispatched"), 1) => Ok(Self::NextDispatched),
             (Some("password-ready"), 1) => Ok(Self::PasswordReady),
             (Some("challenge-ready"), 1) => Ok(Self::ChallengeReady),
+            (Some("waiting"), 2) => {
+                let reason = serde_json::from_value::<WorkReason>(value["reason"].clone())
+                    .map_err(|_| WorkReason::NativeProtocol)?;
+                match reason {
+                    WorkReason::PasswordControlUnavailable | WorkReason::ReadinessNotReached => {
+                        Ok(Self::Waiting(reason))
+                    }
+                    _ => Err(WorkReason::NativeProtocol),
+                }
+            }
             (Some("refused"), 2) | (Some("unknown"), 2) => {
                 let reason = serde_json::from_value::<WorkReason>(value["reason"].clone())
                     .map_err(|_| WorkReason::NativeProtocol)?;
@@ -433,6 +445,7 @@ async fn work_step(
         "fillIdentifier" => "function() { return this.fillIdentifier(); }",
         "clickNext" => "function() { return this.clickNext(); }",
         "readiness" => "function() { return this.readiness(); }",
+        "dispose" => "function() { return this.dispose(); }",
         _ => return Err(WorkReason::NativeProtocol),
     };
     let value = state.browser.as_ref().ok_or(WorkReason::TargetUnavailable)?.client.send_command("Runtime.callFunctionOn", Some(json!({
@@ -488,18 +501,50 @@ async fn work_backend(
         .ok_or(WorkReason::NativeProtocol)
 }
 
+async fn work_observe(
+    state: &DaemonState,
+    location: &FieldLocation,
+    page: &WorkPage,
+    method: &str,
+    deadline: Instant,
+    after_next: bool,
+) -> Result<WorkStep, WorkReason> {
+    let end = deadline.min(Instant::now() + std::time::Duration::from_secs(2));
+    loop {
+        let step = work_step(state, location, page, method).await?;
+        let reason = match step {
+            WorkStep::Waiting(reason) => reason,
+            WorkStep::Unknown(WorkReason::ReadinessNotReached) if after_next => {
+                WorkReason::ReadinessTimeout
+            }
+            terminal => return Ok(terminal),
+        };
+        if Instant::now() >= end {
+            work_step(state, location, page, "dispose").await?;
+            return Ok(if after_next {
+                WorkStep::Unknown(reason)
+            } else {
+                WorkStep::Refused(reason)
+            });
+        }
+        tokio::time::sleep_until(end.min(Instant::now() + std::time::Duration::from_millis(25)))
+            .await;
+    }
+}
+
 async fn work_identifier_transition(
     state: &DaemonState,
     location: &FieldLocation,
+    deadline: Instant,
 ) -> Result<WorkStep, WorkReason> {
     let page = work_page(state, location).await?;
-    match work_step(state, location, &page, "inspect").await? {
+    match work_observe(state, location, &page, "inspect", deadline, false).await? {
         terminal @ (WorkStep::PasswordReady
         | WorkStep::ChallengeReady
         | WorkStep::Refused(_)
         | WorkStep::Unknown(_)) => return Ok(terminal),
         WorkStep::IdentifierReady => {}
-        WorkStep::IdentifierFilled | WorkStep::NextDispatched => {
+        WorkStep::IdentifierFilled | WorkStep::NextDispatched | WorkStep::Waiting(_) => {
             return Err(WorkReason::NativeProtocol)
         }
     }
@@ -519,21 +564,15 @@ async fn work_identifier_transition(
         }
         _ => return Err(WorkReason::NativeProtocol),
     }
-    // Only the intended Next permits a new loader; target/session/frame remain fixed.
-    loop {
-        let ready = work_page(state, location).await?;
-        if ready.bound.session != page.bound.session || ready.bound.frame != page.bound.frame {
-            return Err(WorkReason::NativeBinding);
-        }
-        match work_step(state, location, &ready, "readiness").await? {
-            terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady) => return Ok(terminal),
-            WorkStep::Unknown(WorkReason::ReadinessNotReached) => {}
-            WorkStep::Refused(reason) | WorkStep::Unknown(reason) => {
-                return Ok(WorkStep::Unknown(reason))
-            }
-            _ => return Err(WorkReason::NativeProtocol),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    // Only the intended Next permits a new loader; pending observation keeps one pinned policy.
+    let ready = work_page(state, location).await?;
+    if ready.bound.session != page.bound.session || ready.bound.frame != page.bound.frame {
+        return Err(WorkReason::NativeBinding);
+    }
+    match work_observe(state, location, &ready, "readiness", deadline, true).await? {
+        terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady) => Ok(terminal),
+        WorkStep::Refused(reason) | WorkStep::Unknown(reason) => Ok(WorkStep::Unknown(reason)),
+        _ => Err(WorkReason::NativeProtocol),
     }
 }
 
@@ -567,7 +606,8 @@ async fn work_identifier_readiness(
     let end = deadline
         .checked_sub(std::time::Duration::from_millis(100))
         .unwrap_or(deadline);
-    let outcome = tokio::time::timeout_at(end, work_identifier_transition(state, &location)).await;
+    let outcome =
+        tokio::time::timeout_at(end, work_identifier_transition(state, &location, end)).await;
     let result = match outcome {
         Ok(Ok(state)) => state,
         Ok(Err(reason)) => WorkStep::Unknown(reason),

@@ -118,7 +118,7 @@ for (const [name, mutate] of [
     ['wrong password name', f => f.document.querySelector('input[type="password"]').name = 'Other'],
     ['disabled password', f => f.document.querySelector('input[type="password"]').disabled = true],
     ['Next on different form', f => { f.document.querySelector('form').id = 'pwd'; f.document.body.insertAdjacentHTML('beforeend', '<form id="other" method="post"></form>'); f.document.querySelector('button').setAttribute('form', 'other'); }],
-]) check(`password refusal ${name}`, {html: passwordHTML}, f => { mutate(f); is(f.policy.readiness(), 'refused'); assert.equal(f.counters.clicks, 0); });
+]) check(`password refusal ${name}`, {html: passwordHTML}, f => { mutate(f); if(name==='disabled password'){why(f.policy.readiness(),'waiting','password-control-unavailable');f.expirePending();} is(f.policy.readiness(), 'refused'); assert.equal(f.counters.clicks, 0); });
 check('existing challenge, own POST identity, never handles or submits challenge', {html: challengeHTML, url: 'https://accounts.google.com/v3/signin/challenge/totp'}, async f => {
     is(f.policy.readiness(), 'challenge-ready'); is(await f.policy.fillIdentifier(), 'refused'); assert.equal(f.counters.setters, 0); assert.equal(f.counters.clicks, 0);
 });
@@ -232,6 +232,7 @@ for (const [name, html, reason] of [
     ['mixed controls', passwordHTML.replace('<input type="password"', '<input type="email"><input type="password"'), 'mixed-login-controls'],
 ]) check('causal closed discriminator: '+name, {html}, f => {
     const expected = reason === 'identifier-control-unavailable' ? 'unknown' : 'refused';
+    if(name==='disabled password'){why(f.policy.inspect(),'waiting','password-control-unavailable');f.expirePending();}
     why(f.policy.inspect(), expected, reason);why(f.policy.dispose(), expected, reason);
     assert.equal(f.counters.setters, 0);assert.equal(f.counters.clicks, 0);clean(f);
 });
@@ -252,4 +253,38 @@ check('property-only identifier value loss has its own closed cause', {}, async 
 check('deadline reason survives a repeated Next and disposal', {}, f => {
     is(f.policy.inspect(),'identifier-ready');f.expire();
     why(f.policy.clickNext(),'refused','policy-expired');why(f.policy.dispose(),'refused','policy-expired');clean(f);
+});
+check('active identifier ignores dormant password while preserving one setter and Next', {html:identifierHTML.replace('<input id=', '<input type="password" name="Passwd" hidden><input id=')}, async f => {
+    is(f.policy.inspect(),'identifier-ready');is(await f.policy.fillIdentifier(),'identifier-filled');is(f.policy.clickNext(),'next-dispatched');
+    assert.equal(f.counters.setters,1);assert.equal(f.counters.clicks,1);clean(f);
+});
+check('active challenge ignores dormant password without setting or clicking', {html:challengeHTML.replace('<input id="totpPin"','<input type="password" name="Passwd" hidden><input id="totpPin"'),url:'https://accounts.google.com/v3/signin/challenge/totp'}, f => {
+    is(f.policy.readiness(),'challenge-ready');assert.equal(f.counters.setters,0);assert.equal(f.counters.clicks,0);clean(f);
+});
+for(const attribute of ['hidden','disabled','readonly'])check('coherent inactive own password waits and becomes ready: '+attribute,{html:passwordHTML.replace('type="password"',`type="password" ${attribute}`)},async f=>{
+    why(f.policy.inspect(),'waiting','password-control-unavailable');
+    const pinned=f.document.querySelector('[name=Passwd]');f.window.setTimeout(()=>pinned.removeAttribute(attribute),300);
+    await new Promise(resolve=>f.window.setTimeout(resolve,350));
+    is(f.policy.readiness(),'password-ready');assert.equal(f.document.querySelector('[name=Passwd]'),pinned);
+    assert.equal(f.counters.setters,0);assert.equal(f.counters.clicks,0);clean(f);
+});
+for(const attribute of ['hidden','disabled','readonly'])check('permanently inactive password ends refused with original cause: '+attribute,{html:passwordHTML.replace('type="password"',`type="password" ${attribute}`)},f=>{
+    why(f.policy.inspect(),'waiting','password-control-unavailable');assert.equal(f.resources.observers.size,1);
+    why(f.policy.readiness(),'waiting','password-control-unavailable');assert.equal(f.resources.observers.size,1);
+    f.expirePending();why(f.policy.readiness(),'refused','password-control-unavailable');
+    assert.equal(f.counters.setters,0);assert.equal(f.counters.clicks,0);clean(f);
+});
+for(const [name,change,reason] of [
+ ['form action swap/restore',f=>{const e=f.document.querySelector('form'),v=e.action;e.action='/different';e.action=v;},'pinned-mutation'],
+ ['form replacement',f=>{const e=f.document.querySelector('form');e.replaceWith(e.cloneNode(true));},'pinned-mutation'],
+ ['control replacement',f=>{const e=f.document.querySelector('[name=Passwd]');e.replaceWith(e.cloneNode(true));},'pinned-mutation'],
+ ['account replacement',f=>{const e=f.document.querySelector('[data-identifier]');e.replaceWith(e.cloneNode(true));},'pinned-mutation'],
+ ['foreign account insertion',f=>f.document.body.insertAdjacentHTML('beforeend','<span data-identifier="foreign@example.test"></span>'),'account-mismatch'],
+ ['new own account node',f=>f.document.body.insertAdjacentHTML('beforeend',`<span data-identifier="${identity}"></span>`),'binding-changed'],
+])check('waiting keeps exact original pins: '+name,{html:passwordHTML.replace('type="password"','type="password" hidden')},f=>{
+    why(f.policy.inspect(),'waiting','password-control-unavailable');change(f);
+    why(f.policy.readiness(),'refused',reason);assert.equal(f.counters.setters,0);assert.equal(f.counters.clicks,0);clean(f);
+});
+check('pending cancellation releases observer/deadline without any effect',{html:passwordHTML.replace('type="password"','type="password" hidden')},f=>{
+    why(f.policy.readiness(),'waiting','password-control-unavailable');why(f.policy.dispose(),'refused','policy-disposed');clean(f);
 });

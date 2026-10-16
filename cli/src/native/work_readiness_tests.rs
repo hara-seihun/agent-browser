@@ -41,6 +41,12 @@ enum Case {
     ExceptionAfterClick,
     LostAck,
     PendingReadiness,
+    InitialWaiting,
+    InitialWaitingForever,
+    InitialWaitingBindingChange,
+    ReadinessWaiting,
+    ReadinessWaitingForever,
+    ReadinessWaitingBindingChange,
 }
 
 #[derive(Default)]
@@ -180,7 +186,15 @@ impl Fixture {
                                     }
                                     "function() { return this.inspect(); }" => {
                                         t.inspect += 1;
-                                        if t.factory != 1 || t.inspect != 1 {
+                                        if t.factory != 1
+                                            || (t.inspect != 1
+                                                && !matches!(
+                                                    case,
+                                                    Case::InitialWaiting
+                                                        | Case::InitialWaitingForever
+                                                        | Case::InitialWaitingBindingChange
+                                                ))
+                                        {
                                             t.violations
                                                 .push("inspect without one fresh factory".into());
                                         }
@@ -188,6 +202,23 @@ impl Fixture {
                                             generation += 1;
                                         }
                                         match case {
+                                            Case::InitialWaiting
+                                            | Case::InitialWaitingForever
+                                            | Case::InitialWaitingBindingChange => {
+                                                if case == Case::InitialWaitingBindingChange
+                                                    && t.inspect == 2
+                                                {
+                                                    generation += 1;
+                                                }
+                                                if case == Case::InitialWaiting && t.inspect >= 3 {
+                                                    page_state("password-ready")
+                                                } else {
+                                                    page_failure(
+                                                        "waiting",
+                                                        "password-control-unavailable",
+                                                    )
+                                                }
+                                            }
                                             Case::ExistingPassword => page_state("password-ready"),
                                             Case::ExistingChallenge => {
                                                 page_state("challenge-ready")
@@ -234,12 +265,34 @@ impl Fixture {
                                             page_state("next-dispatched")
                                         }
                                     }
+                                    "function() { return this.dispose(); }" => {
+                                        page_failure("refused", "policy-disposed")
+                                    }
                                     "function() { return this.readiness(); }" => {
                                         t.readiness += 1;
                                         if t.clicks != 1 {
                                             t.violations.push("readiness before one Next".into());
                                         }
                                         match case {
+                                            Case::ReadinessWaiting
+                                            | Case::ReadinessWaitingForever
+                                            | Case::ReadinessWaitingBindingChange => {
+                                                if case == Case::ReadinessWaitingBindingChange
+                                                    && t.readiness == 2
+                                                {
+                                                    generation += 1;
+                                                }
+                                                if case == Case::ReadinessWaiting
+                                                    && t.readiness >= 3
+                                                {
+                                                    page_state("password-ready")
+                                                } else {
+                                                    page_failure(
+                                                        "waiting",
+                                                        "password-control-unavailable",
+                                                    )
+                                                }
+                                            }
                                             Case::Challenge => page_state("challenge-ready"),
                                             Case::ForeignReadiness => {
                                                 page_failure("refused", "account-mismatch")
@@ -673,4 +726,60 @@ async fn work_readiness_public_dispatch_timeout_cancel_and_lost_ack_do_not_repla
         .await;
     assert_eq!(reply["success"], true, "{reply}");
     f.assert_trace(1, 1);
+}
+
+#[tokio::test]
+async fn work_readiness_public_dispatch_waits_on_one_pinned_policy_without_next_replay() {
+    let _env = env_guard();
+    for (case, expected, reason, factories, clicks) in [
+        (Case::InitialWaiting, "password-ready", None, 1, 0),
+        (
+            Case::InitialWaitingForever,
+            "refused",
+            Some("password-control-unavailable"),
+            1,
+            0,
+        ),
+        (
+            Case::InitialWaitingBindingChange,
+            "unknown",
+            Some("native-binding"),
+            1,
+            0,
+        ),
+        (Case::ReadinessWaiting, "password-ready", None, 2, 1),
+        (
+            Case::ReadinessWaitingForever,
+            "unknown",
+            Some("password-control-unavailable"),
+            2,
+            1,
+        ),
+        (
+            Case::ReadinessWaitingBindingChange,
+            "unknown",
+            Some("native-binding"),
+            2,
+            1,
+        ),
+    ] {
+        let mut f = Fixture::new(case).await;
+        let request = f.request();
+        let reply = f.dispatch(request).await;
+        assert_eq!(reply["success"], true, "{case:?}: {reply}");
+        assert_eq!(reply["data"]["state"], expected, "{case:?}: {reply}");
+        assert_eq!(
+            reply["data"]["reason"].as_str(),
+            reason,
+            "{case:?}: {reply}"
+        );
+        assert!(f.provider_calls().is_empty());
+        nonleak(&reply);
+        f.assert_trace(clicks, clicks);
+        assert_eq!(
+            f.trace.lock().unwrap().factory,
+            factories,
+            "pending must not rebind policy"
+        );
+    }
 }

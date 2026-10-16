@@ -39,6 +39,13 @@ export function fixture({html = identifierHTML, url = 'https://accounts.google.c
         window.clearTimeout(id);
         timer.callback();
     };
+    const expirePending = () => {
+        const pending = [...resources.timers].find(([, timer]) => timer.delay === 2000);
+        if (!pending) throw new Error('No live password observation deadline');
+        const [id, timer] = pending;
+        window.clearTimeout(id);
+        timer.callback();
+    };
     const counters = {setters: 0, inputs: 0, changes: 0, clicks: 0, provider: 0};
     const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
     Object.defineProperty(window.HTMLInputElement.prototype, 'value', {...descriptor, set(value) {
@@ -49,5 +56,5 @@ export function fixture({html = identifierHTML, url = 'https://accounts.google.c
     document.addEventListener('change', () => counters.changes++);
     document.addEventListener('click', event => { counters.clicks++; event.preventDefault(); });
     const policy = window.eval(`(${factorySource})()`);
-    return {dom, window, document, policy, counters, resources, expire, fresh: () => window.eval(`(${factorySource})()`), close: () => window.close()};
+    return {dom, window, document, policy, counters, resources, expire, expirePending, fresh: () => window.eval(`(${factorySource})()`), close: () => window.close()};
 }
