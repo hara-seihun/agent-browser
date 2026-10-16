@@ -5951,7 +5951,7 @@ mod tests {
             "click #submit",
             "open example.com",
             "tab list",
-            "session info",
+            "cookies",
             "webmcp list",
             "read example.com",
             "wait #ready",

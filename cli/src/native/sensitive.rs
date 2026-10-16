@@ -897,24 +897,7 @@ where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
-    client
-        .observation_progress
-        .before(
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
-            async {
-                loop {
-                    match observe_inventory_with(client, top_session, iframe_sessions, &mut collect)
-                        .await
-                    {
-                        Ok(observed) => return Ok(observed),
-                        Err(InventoryError::Changed(_)) => tokio::task::yield_now().await,
-                        Err(error) => return Err(error),
-                    }
-                }
-            },
-        )
-        .await
-        .map_err(InventoryError::Deadline)?
+    observe_inventory_with(client, top_session, iframe_sessions, &mut collect).await
 }
 
 #[derive(Debug, PartialEq, Eq)]

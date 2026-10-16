@@ -30,13 +30,13 @@ pub async fn run_daemon(session: &str) {
         Ok(raw) => match crate::commands::parse_timeout_ms(&raw) {
             Ok(ms) => ms,
             Err(error) => {
-                eprintln!("invalid_timeout: {}", error.format());
+                eprintln!("invalid_input: {}", error.format());
                 process::exit(1);
             }
         },
         Err(env::VarError::NotPresent) => crate::commands::DEFAULT_COMMAND_TIMEOUT_MS,
         Err(env::VarError::NotUnicode(_)) => {
-            eprintln!("invalid_timeout: AGENT_BROWSER_DEFAULT_TIMEOUT must be UTF-8 milliseconds");
+            eprintln!("invalid_input: AGENT_BROWSER_DEFAULT_TIMEOUT must be UTF-8 milliseconds");
             process::exit(1);
         }
     };
@@ -551,12 +551,12 @@ async fn dispatch_command(
     let budget_ms = match crate::commands::command_timeout_ms(cmd) {
         Ok(ms) => ms,
         Err(error) => {
-            return serde_json::json!({"id":id,"success":false,"code":"invalid_timeout", "executed":false,"error":format!("invalid_timeout: {}", error.format())})
+            return serde_json::json!({"id":id,"success":false,"code":"invalid_input", "executed":false,"error":format!("invalid_input: {}", error.format())})
         }
     };
     let Some(deadline) = std::time::Instant::now().checked_add(Duration::from_millis(budget_ms))
     else {
-        return serde_json::json!({"id":id,"success":false,"code":"invalid_timeout", "executed":false,"error":"timeout exceeds the supported clock range"});
+        return serde_json::json!({"id":id,"success":false,"code":"invalid_input", "executed":false,"error":"timeout exceeds the supported clock range"});
     };
     let mut s = if matches!(
         action,
@@ -949,13 +949,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_launch_preparation_is_rejected_without_effects() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        for preparations in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([{"action":"navigate", "url":"https://example.com"}]),
+            serde_json::json!([{"action":"launch", "launchPreparations":[]}]),
+        ] {
+            let response = dispatch_command(
+                &serde_json::json!({"id":"invalid", "action":"session_info", "timeout":1000,
+                    "launchPreparations":preparations}),
+                &state,
+                &IdleActivity::new(),
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert_eq!(response["code"], "invalid_input", "{response}");
+            assert_eq!(response["executed"], false);
+            assert!(state.lock().await.browser.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_direct_command_budgets_have_stable_error_code() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        for timeout in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!("1000"),
+            serde_json::json!(u64::MAX),
+        ] {
+            let response = dispatch_command(
+                &serde_json::json!({"id":"bad-budget", "action":"snapshot", "timeout":timeout}),
+                &state,
+                &IdleActivity::new(),
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert_eq!(response["code"], "invalid_input", "{response}");
+            assert_eq!(response["executed"], false);
+        }
+    }
+
+    #[tokio::test]
     async fn command_deadline_queue_expiry_never_executes_and_recovers() {
         let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
         let held = state.lock().await;
         for action in ["snapshot", "click"] {
             let start = std::time::Instant::now();
             let response = dispatch_command(
-                &serde_json::json!({"id":"queued", "action":action, "timeout":40}),
+                &serde_json::json!({"id":"queued", "action":action, "timeout":40,
+                    "launchPreparations":[{"action":"launch", "engine":"must-not-execute"}]}),
                 &state,
                 &IdleActivity::new(),
                 &AtomicBool::new(false),

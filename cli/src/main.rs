@@ -1762,6 +1762,7 @@ fn main() {
     let _daemon_was_already_running = daemon_result.already_running;
     let daemon_restarted = daemon_result.restarted;
 
+    let mut launch_preparations = Vec::new();
     // Auto-connect to existing browser. This is sent even when the daemon is
     // already running so launch compatibility stays idempotent.
     if flags.auto_connect {
@@ -1790,23 +1791,7 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "Auto-connect failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        launch_preparations.push(launch_cmd);
     }
 
     // Connect via CDP if --cdp flag is set
@@ -1891,46 +1876,14 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "CDP connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        launch_preparations.push(launch_cmd);
     }
 
     // Launch with cloud provider if -p flag is set.
     if let Some(ref provider) = flags.provider {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "Provider connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
-            exit(1);
-        }
+        launch_preparations.push(launch_cmd);
     }
 
     // Launch headed browser or configure browser options (without CDP or provider)
@@ -2051,35 +2004,7 @@ fn main() {
             launch_cmd["engine"] = json!(engine);
         }
 
-        match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if !resp.success => {
-                // Launch command failed (e.g., invalid state file, profile error)
-                let error_msg = resp
-                    .error
-                    .unwrap_or_else(|| "Browser launch failed".to_string());
-                if flags.json {
-                    print_json_error(error_msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), error_msg);
-                }
-                exit(1);
-            }
-            Err(e) => {
-                if flags.json {
-                    print_json_error(e);
-                } else {
-                    eprintln!(
-                        "{} Could not configure browser: {}",
-                        color::error_indicator(),
-                        e
-                    );
-                }
-                exit(1);
-            }
-            Ok(_) => {
-                // Launch succeeded
-            }
-        }
+        launch_preparations.push(launch_cmd);
     }
 
     // Handle batch command: from args or stdin
@@ -2091,10 +2016,17 @@ fn main() {
                 .map(commands::shell_words_split)
                 .collect::<Vec<Vec<String>>>()
         });
-        run_batch(&flags, &daemon_opts, bail, arg_commands);
+        run_batch(
+            &flags,
+            &daemon_opts,
+            bail,
+            arg_commands,
+            &launch_preparations,
+        );
         return;
     }
 
+    attach_launch_preparations(&mut cmd, &launch_preparations);
     let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
@@ -2131,6 +2063,12 @@ fn main() {
     }
 }
 
+fn attach_launch_preparations(command: &mut serde_json::Value, preparations: &[serde_json::Value]) {
+    if !preparations.is_empty() {
+        command["launchPreparations"] = json!(preparations);
+    }
+}
+
 /// send_command plus the daemon-shutdown-race recovery: ensure_daemon no
 /// longer pays a settle-sleep on every invocation, so a daemon that exited
 /// right after its liveness check surfaces as an unreachable socket on the
@@ -2155,6 +2093,7 @@ fn run_batch(
     daemon_opts: &DaemonOptions,
     bail: bool,
     arg_commands: Option<Vec<Vec<String>>>,
+    launch_preparations: &[serde_json::Value],
 ) {
     let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
         cmds
@@ -2246,6 +2185,7 @@ fn run_batch(
 
         attach_pin_tab_to_command(&mut parsed, flags);
 
+        attach_launch_preparations(&mut parsed, launch_preparations);
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 let response_exit = resp.exit_code();
@@ -2325,6 +2265,28 @@ fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_preparation_keeps_original_command_budget_and_identity() {
+        let argv = vec![
+            "snapshot".to_string(),
+            "--timeout".to_string(),
+            "1000".to_string(),
+        ];
+        let flags = parse_flags(&argv);
+        let mut command = parse_command(&argv, &flags).unwrap();
+        let original = command.clone();
+        let preparation =
+            json!({"id":"launch", "action":"launch", "cdpUrl":"http://localhost:9222"});
+        attach_launch_preparations(&mut command, &[preparation.clone()]);
+        assert_eq!(command["launchPreparations"], json!([preparation]));
+        command
+            .as_object_mut()
+            .unwrap()
+            .remove("launchPreparations");
+        assert_eq!(command, original);
+        assert_eq!(commands::command_timeout_ms(&command).unwrap(), 1000);
+    }
 
     #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {

@@ -2686,8 +2686,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let budget_ms = match crate::commands::command_timeout_ms(cmd) {
         Ok(ms) => ms,
         Err(error) => {
-            let mut response = error_response(id, &format!("invalid_timeout: {}", error.format()));
-            response["code"] = json!("invalid_timeout");
+            let mut response = error_response(id, &format!("invalid_input: {}", error.format()));
+            response["code"] = json!("invalid_input");
             response["executed"] = json!(false);
             return response;
         }
@@ -2697,7 +2697,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     else {
         return error_response(
             id,
-            "invalid_timeout: timeout exceeds the supported clock range",
+            "invalid_input: timeout exceeds the supported clock range",
         );
     };
     let deadline = match COMMAND_DEADLINE.try_with(|parent| *parent) {
@@ -2774,6 +2774,34 @@ pub(crate) fn command_not_executed_response(cmd: &Value) -> Value {
 }
 
 async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
+    if let Some(preparations) = cmd.get("launchPreparations") {
+        let Some(preparations) = preparations.as_array().filter(|items| {
+            items.iter().all(|item| {
+                item.is_object()
+                    && item["action"] == "launch"
+                    && item.get("launchPreparations").is_none()
+            })
+        }) else {
+            let mut response = error_response(
+                cmd["id"].as_str().unwrap_or(""),
+                "launchPreparations must contain only launch commands",
+            );
+            response["code"] = json!("invalid_input");
+            response["executed"] = json!(false);
+            return response;
+        };
+        for preparation in preparations {
+            let mut preparation = preparation.clone();
+            preparation["timeout"] =
+                json!(crate::commands::command_timeout_ms(cmd).expect("validated command budget"));
+            let mut response = Box::pin(execute_command_inner(&preparation, state, None)).await;
+            if response["success"] != true || response.get("code").is_some() {
+                response["id"] = cmd["id"].clone();
+                response["preparationAction"] = json!("launch");
+                return response;
+            }
+        }
+    }
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     if !matches!(action, "auth_login" | "auth_fill" | "auth_export") {
         return Box::pin(execute_command_inner(cmd, state, None)).await;
@@ -14962,7 +14990,7 @@ mod tests {
             ] {
                 inventory
                     .reply_delays
-                    .insert(method.into(), std::time::Duration::from_millis(400));
+                    .insert(method.into(), std::time::Duration::from_millis(750));
             }
         }
         state.browser = Some(fixture.manager);

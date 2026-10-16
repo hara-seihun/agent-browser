@@ -218,6 +218,10 @@ impl Drop for PendingGuard {
         if self.done {
             return;
         }
+        if let Ok(mut pending) = self.pending.try_lock() {
+            pending.remove(&self.id);
+            return;
+        }
         let pending = self.pending.clone();
         let id = self.id;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

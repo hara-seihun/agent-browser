@@ -67,10 +67,6 @@ impl Default for ReadOptions {
     }
 }
 
-pub fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
 pub fn parse_timeout_ms(raw: &str) -> Result<u64, String> {
     let ms = raw
         .parse::<u64>()
