@@ -1570,6 +1570,13 @@ fn main() {
         }
     };
 
+    if let Some(path) = flags.state.as_deref() {
+        if let Err(error) = native::state::validate_state_file(path) {
+            print_json_error_with_type(error, "invalid_storage_state");
+            exit(1);
+        }
+    }
+
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
         if cmd.get("password").is_some() {

@@ -831,6 +831,23 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // be parsed only for --text/--download and silently ignored
             // elsewhere. Extract it first so variants parse independently.
             let mut rest = rest.clone();
+            let mut element_state: Option<&str> = None;
+            if let Some(idx) = rest.iter().position(|&s| s == "--state") {
+                let value = *rest
+                    .get(idx + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "wait --state".into(),
+                        usage: "wait <selector> --state <attached|detached|visible|hidden>",
+                    })?;
+                if !matches!(value, "attached" | "detached" | "visible" | "hidden") {
+                    return Err(ParseError::InvalidValue {
+                        message: "Invalid wait element state".into(),
+                        usage: "wait <selector> --state <attached|detached|visible|hidden>",
+                    });
+                }
+                element_state = Some(value);
+                rest.drain(idx..=idx + 1);
+            }
             let mut timeout_ms: Option<u64> = None;
             if let Some(idx) = rest.iter().position(|&s| s == "--timeout") {
                 // Error rather than silently drop a malformed value; a dropped
@@ -847,7 +864,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 })?);
                 rest.drain(idx..=idx + 1);
             }
+            if element_state.is_some()
+                && (rest.len() != 1 || rest[0].starts_with('-') || rest[0].parse::<u64>().is_ok())
+            {
+                return Err(ParseError::InvalidValue {
+                    message: "Wait element state requires exactly one selector".into(),
+                    usage: "wait <selector> --state <attached|detached|visible|hidden>",
+                });
+            }
             let with_timeout = |mut cmd: Value| {
+                if let Some(value) = element_state {
+                    cmd["state"] = json!(value);
+                }
                 if let Some(ms) = timeout_ms {
                     cmd["timeout"] = json!(ms);
                 }

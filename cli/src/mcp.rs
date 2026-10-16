@@ -926,7 +926,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
+        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element state on the current page.", json!({ "selector": selector_schema(), "state": { "type": "string", "enum": ["attached", "detached", "visible", "hidden"] } }), &["selector"]),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
         wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
@@ -2866,6 +2866,12 @@ fn call_wait_flag(
         args.push(value);
     } else {
         args.push(value);
+    }
+    if value_key == "selector" {
+        if let Some(state) = optional_string(arguments, "state")? {
+            args.push("--state".to_string());
+            args.push(state);
+        }
     }
     if let Some(timeout) = optional_u64(arguments, "waitTimeoutMs")? {
         args.push("--timeout".to_string());

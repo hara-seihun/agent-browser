@@ -293,6 +293,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--enable",
         "--profile",
         "--state",
+        "--storage-state",
         "--proxy",
         "--proxy-bypass",
         "--args",
@@ -685,10 +686,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut command_name: Option<&str> = None;
     while i < args.len() {
         let arg = args[i].as_str();
         if !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            if command_name.is_none() {
+                command_name = Some(arg);
+            }
         }
         match arg {
             s if s.starts_with("--restore=") => {
@@ -859,7 +864,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
-            "--state" => {
+            "--state" if command_name == Some("wait") => {
+                i += 1;
+            }
+            "--state" | "--storage-state" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.state = Some(s.clone());
                     flags.cli_state = true;
@@ -1166,6 +1174,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--enable",
         "--profile",
         "--state",
+        "--storage-state",
         "--proxy",
         "--proxy-bypass",
         "--args",
@@ -1192,6 +1201,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut command_name: Option<&str> = None;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -1203,7 +1213,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str())
+            && !(arg == "--state" && command_name == Some("wait"))
+        {
             skip_next = true;
             i += 1;
             continue;
@@ -1230,12 +1242,19 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            if command_name.is_none() {
+                command_name = Some(arg.as_str());
+            }
         }
         result.push(arg.clone());
         i += 1;
     }
     result
 }
+
+#[cfg(test)]
+#[path = "wait_state_scope_tests.rs"]
+mod wait_state_scope_tests;
 
 #[cfg(test)]
 mod tests {

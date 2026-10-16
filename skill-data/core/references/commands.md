@@ -579,3 +579,6 @@ AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","
 ## Private field export
 
 `auth export --selector <css> --target <target-id> --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]` exports one unique visible input/textarea value (readonly allowed), or a text-only element, through pinned live document/field identity. CSS only; all four flags required. No launch/navigation/submit/retry. Linux nonroot daemon, no symlink components, existing exact0700 own-UID parent; new exclusive0600 file. Receipt only `path`/`byteCount`; values/hashes never printed. Stop captures. Timeout1..300000ms, initial180000ms unless configured; outer tools allow ten-second IPC margin. MCP `agent_browser_auth_export` adds `exportTimeoutMs`. Lost response/commit uncertainty requires metadata-only path reconciliation, never replay. See [authentication.md](authentication.md#private-field-export).
+
+
+Global `--storage-state <path>` loads a saved authentication file; `--state <path>` before `wait` retains that meaning. After `wait`, `--state` accepts only `attached`, `detached`, `visible` or `hidden` and requires one selector. Invalid saved-state files are rejected before replacing an existing browser. MCP selector waits accept the same optional `state` enum.

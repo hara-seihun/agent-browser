@@ -4112,7 +4112,8 @@ Authentication:
   --restore-check-fn <js>    Validate restored state against a truthy JS expression
   --session-name <name>      Legacy alias for restore persistence key
                              (or AGENT_BROWSER_SESSION_NAME env)
-  --state <path>             Load saved auth state (cookies + storage) from JSON file
+  --storage-state <path>     Load saved auth state from JSON (global)
+  --state <path>             Global alias; after wait selects element state
                              (or AGENT_BROWSER_STATE env)
   --auto-connect             Connect to a running Chrome to reuse its auth state
                              Tip: agent-browser --auto-connect state save ./auth.json

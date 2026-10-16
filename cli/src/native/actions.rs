@@ -5386,6 +5386,13 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 // ---------------------------------------------------------------------------
 
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(value) = cmd.get("storageState") {
+        let path = value
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("storageState must be a nonempty file path")?;
+        state::validate_state_file(path)?;
+    }
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
     // Absent field falls back to the daemon's spawn-time env (mirrors
     // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
@@ -7292,7 +7299,7 @@ async fn wait_for_selector(
             }})()"#,
             sel = serde_json::to_string(selector).unwrap_or_default()
         ),
-        _ => format!(
+        "visible" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
                 if (!el) return false;
@@ -7302,6 +7309,7 @@ async fn wait_for_selector(
             }})()"#,
             sel = serde_json::to_string(selector).unwrap_or_default()
         ),
+        _ => return Err("Invalid wait element state".into()),
     };
 
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
@@ -7372,7 +7380,7 @@ async fn wait_for_selector_in_frame(
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
             }})()"#,
         ),
-        _ => format!(
+        "visible" => format!(
             r#"(() => {{
                 const el = doc.querySelector({sel});
                 if (!el) return false;
@@ -7381,6 +7389,7 @@ async fn wait_for_selector_in_frame(
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
             }})()"#,
         ),
+        _ => return Err("Invalid wait element state".into()),
     };
     let function = format!(
         "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
