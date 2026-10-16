@@ -13856,8 +13856,10 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 mod tests {
     #[test]
     fn fill_render_timeout_preserves_dispatched_unknown_outcome() {
-        let response =
-            super::error_response("original", "fill_render_timeout: unfinished rendering");
+        let error = super::super::browser::to_ai_friendly_error(
+            "fill_render_timeout: unfinished rendering",
+        );
+        let response = super::error_response("original", &error);
         assert_eq!(response["id"], "original");
         assert_eq!(response["success"], false);
         assert_eq!(response["code"], "fill_render_timeout");

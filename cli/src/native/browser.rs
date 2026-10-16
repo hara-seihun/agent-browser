@@ -194,6 +194,14 @@ fn active_page_index_after_add(
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
+    if error.split_once(": ").is_some_and(|(code, _)| {
+        code.starts_with(|ch: char| ch.is_ascii_alphabetic())
+            && code
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+    }) {
+        return error.to_string();
+    }
     let lower = error.to_lowercase();
     // Classify a genuine locator miss first: its anchored shape ("No element
     // found: ...") echoes the selector/name, which may itself contain a word like
@@ -2826,6 +2834,18 @@ mod tests {
             to_ai_friendly_error("element intercepted by another element"),
             "Another element is covering the target element. Try scrolling or closing overlays."
         );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_preserves_structured_codes() {
+        for error in [
+            "fill_render_timeout: Fill dispatched but rendering did not complete; do not replay",
+            "auth_fill_target_changed: timeout after input dispatch",
+            "tab_state_unavailable: element is not visible",
+            "SENSITIVE_OUTPUT_UNSUPPORTED: timeout observing protected controls",
+        ] {
+            assert_eq!(to_ai_friendly_error(error), error);
+        }
     }
 
     #[test]
