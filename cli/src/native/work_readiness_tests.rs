@@ -69,6 +69,10 @@ fn page_state(state: &str) -> Value {
     json!({"result":{"type":"object","value":{"state":state}}})
 }
 
+fn page_failure(state: &str, reason: &str) -> Value {
+    json!({"result":{"type":"object","value":{"state":state,"reason":reason}}})
+}
+
 fn password_policy_constant(name: &str) -> &'static str {
     let source = include_str!("auth_fill.rs");
     let prefix = format!("const {name}: &str = r##\"");
@@ -183,12 +187,16 @@ impl Fixture {
                                         if case == Case::LoaderBeforeFill {
                                             generation += 1;
                                         }
-                                        page_state(match case {
-                                            Case::ExistingPassword => "password-ready",
-                                            Case::ExistingChallenge => "challenge-ready",
-                                            Case::ForeignAccount => "refused",
-                                            _ => "identifier-ready",
-                                        })
+                                        match case {
+                                            Case::ExistingPassword => page_state("password-ready"),
+                                            Case::ExistingChallenge => {
+                                                page_state("challenge-ready")
+                                            }
+                                            Case::ForeignAccount => {
+                                                page_failure("refused", "account-mismatch")
+                                            }
+                                            _ => page_state("identifier-ready"),
+                                        }
                                     }
                                     "function() { return this.fillIdentifier(); }" => {
                                         t.fills += 1;
@@ -201,11 +209,11 @@ impl Fixture {
                                         if case == Case::LoaderBeforeClick {
                                             generation += 1;
                                         }
-                                        page_state(if case == Case::DocumentBeforeFill {
-                                            "refused"
+                                        if case == Case::DocumentBeforeFill {
+                                            page_failure("refused", "document-binding")
                                         } else {
-                                            "identifier-filled"
-                                        })
+                                            page_state("identifier-filled")
+                                        }
                                     }
                                     "function() { return this.clickNext(); }" => {
                                         t.clicks += 1;
@@ -220,7 +228,7 @@ impl Fixture {
                                             hold = true;
                                         }
                                         if case == Case::ActionBeforeClick {
-                                            page_state("refused")
+                                            page_failure("refused", "form-action")
                                         } else {
                                             generation += 1;
                                             page_state("next-dispatched")
@@ -233,8 +241,12 @@ impl Fixture {
                                         }
                                         match case {
                                             Case::Challenge => page_state("challenge-ready"),
-                                            Case::ForeignReadiness => page_state("refused"),
-                                            Case::Ambiguous => page_state("unknown"),
+                                            Case::ForeignReadiness => {
+                                                page_failure("refused", "account-mismatch")
+                                            }
+                                            Case::Ambiguous => {
+                                                page_failure("unknown", "readiness-not-reached")
+                                            }
                                             Case::MalformedReadiness => {
                                                 page_state("invented-ready")
                                             }
@@ -246,7 +258,7 @@ impl Fixture {
                                             }
                                             Case::PendingReadiness => {
                                                 hold = true;
-                                                page_state("unknown")
+                                                page_failure("unknown", "readiness-not-reached")
                                             }
                                             _ => page_state("password-ready"),
                                         }
@@ -377,11 +389,22 @@ impl Drop for Fixture {
 
 fn closed(reply: &Value, state: &str) {
     assert_eq!(reply["success"], true, "{reply}");
-    assert_eq!(
-        reply["data"],
-        json!({"kind":"work-readiness","state":state,"authentication":"not-established"}),
-        "{reply}"
-    );
+    let mut expected =
+        json!({"kind":"work-readiness","state":state,"authentication":"not-established"});
+    if matches!(state, "refused" | "unknown") {
+        let abi: Value =
+            serde_json::from_str(include_str!("../../../scripts/work-readiness-reasons.json"))
+                .unwrap();
+        assert!(
+            abi["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&reply["data"]["reason"]),
+            "{reply}"
+        );
+        expected["reason"] = reply["data"]["reason"].clone();
+    }
+    assert_eq!(reply["data"], expected, "{reply}");
     nonleak(reply);
 }
 
@@ -427,8 +450,8 @@ async fn work_readiness_public_dispatch_closed_paths_do_not_resolve_provider() {
         (Case::ExistingChallenge, "challenge-ready", 0, 0),
         (Case::ForeignAccount, "refused", 0, 0),
         (Case::DocumentBeforeFill, "refused", 1, 0),
-        (Case::ActionBeforeClick, "refused", 1, 1),
-        (Case::ForeignReadiness, "refused", 1, 1),
+        (Case::ActionBeforeClick, "unknown", 1, 1),
+        (Case::ForeignReadiness, "unknown", 1, 1),
         (Case::Ambiguous, "unknown", 1, 1),
         (Case::MalformedReadiness, "unknown", 1, 1),
         (Case::ExtraReadiness, "unknown", 1, 1),
@@ -438,6 +461,18 @@ async fn work_readiness_public_dispatch_closed_paths_do_not_resolve_provider() {
         let command = f.request();
         let result = f.dispatch(command).await;
         closed(&result, expected);
+        let reason = match case {
+            Case::ForeignAccount | Case::ForeignReadiness => Some("account-mismatch"),
+            Case::DocumentBeforeFill => Some("document-binding"),
+            Case::ActionBeforeClick => Some("form-action"),
+            Case::Ambiguous => Some("readiness-timeout"),
+            Case::MalformedReadiness | Case::ExtraReadiness => Some("native-protocol"),
+            Case::ExceptionAfterClick => Some("native-evaluation"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            assert_eq!(result["data"]["reason"], reason, "{case:?}: {result}");
+        }
         assert!(
             f.provider_calls().is_empty(),
             "identifier invoked provider: {case:?}"

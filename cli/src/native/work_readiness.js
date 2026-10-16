@@ -14,15 +14,16 @@ function() {
     let observer = null;
     let expiry = null;
     const result = state => ({state});
+    const diagnostic = (state, reason) => ({state, reason});
     function cleanup() {
         if (observer) observer.disconnect();
         if (expiry !== null) { view.clearTimeout(expiry); expiry = null; }
     }
-    const fail = () => {
-        terminal = setterUsed || clickUsed ? 'unknown' : 'refused';
+    function fail(reason) {
+        if (!terminal) terminal = diagnostic(setterUsed || clickUsed ? 'unknown' : 'refused', reason);
         cleanup();
-        return result(terminal);
-    };
+        return terminal;
+    }
     function trusted(url) {
         return url.origin === origin && !url.username && !url.password;
     }
@@ -53,54 +54,60 @@ function() {
     function formBinding(control, button) {
         const form = control.form;
         if (!form || form.ownerDocument !== doc || !form.isConnected ||
-            form.method.toUpperCase() !== 'POST' || (button && button.form !== form)) return null;
+            form.method.toUpperCase() !== 'POST' || (button && button.form !== form)) return {ok: false, reason: 'form-binding'};
         const action = new URL(form.action, doc.baseURI);
-        if (!trusted(action)) return null;
+        if (!trusted(action)) return {ok: false, reason: 'form-action'};
         if (button && (button.hasAttribute('formaction') || button.hasAttribute('formmethod') ||
-            button.hasAttribute('formtarget') || button.type !== 'button' && button.type !== 'submit')) return null;
-        if (form.target && form.target !== '_self') return null;
-        return {form, action: action.href};
+            button.hasAttribute('formtarget') || button.type !== 'button' && button.type !== 'submit')) return {ok: false, reason: 'submit-override'};
+        if (form.target && form.target !== '_self') return {ok: false, reason: 'form-target'};
+        return {ok: true, form, action: action.href};
     }
     function classify() {
-        if (!sameDocument() || !account(false)) return {state: 'refused'};
+        if (!sameDocument()) return diagnostic('refused', 'document-binding');
+        if (!account(false)) return diagnostic('refused', 'account-mismatch');
         const allEmails = query('input[type="email"]');
         const allPasswords = query('input[type="password"]');
         const emails = allEmails.filter(editable);
         const passwords = allPasswords.filter(editable);
-        if (allPasswords.length && !passwords.length) return {state: 'refused'};
+        if (allPasswords.length && !passwords.length) return diagnostic('refused', 'password-control-unavailable');
         const challenge = query('[data-challengetype],input[name="totpPin"],input[name="idvPin"],input[name="backupCodePin"],#totpPin,#idvPin,#backupCodePin').filter(visible);
         if (passwords.length) {
-            if (passwords.length !== 1 || emails.length || challenge.length || !account(true)) return {state: 'refused'};
+            if (passwords.length !== 1) return diagnostic('refused', 'ambiguous-password-controls');
+            if (emails.length || challenge.length) return diagnostic('refused', 'mixed-login-controls');
+            if (!account(true)) return diagnostic('refused', 'account-evidence-missing');
             const control = passwords[0];
-            if (control.name !== 'Passwd') return {state: 'refused'};
+            if (control.name !== 'Passwd') return diagnostic('refused', 'password-control-identity');
             const buttons = query('#passwordNext button').filter(usable);
-            if (buttons.length !== 1) return {state: 'refused'};
+            if (buttons.length !== 1) return diagnostic('refused', 'password-next-unavailable');
             const binding = formBinding(control, buttons[0]);
-            if (!binding) return {state: 'refused'};
-            // Match the password handler's identity evidence, not an arbitrary email input.
+            if (!binding.ok) return diagnostic('refused', binding.reason);
             const accounts = [...query('[data-identifier]').map(el => el.getAttribute('data-identifier')),
                 ...Array.from(binding.form.querySelectorAll('input[type="hidden"][name="identifier"]')).map(el => el.value)]
                 .filter(value => typeof value === 'string' && value.length > 0);
-            if (!accounts.length || accounts.some(value => value !== own)) return {state: 'refused'};
+            if (!accounts.length) return diagnostic('refused', 'account-evidence-missing');
+            if (accounts.some(value => value !== own)) return diagnostic('refused', 'account-mismatch');
             return {state: 'password-ready', control, button: buttons[0], ...binding};
         }
         if (challenge.length) {
-            if (emails.length || !account(true) || !/^\/v\d+\/signin\/challenge\//.test(view.location.pathname) &&
-                !/^\/signin\/v\d+\/challenge\//.test(view.location.pathname)) return {state: 'refused'};
+            if (emails.length) return diagnostic('refused', 'mixed-login-controls');
+            if (!account(true)) return diagnostic('refused', 'account-evidence-missing');
+            if (!/^\/v\d+\/signin\/challenge\//.test(view.location.pathname) &&
+                !/^\/signin\/v\d+\/challenge\//.test(view.location.pathname)) return diagnostic('refused', 'challenge-route');
             const controls = query('input').filter(el => editable(el) && el.type !== 'hidden');
             const forms = query('form').filter(el => el.isConnected);
-            if (forms.length !== 1 || controls.some(el => el.form !== forms[0])) return {state: 'refused'};
+            if (forms.length !== 1 || controls.some(el => el.form !== forms[0])) return diagnostic('refused', 'challenge-form');
             const binding = formBinding({form: forms[0]}, null);
-            if (!binding || !challenge.every(el => forms[0].contains(el))) return {state: 'refused'};
+            if (!binding.ok) return diagnostic('refused', binding.reason);
+            if (!challenge.every(el => forms[0].contains(el))) return diagnostic('refused', 'challenge-form');
             return {state: 'challenge-ready', ...binding};
         }
-        if (emails.length !== 1) return {state: allEmails.length ? 'refused' : 'unknown'};
+        if (emails.length !== 1) return diagnostic(allEmails.length ? 'refused' : 'unknown', allEmails.length > 1 ? 'identifier-control-ambiguous' : 'identifier-control-unavailable');
         const control = emails[0];
-        if (control.value !== '' && control.value !== own) return {state: 'refused'};
+        if (control.value !== '' && control.value !== own) return diagnostic('refused', 'account-mismatch');
         const buttons = query('#identifierNext button').filter(usable);
-        if (buttons.length !== 1) return {state: 'refused'};
+        if (buttons.length !== 1) return diagnostic('refused', 'identifier-next-unavailable');
         const binding = formBinding(control, buttons[0]);
-        if (!binding) return {state: 'refused'};
+        if (!binding.ok) return diagnostic('refused', binding.reason);
         return {state: 'identifier-ready', control, button: buttons[0], ...binding};
     }
     function changed(records) {
@@ -118,67 +125,75 @@ function() {
     }
     function current() {
         if (terminal) return null;
-        if (observer && changed(observer.takeRecords())) { fail(); return null; }
+        if (observer && changed(observer.takeRecords())) { fail('pinned-mutation'); return null; }
+        if (!pinned) { fail('transition-order'); return null; }
         const next = classify();
+        if (next.state === 'refused' || next.state === 'unknown') { fail(next.reason); return null; }
         const accounts = query('[data-identifier],input[name="identifier"],input[type="email"]');
-        if (!pinned || next.state !== pinned.state || next.form !== pinned.form ||
+        if (next.state !== pinned.state || next.form !== pinned.form ||
             next.control !== pinned.control || next.button !== pinned.button || next.action !== pinned.action ||
             accounts.length !== pinned.accounts.length || accounts.some((el, i) => el !== pinned.accounts[i])) {
-            fail(); return null;
+            fail('binding-changed'); return null;
         }
         return next;
     }
     function inspect() {
         try {
-            if (terminal) return result(terminal);
-            if (pinned) return current() ? result(pinned.state) : result(terminal);
+            if (terminal) return terminal;
+            if (pinned) return current() ? result(pinned.state) : terminal;
             const next = classify();
             if (!['identifier-ready','password-ready','challenge-ready'].includes(next.state)) {
-                terminal = next.state;
+                terminal = next;
                 cleanup();
-                return result(terminal);
+                return terminal;
             }
             pinned = {...next, accounts: query('[data-identifier],input[name="identifier"],input[type="email"]')};
             if (next.state === 'identifier-ready') {
-                observer = new view.MutationObserver(records => { if (changed(records)) fail(); });
+                observer = new view.MutationObserver(records => { if (changed(records)) fail('pinned-mutation'); });
                 observer.observe(root, {subtree: true, childList: true, attributes: true});
-                expiry = view.setTimeout(() => { fail(); }, 35000);
+                expiry = view.setTimeout(() => { fail('policy-expired'); }, 35000);
             } else {
                 cleanup();
             }
             return result(next.state);
-        } catch { return fail(); }
+        } catch { return fail('policy-exception'); }
     }
     async function fillIdentifier() {
         try {
-            if (terminal) return result(terminal);
-            if (setterUsed || clickUsed) return result('unknown');
-            if (!pinned || pinned.state !== 'identifier-ready' || !current()) return fail();
+            if (terminal) return terminal;
+            if (setterUsed || clickUsed) return diagnostic('unknown', 'already-dispatched');
+            if (!pinned || pinned.state !== 'identifier-ready') return fail('transition-order');
+            if (!current()) return terminal;
             const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value').set;
             setterUsed = true;
             setter.call(pinned.control, own);
-            if (!current() || pinned.control.value !== own) return fail();
+            if (!current()) return terminal;
+            if (pinned.control.value !== own) return fail('identifier-value-changed');
             pinned.control.dispatchEvent(new view.Event('input', {bubbles: true}));
-            if (!current() || pinned.control.value !== own) return fail();
+            if (!current()) return terminal;
+            if (pinned.control.value !== own) return fail('identifier-value-changed');
             pinned.control.dispatchEvent(new view.Event('change', {bubbles: true}));
-            if (!current() || pinned.control.value !== own) return fail();
+            if (!current()) return terminal;
+            if (pinned.control.value !== own) return fail('identifier-value-changed');
             await new Promise(resolve => view.setTimeout(resolve, 100));
-            if (!current() || pinned.control.value !== own) return fail();
+            if (!current()) return terminal;
+            if (pinned.control.value !== own) return fail('identifier-value-changed');
             filled = true;
             return result('identifier-filled');
-        } catch { return fail(); }
+        } catch { return fail('policy-exception'); }
     }
     function clickNext() {
         try {
-            if (terminal) return result(terminal);
-            if (clickUsed) return result('unknown');
-            if (!filled || !current() || pinned.control.value !== own) return fail();
+            if (terminal) return terminal;
+            if (clickUsed) return diagnostic('unknown', 'already-dispatched');
+            if (!filled) return fail('transition-order');
+            if (!current()) return terminal;
+            if (pinned.control.value !== own) return fail('identifier-value-changed');
             clickUsed = true;
-            // Mark before dispatch: throws and missing acknowledgements cannot permit replay.
             cleanup();
             pinned.button.click();
             return result('next-dispatched');
-        } catch { return fail(); }
+        } catch { return fail('policy-exception'); }
     }
     return Object.freeze({
         inspect,
@@ -186,15 +201,15 @@ function() {
         clickNext,
         identifierNode() {
             try { return !clickUsed && pinned && pinned.state === 'identifier-ready' && current() ? pinned.control : null; }
-            catch { fail(); return null; }
+            catch { fail('policy-exception'); return null; }
         },
-        dispose() { return fail(); },
+        dispose() { return fail('policy-disposed'); },
         readiness() {
             const observation = inspect();
             cleanup();
             if (observation.state === 'identifier-ready') {
-                terminal = 'unknown';
-                return result('unknown');
+                terminal = diagnostic('unknown', 'readiness-not-reached');
+                return terminal;
             }
             return observation;
         },

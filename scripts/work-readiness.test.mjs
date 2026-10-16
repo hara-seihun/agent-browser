@@ -3,7 +3,16 @@ import test from 'node:test';
 import {fixture, identifierHTML, passwordHTML, challengeHTML, identity, factorySource} from './work-readiness-fixture.mjs';
 
 const state = value => JSON.parse(JSON.stringify(value));
-const is = (value, expected) => assert.deepEqual(state(value), {state: expected});
+const pageReasons = new Set(['document-binding','account-mismatch','password-control-unavailable','ambiguous-password-controls','mixed-login-controls','account-evidence-missing','password-control-identity','password-next-unavailable','form-binding','form-action','submit-override','form-target','challenge-route','challenge-form','identifier-control-unavailable','identifier-control-ambiguous','identifier-next-unavailable','pinned-mutation','binding-changed','identifier-value-changed','transition-order','already-dispatched','policy-exception','policy-expired','policy-disposed','readiness-not-reached']);
+const is = (value, expected) => {
+    const observed = state(value);
+    assert.equal(observed.state, expected);
+    if (expected === 'refused' || expected === 'unknown') {
+        assert.deepEqual(Object.keys(observed).sort(), ['reason', 'state']);
+        assert.ok(pageReasons.has(observed.reason), JSON.stringify(observed));
+    } else assert.deepEqual(observed, {state: expected});
+};
+const why = (value, expectedState, reason) => assert.deepEqual(state(value), {state: expectedState, reason});
 function check(name, options, run) {
     test(name, async () => { const f = fixture(options); try { await run(f); } finally { f.close(); } });
 }
@@ -205,4 +214,42 @@ for (const [label, html, url] of [
     f.policy.readiness(); clean(f);
     for (let i = 0; i < 10; i++) f.fresh().readiness();
     clean(f);
+});
+for (const [name, html, reason] of [
+    ['foreign action', identifierHTML.replace('action="/v3/signin/identifier"', 'action="https://private.invalid/?secret=sentinel"'), 'form-action'],
+    ['GET form', identifierHTML.replace('method="post"', 'method="get"'), 'form-binding'],
+    ['form target', identifierHTML.replace('<form ', '<form target="_blank" '), 'form-target'],
+    ['button override', identifierHTML.replace('<button ', '<button formaction="/private" '), 'submit-override'],
+    ['missing email', '<main>PRIVATE TEXT</main>', 'identifier-control-unavailable'],
+    ['duplicate email', identifierHTML.replace('<input id=', '<input type="email"><input id='), 'identifier-control-ambiguous'],
+    ['missing identifier Next', identifierHTML.replace('id="identifierNext"', ''), 'identifier-next-unavailable'],
+    ['missing account', passwordHTML.replaceAll(identity, ''), 'account-evidence-missing'],
+    ['foreign account', passwordHTML.replaceAll(identity, 'private@example.invalid'), 'account-mismatch'],
+    ['wrong password name', passwordHTML.replace('name="Passwd"', 'name="private"'), 'password-control-identity'],
+    ['missing password Next', passwordHTML.replace('id="passwordNext"', ''), 'password-next-unavailable'],
+    ['disabled password', passwordHTML.replace('type="password"', 'type="password" disabled'), 'password-control-unavailable'],
+    ['duplicate password', passwordHTML.replace('<input type="password"', '<input type="password" name="Passwd"><input type="password"'), 'ambiguous-password-controls'],
+    ['mixed controls', passwordHTML.replace('<input type="password"', '<input type="email"><input type="password"'), 'mixed-login-controls'],
+]) check('causal closed discriminator: '+name, {html}, f => {
+    const expected = reason === 'identifier-control-unavailable' ? 'unknown' : 'refused';
+    why(f.policy.inspect(), expected, reason);why(f.policy.dispose(), expected, reason);
+    assert.equal(f.counters.setters, 0);assert.equal(f.counters.clicks, 0);clean(f);
+});
+check('latched event mutation survives later disposal without losing cause or allowing click', {}, async f => {
+    is(f.policy.inspect(), 'identifier-ready');
+    f.document.querySelector('input').addEventListener('input', () => {
+        const form=f.document.querySelector('form');const action=form.action;form.action='/private';form.action=action;
+    });
+    why(await f.policy.fillIdentifier(), 'unknown', 'pinned-mutation');
+    why(f.policy.dispose(), 'unknown', 'pinned-mutation');why(f.policy.clickNext(), 'unknown', 'pinned-mutation');
+    assert.deepEqual(f.counters, {setters:1,inputs:1,changes:0,clicks:0,provider:0});clean(f);
+});
+check('property-only identifier value loss has its own closed cause', {}, async f => {
+    is(f.policy.inspect(),'identifier-ready');
+    f.document.querySelector('input').addEventListener('input', event => { event.target.value=''; });
+    why(await f.policy.fillIdentifier(),'unknown','identifier-value-changed');assert.equal(f.counters.clicks,0);clean(f);
+});
+check('deadline reason survives a repeated Next and disposal', {}, f => {
+    is(f.policy.inspect(),'identifier-ready');f.expire();
+    why(f.policy.clickNext(),'refused','policy-expired');why(f.policy.dispose(),'refused','policy-expired');clean(f);
 });

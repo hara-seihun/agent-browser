@@ -1,0 +1,59 @@
+{
+  "pageResult": {
+    "positiveKeys": [
+      "state"
+    ],
+    "negativeKeys": [
+      "state",
+      "reason"
+    ]
+  },
+  "publicResult": {
+    "positiveKeys": [
+      "kind",
+      "state",
+      "authentication"
+    ],
+    "negativeKeys": [
+      "kind",
+      "state",
+      "authentication",
+      "reason"
+    ]
+  },
+  "reasons": [
+    "document-binding",
+    "account-mismatch",
+    "password-control-unavailable",
+    "ambiguous-password-controls",
+    "mixed-login-controls",
+    "account-evidence-missing",
+    "password-control-identity",
+    "password-next-unavailable",
+    "form-binding",
+    "form-action",
+    "submit-override",
+    "form-target",
+    "challenge-route",
+    "challenge-form",
+    "identifier-control-unavailable",
+    "identifier-control-ambiguous",
+    "identifier-next-unavailable",
+    "pinned-mutation",
+    "binding-changed",
+    "identifier-value-changed",
+    "transition-order",
+    "already-dispatched",
+    "policy-exception",
+    "policy-expired",
+    "policy-disposed",
+    "readiness-not-reached",
+    "request-policy",
+    "target-unavailable",
+    "native-binding",
+    "native-evaluation",
+    "native-protocol",
+    "readiness-timeout"
+  ],
+  "legacy": "Three-key predecessor negatives remain three-key; absence means not-reported. Four-key not-reported is invalid."
+}

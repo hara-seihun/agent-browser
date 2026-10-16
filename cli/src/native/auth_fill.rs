@@ -6,7 +6,7 @@
 use super::actions::DaemonState;
 use super::element::{resolve_element_object_id, RefMap};
 use crate::plugins::{resolve_credential_field_with_plugins, PluginConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::future::Future;
 use tokio::time::Instant;
@@ -264,45 +264,93 @@ pub async fn handle_auth_fill(
     .await
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum WorkReason {
+    DocumentBinding,
+    AccountMismatch,
+    PasswordControlUnavailable,
+    AmbiguousPasswordControls,
+    MixedLoginControls,
+    AccountEvidenceMissing,
+    PasswordControlIdentity,
+    PasswordNextUnavailable,
+    FormBinding,
+    FormAction,
+    SubmitOverride,
+    FormTarget,
+    ChallengeRoute,
+    ChallengeForm,
+    IdentifierControlUnavailable,
+    IdentifierControlAmbiguous,
+    IdentifierNextUnavailable,
+    PinnedMutation,
+    BindingChanged,
+    IdentifierValueChanged,
+    TransitionOrder,
+    AlreadyDispatched,
+    PolicyException,
+    PolicyExpired,
+    PolicyDisposed,
+    ReadinessNotReached,
+    RequestPolicy,
+    TargetUnavailable,
+    NativeBinding,
+    NativeEvaluation,
+    NativeProtocol,
+    ReadinessTimeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkStep {
     IdentifierReady,
     IdentifierFilled,
     NextDispatched,
     PasswordReady,
     ChallengeReady,
-    Refused,
-    Unknown,
+    Refused(WorkReason),
+    Unknown(WorkReason),
 }
 
 impl WorkStep {
     fn public(self) -> Value {
-        let state = match self {
-            Self::PasswordReady => "password-ready",
-            Self::ChallengeReady => "challenge-ready",
-            Self::Refused => "refused",
-            Self::IdentifierReady
-            | Self::IdentifierFilled
-            | Self::NextDispatched
-            | Self::Unknown => "unknown",
-        };
-        json!({"kind":"work-readiness", "state":state, "authentication":"not-established"})
+        match self {
+            Self::PasswordReady => {
+                json!({"kind":"work-readiness", "state":"password-ready", "authentication":"not-established"})
+            }
+            Self::ChallengeReady => {
+                json!({"kind":"work-readiness", "state":"challenge-ready", "authentication":"not-established"})
+            }
+            Self::Refused(reason) => {
+                json!({"kind":"work-readiness", "state":"refused", "authentication":"not-established", "reason":reason})
+            }
+            Self::Unknown(reason) => {
+                json!({"kind":"work-readiness", "state":"unknown", "authentication":"not-established", "reason":reason})
+            }
+            Self::IdentifierReady | Self::IdentifierFilled | Self::NextDispatched => {
+                Self::Unknown(WorkReason::NativeProtocol).public()
+            }
+        }
     }
 
-    fn decode(value: &Value) -> Result<Self, ()> {
-        let object = value.as_object().ok_or(())?;
-        if object.len() != 1 {
-            return Err(());
-        }
-        match value["state"].as_str() {
-            Some("identifier-ready") => Ok(Self::IdentifierReady),
-            Some("identifier-filled") => Ok(Self::IdentifierFilled),
-            Some("next-dispatched") => Ok(Self::NextDispatched),
-            Some("password-ready") => Ok(Self::PasswordReady),
-            Some("challenge-ready") => Ok(Self::ChallengeReady),
-            Some("refused") => Ok(Self::Refused),
-            Some("unknown") => Ok(Self::Unknown),
-            _ => Err(()),
+    fn decode(value: &Value) -> Result<Self, WorkReason> {
+        let object = value.as_object().ok_or(WorkReason::NativeProtocol)?;
+        match (value["state"].as_str(), object.len()) {
+            (Some("identifier-ready"), 1) => Ok(Self::IdentifierReady),
+            (Some("identifier-filled"), 1) => Ok(Self::IdentifierFilled),
+            (Some("next-dispatched"), 1) => Ok(Self::NextDispatched),
+            (Some("password-ready"), 1) => Ok(Self::PasswordReady),
+            (Some("challenge-ready"), 1) => Ok(Self::ChallengeReady),
+            (Some("refused"), 2) | (Some("unknown"), 2) => {
+                let reason = serde_json::from_value::<WorkReason>(value["reason"].clone())
+                    .map_err(|_| WorkReason::NativeProtocol)?;
+                if value["state"] == "refused" {
+                    Ok(Self::Refused(reason))
+                } else {
+                    Ok(Self::Unknown(reason))
+                }
+            }
+            _ => Err(WorkReason::NativeProtocol),
         }
     }
 }
@@ -313,29 +361,35 @@ struct WorkPage {
     _group: super::cdp::client::RemoteObjectGroup,
 }
 
-async fn work_bound(state: &DaemonState, location: &FieldLocation) -> Result<Binding, ()> {
+async fn work_bound(state: &DaemonState, location: &FieldLocation) -> Result<Binding, WorkReason> {
     if state.active_frame_id.is_some() || location.frame != "main" {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
-    let bound = bind_location(state, location).await.map_err(|_| ())?;
-    let url = url::Url::parse(&bound.url).map_err(|_| ())?;
+    let bound = bind_location(state, location)
+        .await
+        .map_err(|_| WorkReason::NativeBinding)?;
+    let url = url::Url::parse(&bound.url).map_err(|_| WorkReason::NativeBinding)?;
     if url.origin().ascii_serialization() != "https://accounts.google.com"
         || !url.username().is_empty()
         || url.password().is_some()
         || bound.frame_session.is_some()
     {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
     Ok(bound)
 }
 
-async fn work_page(state: &DaemonState, location: &FieldLocation) -> Result<WorkPage, ()> {
+async fn work_page(state: &DaemonState, location: &FieldLocation) -> Result<WorkPage, WorkReason> {
     let bound = work_bound(state, location).await?;
-    let client = &state.browser.as_ref().ok_or(())?.client;
+    let client = &state
+        .browser
+        .as_ref()
+        .ok_or(WorkReason::TargetUnavailable)?
+        .client;
     let group = client
         .object_group(vec![bound.session.clone()])
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| WorkReason::NativeEvaluation)?;
     let probe = client
         .send_command(
             "Runtime.evaluate",
@@ -346,14 +400,17 @@ async fn work_page(state: &DaemonState, location: &FieldLocation) -> Result<Work
             Some(&bound.session),
         )
         .await
-        .map_err(|_| ())?;
-    if probe.get("exceptionDetails").is_some() || work_bound(state, location).await? != bound {
-        return Err(());
+        .map_err(|_| WorkReason::NativeEvaluation)?;
+    if probe.get("exceptionDetails").is_some() {
+        return Err(WorkReason::NativeEvaluation);
+    }
+    if work_bound(state, location).await? != bound {
+        return Err(WorkReason::NativeBinding);
     }
     let object = probe["result"]["objectId"]
         .as_str()
         .filter(|v| !v.is_empty())
-        .ok_or(())?
+        .ok_or(WorkReason::NativeProtocol)?
         .to_string();
     Ok(WorkPage {
         bound,
@@ -367,26 +424,26 @@ async fn work_step(
     location: &FieldLocation,
     page: &WorkPage,
     method: &str,
-) -> Result<WorkStep, ()> {
+) -> Result<WorkStep, WorkReason> {
     if work_bound(state, location).await? != page.bound {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
     let declaration = match method {
         "inspect" => "function() { return this.inspect(); }",
         "fillIdentifier" => "function() { return this.fillIdentifier(); }",
         "clickNext" => "function() { return this.clickNext(); }",
         "readiness" => "function() { return this.readiness(); }",
-        _ => return Err(()),
+        _ => return Err(WorkReason::NativeProtocol),
     };
-    let value = state.browser.as_ref().ok_or(())?.client.send_command("Runtime.callFunctionOn", Some(json!({
+    let value = state.browser.as_ref().ok_or(WorkReason::TargetUnavailable)?.client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId":page.object,"functionDeclaration":declaration,"returnByValue":true,"awaitPromise":true,
-    })), Some(&page.bound.session)).await.map_err(|_| ())?;
+    })), Some(&page.bound.session)).await.map_err(|_| WorkReason::NativeEvaluation)?;
     if value.get("exceptionDetails").is_some() {
-        return Err(());
+        return Err(WorkReason::NativeEvaluation);
     }
     let result = WorkStep::decode(&value["result"]["value"])?;
     if method != "clickNext" && work_bound(state, location).await? != page.bound {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
     Ok(result)
 }
@@ -395,19 +452,25 @@ async fn work_backend(
     state: &DaemonState,
     location: &FieldLocation,
     page: &WorkPage,
-) -> Result<i64, ()> {
+) -> Result<i64, WorkReason> {
     if work_bound(state, location).await? != page.bound {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
-    let client = &state.browser.as_ref().ok_or(())?.client;
+    let client = &state
+        .browser
+        .as_ref()
+        .ok_or(WorkReason::TargetUnavailable)?
+        .client;
     let node = client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId":page.object,"functionDeclaration":"function() { return this.identifierNode(); }",
         "returnByValue":false,
-    })), Some(&page.bound.session)).await.map_err(|_| ())?;
+    })), Some(&page.bound.session)).await.map_err(|_| WorkReason::NativeEvaluation)?;
     if node.get("exceptionDetails").is_some() {
-        return Err(());
+        return Err(WorkReason::NativeEvaluation);
     }
-    let object = node["result"]["objectId"].as_str().ok_or(())?;
+    let object = node["result"]["objectId"]
+        .as_str()
+        .ok_or(WorkReason::NativeProtocol)?;
     let description = client
         .send_command(
             "DOM.describeNode",
@@ -415,55 +478,60 @@ async fn work_backend(
             Some(&page.bound.session),
         )
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| WorkReason::NativeEvaluation)?;
     if work_bound(state, location).await? != page.bound {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
     description["node"]["backendNodeId"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or(())
+        .ok_or(WorkReason::NativeProtocol)
 }
 
 async fn work_identifier_transition(
     state: &DaemonState,
     location: &FieldLocation,
-) -> Result<WorkStep, ()> {
+) -> Result<WorkStep, WorkReason> {
     let page = work_page(state, location).await?;
     match work_step(state, location, &page, "inspect").await? {
         terminal @ (WorkStep::PasswordReady
         | WorkStep::ChallengeReady
-        | WorkStep::Refused
-        | WorkStep::Unknown) => return Ok(terminal),
+        | WorkStep::Refused(_)
+        | WorkStep::Unknown(_)) => return Ok(terminal),
         WorkStep::IdentifierReady => {}
-        WorkStep::IdentifierFilled | WorkStep::NextDispatched => return Err(()),
+        WorkStep::IdentifierFilled | WorkStep::NextDispatched => {
+            return Err(WorkReason::NativeProtocol)
+        }
     }
     let backend = work_backend(state, location, &page).await?;
     match work_step(state, location, &page, "fillIdentifier").await? {
         WorkStep::IdentifierFilled => {}
-        terminal @ (WorkStep::Refused | WorkStep::Unknown) => return Ok(terminal),
-        _ => return Err(()),
+        terminal @ (WorkStep::Refused(_) | WorkStep::Unknown(_)) => return Ok(terminal),
+        _ => return Err(WorkReason::NativeProtocol),
     }
     if work_backend(state, location, &page).await? != backend {
-        return Err(());
+        return Err(WorkReason::NativeBinding);
     }
     match work_step(state, location, &page, "clickNext").await? {
         WorkStep::NextDispatched => {}
-        terminal @ (WorkStep::Refused | WorkStep::Unknown) => return Ok(terminal),
-        _ => return Err(()),
+        WorkStep::Refused(reason) | WorkStep::Unknown(reason) => {
+            return Ok(WorkStep::Unknown(reason))
+        }
+        _ => return Err(WorkReason::NativeProtocol),
     }
     // Only the intended Next permits a new loader; target/session/frame remain fixed.
     loop {
         let ready = work_page(state, location).await?;
         if ready.bound.session != page.bound.session || ready.bound.frame != page.bound.frame {
-            return Err(());
+            return Err(WorkReason::NativeBinding);
         }
         match work_step(state, location, &ready, "readiness").await? {
-            terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady | WorkStep::Refused) => {
-                return Ok(terminal)
+            terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady) => return Ok(terminal),
+            WorkStep::Unknown(WorkReason::ReadinessNotReached) => {}
+            WorkStep::Refused(reason) | WorkStep::Unknown(reason) => {
+                return Ok(WorkStep::Unknown(reason))
             }
-            WorkStep::Unknown => {}
-            _ => return Err(()),
+            _ => return Err(WorkReason::NativeProtocol),
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
@@ -479,7 +547,7 @@ async fn work_identifier_readiness(
         || req.format.is_some() || state.active_frame_id.is_some()
         || state.recording_state.active || state.tracing_state.active || state.screencasting
         || state.stream_server.is_some() || state.har_recording || state.request_tracking {
-        return Ok(WorkStep::Refused.public());
+        return Ok(WorkStep::Refused(WorkReason::RequestPolicy).public());
     }
     let target = match state
         .browser
@@ -487,14 +555,14 @@ async fn work_identifier_readiness(
         .and_then(|mgr| mgr.active_target_id().ok())
     {
         Some(target) => target.to_owned(),
-        None => return Ok(WorkStep::Refused.public()),
+        None => return Ok(WorkStep::Refused(WorkReason::TargetUnavailable).public()),
     };
     let location = FieldLocation {
         target,
         frame: "main".into(),
     };
-    if work_bound(state, &location).await.is_err() {
-        return Ok(WorkStep::Refused.public());
+    if let Err(reason) = work_bound(state, &location).await {
+        return Ok(WorkStep::Refused(reason).public());
     }
     let end = deadline
         .checked_sub(std::time::Duration::from_millis(100))
@@ -502,7 +570,8 @@ async fn work_identifier_readiness(
     let outcome = tokio::time::timeout_at(end, work_identifier_transition(state, &location)).await;
     let result = match outcome {
         Ok(Ok(state)) => state,
-        Ok(Err(())) | Err(_) => WorkStep::Unknown,
+        Ok(Err(reason)) => WorkStep::Unknown(reason),
+        Err(_) => WorkStep::Unknown(WorkReason::ReadinessTimeout),
     };
     Ok(result.public())
 }
@@ -842,6 +911,34 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_readiness_reason_codec_is_closed_and_exact() {
+        let abi: Value =
+            serde_json::from_str(include_str!("../../../scripts/work-readiness-reasons.json"))
+                .unwrap();
+        assert_eq!(abi["reasons"].as_array().unwrap().len(), 32);
+        for reason in abi["reasons"].as_array().unwrap() {
+            for state in ["refused", "unknown"] {
+                let page = json!({"state":state,"reason":reason});
+                let step = WorkStep::decode(&page).unwrap();
+                assert_eq!(
+                    step.public(),
+                    json!({"kind":"work-readiness","state":state,"authentication":"not-established","reason":reason})
+                );
+            }
+        }
+        for bad in [
+            json!({"state":"refused"}),
+            json!({"state":"unknown","reason":"not-reported"}),
+            json!({"state":"refused","reason":"private-secret"}),
+            json!({"state":"password-ready","reason":"account-mismatch"}),
+            json!({"state":"refused","reason":"account-mismatch","url":"private"}),
+            json!({"state":"unknown","reason":null}),
+        ] {
+            assert_eq!(WorkStep::decode(&bad), Err(WorkReason::NativeProtocol));
+        }
+    }
 
     struct Fixture {
         state: DaemonState,
