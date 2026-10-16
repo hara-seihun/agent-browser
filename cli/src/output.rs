@@ -1755,9 +1755,11 @@ This replaces any existing content in the field.
 Date/time inputs accept ISO values, including controlled React fields.
 Use YYYY-MM-DD for dates, YYYY-MM-DDTHH:mm for local date-times.
 Empty text clears them. Direct/ref/find fills check retention after a bounded
-rendering/task window (at most 100 ms). Invalid or non-editable inputs fail.
+two-frame and following-task barrier (at most 100 ms). An unfinished barrier
+returns fill_render_timeout with effectDispatched:true and retention:"unknown";
+never replay the fill automatically. Invalid or non-editable inputs fail.
 JSON code: fill_invalid_value, fill_not_editable, fill_value_not_retained,
-           fill_target_detached, fill_page_error.
+           fill_target_detached, fill_render_timeout, fill_page_error.
 
 Global Options:
   --json               Output as JSON

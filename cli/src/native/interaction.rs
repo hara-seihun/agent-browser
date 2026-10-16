@@ -181,6 +181,7 @@ enum NativeFillOutcome {
     InvalidValue,
     NotEditable,
     ValueNotRetained,
+    RenderTimeout,
     TargetDetached,
 }
 
@@ -189,6 +190,7 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
         "fill_invalid_value",
         "fill_not_editable",
         "fill_value_not_retained",
+        "fill_render_timeout",
         "fill_target_detached",
         "fill_page_error",
     ]
@@ -201,7 +203,8 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
 }
 
 /// Direct, ref and semantic fills share this operation and retained-value check.
-/// Temporal edits and empty clears wait through rendering; rejection is coded.
+/// Temporal edits and empty clears require two rendered frames and a post-render
+/// task. An incomplete barrier is an explicit error after dispatch, never a replay.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -226,47 +229,7 @@ pub async fn fill(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"async function(value) {
-                    const input = this.tagName === 'INPUT';
-                    const textarea = this.tagName === 'TEXTAREA';
-                    const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
-                    if (this.matches(':disabled') || this.readOnly) return { status: 'not_editable' };
-                    if (!temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
-                    const probe = this.ownerDocument.createElement(input ? 'input' : 'textarea');
-                    if (input) probe.type = this.type;
-                    probe.value = value;
-                    if (value && !probe.value) return { status: 'invalid_value' };
-                    const expected = probe.value;
-                    const view = this.ownerDocument.defaultView;
-                    const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
-                    const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
-                    this.focus();
-                    setter.call(this, expected);
-                    this.dispatchEvent(new view.Event('input', { bubbles: true }));
-                    this.dispatchEvent(new view.Event('change', { bubbles: true }));
-                    // React commits and application validators can run after the
-                    // event's microtasks. Observe after rendering, not inside dispatch.
-                    await new Promise(resolve => {
-                        let frame, secondFrame, task;
-                        const done = () => {
-                            view.cancelAnimationFrame(frame);
-                            view.cancelAnimationFrame(secondFrame);
-                            view.clearTimeout(task);
-                            view.clearTimeout(deadline);
-                            resolve();
-                        };
-                        const deadline = view.setTimeout(done, 100);
-                        frame = view.requestAnimationFrame(() => {
-                            secondFrame = view.requestAnimationFrame(() => {
-                                task = view.setTimeout(done, 0);
-                            });
-                        });
-                    });
-                    if (!this.isConnected) return { status: 'target_detached' };
-                    if (this.value !== expected) return { status: 'value_not_retained' };
-                    return { status: 'filled' };
-                }"#
-                .to_string(),
+                function_declaration: include_str!("fill.js").to_string(),
                 object_id: Some(object_id.clone()),
                 arguments: Some(vec![CallArgument {
                     value: Some(serde_json::json!(value)),
@@ -295,6 +258,12 @@ pub async fn fill(
         NativeFillOutcome::ValueNotRetained => {
             return Err(
                 "fill_value_not_retained: Input did not retain the supplied value after rendering"
+                    .to_string(),
+            )
+        }
+        NativeFillOutcome::RenderTimeout => {
+            return Err(
+                "fill_render_timeout: Fill dispatched but rendering did not complete within 100 ms; retention is unknown; do not replay"
                     .to_string(),
             )
         }
@@ -1435,6 +1404,17 @@ mod tests {
         assert_eq!(
             fill_error_code("fill_value_not_retained: rejection"),
             Some("fill_value_not_retained")
+        );
+        assert!(matches!(
+            serde_json::from_value::<NativeFillOutcome>(
+                serde_json::json!({"status": "render_timeout"})
+            )
+            .unwrap(),
+            NativeFillOutcome::RenderTimeout
+        ));
+        assert_eq!(
+            fill_error_code("fill_render_timeout: incomplete"),
+            Some("fill_render_timeout")
         );
         assert_eq!(fill_error_code("fill_unknown: rejection"), None);
     }

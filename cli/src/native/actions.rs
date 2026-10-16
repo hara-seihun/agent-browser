@@ -13817,6 +13817,9 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["data"] = json!({"effectDispatched":false});
     } else if let Some(code) = interaction::fill_error_code(error) {
         resp["code"] = json!(code);
+        if code == "fill_render_timeout" {
+            resp["data"] = json!({"effectDispatched":true, "retention":"unknown"});
+        }
     } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
     } else if let Some((code, _)) = error.split_once(": ") {
@@ -13851,6 +13854,20 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fill_render_timeout_preserves_dispatched_unknown_outcome() {
+        let response =
+            super::error_response("original", "fill_render_timeout: unfinished rendering");
+        assert_eq!(response["id"], "original");
+        assert_eq!(response["success"], false);
+        assert_eq!(response["code"], "fill_render_timeout");
+        assert_eq!(
+            response["data"],
+            json!({"effectDispatched":true, "retention":"unknown"})
+        );
+        assert!(response.get("executed").is_none());
+    }
+
     #[test]
     fn disabled_click_response_is_pre_effect_not_generic_gesture_failure() {
         let refusal = super::error_response("fixture", "click_disabled: target or containing control is disabled; no pointer events dispatched");

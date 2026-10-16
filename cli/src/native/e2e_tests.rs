@@ -2493,7 +2493,7 @@ async fn e2e_fill_controlled_temporal_inputs_deferred_rejection() {
             let resp = execute_command(&cmd, &mut state).await;
             assert_eq!(
                 resp["success"], false,
-                "deferred application rejection must not report success: {resp}"
+                "deferred application rejection must not report success for {id}/{route}: {resp}"
             );
             assert_eq!(resp["code"], "fill_value_not_retained");
             temporal_state(&mut state, id, initial).await;
@@ -2501,6 +2501,75 @@ async fn e2e_fill_controlled_temporal_inputs_deferred_rejection() {
     }
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_controlled_render_barrier_incomplete() {
+    let mut state = DaemonState::new();
+    let (url, _server) = temporal_fixture().await;
+    for mode in ["missing", "delayed"] {
+        let resp = execute_command(
+            &json!({"id":"open", "action":"navigate", "url":url}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({"id":"ready", "action":"wait", "selector":"#date"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let script = format!(
+            r#"(() => {{
+            const mode = {mode:?}, pending = new Map();
+            let next = 0;
+            window.fillBarrier = {{requested: 0, cancelled: 0}};
+            const originalRequest = window.requestAnimationFrame;
+            const originalCancel = window.cancelAnimationFrame;
+            window.requestAnimationFrame = callback => {{
+                window.fillBarrier.requested++;
+                const id = ++next;
+                pending.set(id, mode === 'delayed' ? setTimeout(() => callback(performance.now()), 250) : null);
+                return id;
+            }};
+            window.cancelAnimationFrame = id => {{
+                if (pending.has(id)) {{
+                    clearTimeout(pending.get(id)); pending.delete(id);
+                    window.fillBarrier.cancelled++;
+                }}
+            }};
+            window.restoreFillFrames = () => {{
+                window.requestAnimationFrame = originalRequest;
+                window.cancelAnimationFrame = originalCancel;
+            }};
+        }})()"#
+        );
+        let resp = execute_command(
+            &json!({"id":"control-frames", "action":"evaluate", "script":script}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let route = if mode == "missing" {
+            "direct"
+        } else {
+            "semantic"
+        };
+        let cmd = temporal_fill_command(&mut state, route, "date", "Start", "2030-01-01").await;
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_eq!(resp["success"], false, "{mode}: {resp}");
+        assert_eq!(resp["code"], "fill_render_timeout", "{mode}: {resp}");
+        assert_eq!(resp["data"]["effectDispatched"], true);
+        assert_eq!(resp["data"]["retention"], "unknown");
+        assert_evaluate(&mut state, "single-effect", r#"(() => {
+            window.restoreFillFrames();
+            return {inputEvents: window.fillEvents.filter(e => e.id === 'date' && e.kind === 'input').length,
+                    requested: window.fillBarrier.requested, cancelled: window.fillBarrier.cancelled};
+        })()"#, json!({"inputEvents":1, "requested":1, "cancelled":1})).await;
+    }
+    close_current_browser(&mut state).await.unwrap();
 }
 
 #[tokio::test]
