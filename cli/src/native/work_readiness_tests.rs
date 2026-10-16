@@ -52,6 +52,7 @@ struct Trace {
     clicks: usize,
     readiness: usize,
     password_submits: usize,
+    generic_fill_dispatches: usize,
     violations: Vec<String>,
 }
 
@@ -155,7 +156,13 @@ impl Fixture {
                         }
                         "Runtime.callFunctionOn" => {
                             let js = cmd["params"]["functionDeclaration"].as_str().unwrap();
-                            if cmd["params"]["objectId"] == "work-policy" {
+                            if js == include_str!("fill.js") {
+                                t.generic_fill_dispatches += 1;
+                                t.violations.push(
+                                    "generic fill dispatched before sensitive-tab refusal".into(),
+                                );
+                                json!({"exceptionDetails":{"text":PRIVATE_MARKER}})
+                            } else if cmd["params"]["objectId"] == "work-policy" {
                                 let node_method =
                                     js == "function() { return this.identifierNode(); }";
                                 if cmd["sessionId"] != "page-session"
@@ -353,6 +360,10 @@ impl Fixture {
     fn assert_trace(&self, fills: usize, clicks: usize) {
         let t = self.trace.lock().unwrap();
         assert!(t.violations.is_empty(), "{:?}", t.violations);
+        assert_eq!(
+            t.generic_fill_dispatches, 0,
+            "generic fill must refuse before page dispatch"
+        );
         assert_eq!((t.fills, t.clicks), (fills, clicks));
         assert!(t.fills <= 1 && t.clicks <= 1);
     }
@@ -544,6 +555,11 @@ async fn work_readiness_public_dispatch_sensitive_generic_fill_eval_still_refuse
         json!({"id":"generic-eval","action":"evaluate","script":"document.body.innerText"}),
     ] {
         let reply = f.dispatch(command).await;
+        assert_eq!(
+            f.trace.lock().unwrap().generic_fill_dispatches,
+            0,
+            "generic fill reached the page before refusal: {reply}"
+        );
         assert_eq!(reply["success"], false, "{reply}");
         assert!(
             reply["error"]

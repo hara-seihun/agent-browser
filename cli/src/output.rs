@@ -2781,6 +2781,8 @@ Private fill behavior:
   all other fields compare exactly.
   Login deadline, disconnect cleanup and IPC margin apply; never replayed.
   MCP agent_browser_auth_fill uses fillTimeoutMs plus outer timeoutMs.
+  Closed configured identifier readiness returns metadata only, no secret lookup.
+  Only password-ready permits a separate password command; unknown is not replayed.
 
 Private export:
   auth export --selector <css> --target <target-id> --frame <frame-id|main>

@@ -3506,6 +3506,17 @@ async fn execute_command_inner(
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
+    if action == "auth_fill"
+        && cmd["credentialProvider"] == "converge-work-password-v5"
+        && cmd["field"] == "identifier"
+    {
+        state.last_command_finished = Some(std::time::Instant::now());
+        return match result {
+            Ok(data) => success_response(&id, data),
+            Err(error) => error_response(&id, &error),
+        };
+    }
+
     // An incomplete read is metadata-only. Do not turn it into another inventory
     // attempt or append page/dialog/lifecycle data after its deadline.
     if action == "snapshot" {

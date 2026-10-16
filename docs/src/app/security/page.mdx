@@ -193,6 +193,9 @@ agent-browser --confirm-actions plugin:cloud-browser:browser.provider --provider
 agent-browser --confirm-actions plugin:stealth:launch.mutate open https://example.com
 ```
 
+
+A closed configured provider may implement an identifier-readiness transition: the exact native-owned account and form are pinned, identifier/Next dispatch at most once, and no credential lookup occurs. Its closed metadata states are password-ready, challenge-ready, refused and unknown; authentication remains not-established. Only password-ready permits a separate password operation. Generic selectors, evaluation and challenge handling gain no authority.
+
 ## Content Boundary Markers
 
 When `--content-boundaries` is enabled, all page-sourced output is wrapped in structural markers so LLMs can distinguish tool output from untrusted page content:

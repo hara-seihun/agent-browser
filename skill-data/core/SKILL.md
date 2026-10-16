@@ -286,6 +286,9 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 Native lifecycle requests never cancel a foreground command: `daemon_busy` means it remains owned and no close occurred. Background autosave is read-only and bounded to 250ms; lifecycle requests allow 300ms to acquire that lock. `restore.saveStatus: maintenance_timeout` retains the previous persisted state. Collector-dependent background saves defer to foreground, and background ticks leave CDP setup events unconsumed. See [references/session-management.md](references/session-management.md) for exact statuses.
 
+
+A closed configured provider may implement an identifier-readiness transition: the exact native-owned account and form are pinned, identifier/Next dispatch at most once, and no credential lookup occurs. Its closed metadata states are password-ready, challenge-ready, refused and unknown; authentication remains not-established. Only password-ready permits a separate password operation. Generic selectors, evaluation and challenge handling gain no authority.
+
 ### Persist session across runs
 
 ```bash

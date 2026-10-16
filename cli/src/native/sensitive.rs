@@ -1345,7 +1345,8 @@ pub fn always_denied(action: &str) -> bool {
 pub fn guarded(action: &str, cmd: &Value) -> bool {
     matches!(
         action,
-        "evaluate"
+        "fill"
+            | "evaluate"
             | "evalhandle"
             | "addscript"
             | "waitforfunction"

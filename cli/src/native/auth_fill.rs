@@ -1,6 +1,7 @@
 //! One private field fill, bound to the caller's exact active target and frame.
 //! The daemon owns the operation lock, deadline and disconnect cancellation.
-//! No navigation, submit, focus-based insertion or replay occurs here.
+//! Generic fills do not navigate, submit, insert by focus or replay.
+//! The closed WORK provider additionally owns identifier readiness and explicit submit.
 
 use super::actions::DaemonState;
 use super::element::{resolve_element_object_id, RefMap};
