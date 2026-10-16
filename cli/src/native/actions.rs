@@ -16652,17 +16652,12 @@ mod tests {
         }
         let client = fixture.manager.client.clone();
         let session = fixture.manager.active_session_id().unwrap().to_owned();
-        let mut refs = RefMap::new();
-        let captured = snapshot::take_snapshot(
-            &client,
-            &session,
-            &SnapshotOptions::default(),
-            &mut refs,
-            None,
-            &HashMap::new(),
-        )
-        .await
-        .unwrap();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let (captured, _) =
+            protected_snapshot(&mut state, &session, &SnapshotOptions::default(), None)
+                .await
+                .unwrap();
         assert!(captured.contains("snapshot-1001"));
         assert!(!captured.contains("snapshot-1000"));
         let mut deep = 0;
