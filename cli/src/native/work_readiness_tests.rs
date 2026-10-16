@@ -278,6 +278,7 @@ impl Fixture {
                         | "DOM.enable"
                         | "Network.enable"
                         | "Accessibility.enable"
+                        | "WebMCP.enable"
                         | "Target.setAutoAttach"
                         | "Runtime.runIfWaitingForDebugger"
                         | "Page.setLifecycleEventsEnabled"
