@@ -218,11 +218,22 @@ pub async fn handle_auth_fill(
     deadline: Instant,
 ) -> Result<Value, String> {
     let mut req = request(cmd)?;
+    if req.provider == "converge-work-password-v5" && req.field == "identifier" {
+        return work_identifier_readiness(state, &req, deadline).await;
+    }
     let work_password = req.provider == "converge-work-password-v5";
     if work_password {
         if req.item != "projects/sara-experiments/secrets/shared-google-workspace-kenan-password-global/versions/5" || req.field != "password" || req.selector != r#"input[type="password"][name="Passwd"]"# || req.target != "owned-work-main" || req.frame != "main" || req.format.is_some() { return Err(INVALID.into()); }
-        if state.active_frame_id.is_some() { return Err(BINDING.into()); }
-        req.target = state.browser.as_ref().ok_or(BINDING)?.active_target_id().map_err(|_| BINDING)?.to_string();
+        if state.active_frame_id.is_some() {
+            return Err(BINDING.into());
+        }
+        req.target = state
+            .browser
+            .as_ref()
+            .ok_or(BINDING)?
+            .active_target_id()
+            .map_err(|_| BINDING)?
+            .to_string();
     }
     if state.recording_state.active
         || state.tracing_state.active
@@ -250,6 +261,249 @@ pub async fn handle_auth_fill(
         )
     })
     .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkStep {
+    IdentifierReady,
+    IdentifierFilled,
+    NextDispatched,
+    PasswordReady,
+    ChallengeReady,
+    Refused,
+    Unknown,
+}
+
+impl WorkStep {
+    fn public(self) -> Value {
+        let state = match self {
+            Self::PasswordReady => "password-ready",
+            Self::ChallengeReady => "challenge-ready",
+            Self::Refused => "refused",
+            Self::IdentifierReady
+            | Self::IdentifierFilled
+            | Self::NextDispatched
+            | Self::Unknown => "unknown",
+        };
+        json!({"kind":"work-readiness", "state":state, "authentication":"not-established"})
+    }
+
+    fn decode(value: &Value) -> Result<Self, ()> {
+        let object = value.as_object().ok_or(())?;
+        if object.len() != 1 {
+            return Err(());
+        }
+        match value["state"].as_str() {
+            Some("identifier-ready") => Ok(Self::IdentifierReady),
+            Some("identifier-filled") => Ok(Self::IdentifierFilled),
+            Some("next-dispatched") => Ok(Self::NextDispatched),
+            Some("password-ready") => Ok(Self::PasswordReady),
+            Some("challenge-ready") => Ok(Self::ChallengeReady),
+            Some("refused") => Ok(Self::Refused),
+            Some("unknown") => Ok(Self::Unknown),
+            _ => Err(()),
+        }
+    }
+}
+
+struct WorkPage {
+    bound: Binding,
+    object: String,
+    _group: super::cdp::client::RemoteObjectGroup,
+}
+
+async fn work_bound(state: &DaemonState, location: &FieldLocation) -> Result<Binding, ()> {
+    if state.active_frame_id.is_some() || location.frame != "main" {
+        return Err(());
+    }
+    let bound = bind_location(state, location).await.map_err(|_| ())?;
+    let url = url::Url::parse(&bound.url).map_err(|_| ())?;
+    if url.origin().ascii_serialization() != "https://accounts.google.com"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || bound.frame_session.is_some()
+    {
+        return Err(());
+    }
+    Ok(bound)
+}
+
+async fn work_page(state: &DaemonState, location: &FieldLocation) -> Result<WorkPage, ()> {
+    let bound = work_bound(state, location).await?;
+    let client = &state.browser.as_ref().ok_or(())?.client;
+    let group = client
+        .object_group(vec![bound.session.clone()])
+        .await
+        .map_err(|_| ())?;
+    let probe = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression":format!("({})()", include_str!("work_readiness.js")),
+                "objectGroup":group.name, "returnByValue":false,
+            })),
+            Some(&bound.session),
+        )
+        .await
+        .map_err(|_| ())?;
+    if probe.get("exceptionDetails").is_some() || work_bound(state, location).await? != bound {
+        return Err(());
+    }
+    let object = probe["result"]["objectId"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or(())?
+        .to_string();
+    Ok(WorkPage {
+        bound,
+        object,
+        _group: group,
+    })
+}
+
+async fn work_step(
+    state: &DaemonState,
+    location: &FieldLocation,
+    page: &WorkPage,
+    method: &str,
+) -> Result<WorkStep, ()> {
+    if work_bound(state, location).await? != page.bound {
+        return Err(());
+    }
+    let declaration = match method {
+        "inspect" => "function() { return this.inspect(); }",
+        "fillIdentifier" => "function() { return this.fillIdentifier(); }",
+        "clickNext" => "function() { return this.clickNext(); }",
+        "readiness" => "function() { return this.readiness(); }",
+        _ => return Err(()),
+    };
+    let value = state.browser.as_ref().ok_or(())?.client.send_command("Runtime.callFunctionOn", Some(json!({
+        "objectId":page.object,"functionDeclaration":declaration,"returnByValue":true,"awaitPromise":true,
+    })), Some(&page.bound.session)).await.map_err(|_| ())?;
+    if value.get("exceptionDetails").is_some() {
+        return Err(());
+    }
+    let result = WorkStep::decode(&value["result"]["value"])?;
+    if method != "clickNext" && work_bound(state, location).await? != page.bound {
+        return Err(());
+    }
+    Ok(result)
+}
+
+async fn work_backend(
+    state: &DaemonState,
+    location: &FieldLocation,
+    page: &WorkPage,
+) -> Result<i64, ()> {
+    if work_bound(state, location).await? != page.bound {
+        return Err(());
+    }
+    let client = &state.browser.as_ref().ok_or(())?.client;
+    let node = client.send_command("Runtime.callFunctionOn", Some(json!({
+        "objectId":page.object,"functionDeclaration":"function() { return this.identifierNode(); }",
+        "returnByValue":false,
+    })), Some(&page.bound.session)).await.map_err(|_| ())?;
+    if node.get("exceptionDetails").is_some() {
+        return Err(());
+    }
+    let object = node["result"]["objectId"].as_str().ok_or(())?;
+    let description = client
+        .send_command(
+            "DOM.describeNode",
+            Some(json!({"objectId":object})),
+            Some(&page.bound.session),
+        )
+        .await
+        .map_err(|_| ())?;
+    if work_bound(state, location).await? != page.bound {
+        return Err(());
+    }
+    description["node"]["backendNodeId"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .ok_or(())
+}
+
+async fn work_identifier_transition(
+    state: &DaemonState,
+    location: &FieldLocation,
+) -> Result<WorkStep, ()> {
+    let page = work_page(state, location).await?;
+    match work_step(state, location, &page, "inspect").await? {
+        terminal @ (WorkStep::PasswordReady
+        | WorkStep::ChallengeReady
+        | WorkStep::Refused
+        | WorkStep::Unknown) => return Ok(terminal),
+        WorkStep::IdentifierReady => {}
+        WorkStep::IdentifierFilled | WorkStep::NextDispatched => return Err(()),
+    }
+    let backend = work_backend(state, location, &page).await?;
+    match work_step(state, location, &page, "fillIdentifier").await? {
+        WorkStep::IdentifierFilled => {}
+        terminal @ (WorkStep::Refused | WorkStep::Unknown) => return Ok(terminal),
+        _ => return Err(()),
+    }
+    if work_backend(state, location, &page).await? != backend {
+        return Err(());
+    }
+    match work_step(state, location, &page, "clickNext").await? {
+        WorkStep::NextDispatched => {}
+        terminal @ (WorkStep::Refused | WorkStep::Unknown) => return Ok(terminal),
+        _ => return Err(()),
+    }
+    // Only the intended Next permits a new loader; target/session/frame remain fixed.
+    loop {
+        let ready = work_page(state, location).await?;
+        if ready.bound.session != page.bound.session || ready.bound.frame != page.bound.frame {
+            return Err(());
+        }
+        match work_step(state, location, &ready, "readiness").await? {
+            terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady | WorkStep::Refused) => {
+                return Ok(terminal)
+            }
+            WorkStep::Unknown => {}
+            _ => return Err(()),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+async fn work_identifier_readiness(
+    state: &DaemonState,
+    req: &FillRequest,
+    deadline: Instant,
+) -> Result<Value, String> {
+    if req.item != "projects/sara-experiments/secrets/shared-google-workspace-kenan-password-global/versions/5"
+        || req.selector != r#"input[type="email"]"# || req.target != "owned-work-main" || req.frame != "main"
+        || req.format.is_some() || state.active_frame_id.is_some()
+        || state.recording_state.active || state.tracing_state.active || state.screencasting
+        || state.stream_server.is_some() || state.har_recording || state.request_tracking {
+        return Ok(WorkStep::Refused.public());
+    }
+    let target = match state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_target_id().ok())
+    {
+        Some(target) => target.to_owned(),
+        None => return Ok(WorkStep::Refused.public()),
+    };
+    let location = FieldLocation {
+        target,
+        frame: "main".into(),
+    };
+    if work_bound(state, &location).await.is_err() {
+        return Ok(WorkStep::Refused.public());
+    }
+    let end = deadline
+        .checked_sub(std::time::Duration::from_millis(100))
+        .unwrap_or(deadline);
+    let outcome = tokio::time::timeout_at(end, work_identifier_transition(state, &location)).await;
+    let result = match outcome {
+        Ok(Ok(state)) => state,
+        Ok(Err(())) | Err(_) => WorkStep::Unknown,
+    };
+    Ok(result.public())
 }
 
 async fn fill_with_resolver<F, Fut>(
@@ -287,7 +541,12 @@ where
     let work_password = req.provider == "converge-work-password-v5";
     if work_password {
         let url = url::Url::parse(&bound.url).map_err(|_| BINDING)?;
-        if url.origin().ascii_serialization() != "https://accounts.google.com" || !url.username().is_empty() || url.password().is_some() { return Err(BINDING.into()); }
+        if url.origin().ascii_serialization() != "https://accounts.google.com"
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(BINDING.into());
+        }
     }
     let probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId": object,
@@ -451,7 +710,9 @@ where
         return Err(PAGE.into());
     }
     match filled["result"]["value"]["status"].as_str() {
-        Some("submitted") if work_password => Ok(json!({"submitted":true,"authentication":"not-established","target":req.target,"frame":req.frame,"field":req.field})),
+        Some("submitted") if work_password => Ok(
+            json!({"submitted":true,"authentication":"not-established","target":req.target,"frame":req.frame,"field":req.field}),
+        ),
         Some("filled") => Ok(
             json!({"filled": true, "target": req.target, "frame": req.frame, "field": req.field}),
         ),
@@ -590,7 +851,9 @@ mod tests {
     }
 
     impl Fixture {
-        async fn new() -> Self { Self::new_work(false).await }
+        async fn new() -> Self {
+            Self::new_work(false).await
+        }
         async fn new_work(work: bool) -> Self {
             use futures_util::{SinkExt, StreamExt};
             use std::sync::{
@@ -779,46 +1042,102 @@ mod tests {
         fixture.server.abort();
     }
 
-
     fn work_req() -> FillRequest {
         request(&json!({"credentialProvider":"converge-work-password-v5","credentialItem":"projects/sara-experiments/secrets/shared-google-workspace-kenan-password-global/versions/5","field":"password","selector":"input[type=\"password\"][name=\"Passwd\"]","target":"page","frame":"main"})).unwrap()
     }
     #[tokio::test]
     async fn work_password_native_submit_is_metadata_only() {
         use std::sync::atomic::Ordering;
-        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
-        let result=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {Ok("synthetic-private-value".into())}).await.unwrap();
-        assert_eq!(result["submitted"],true);assert_eq!(result["authentication"],"not-established");assert!(!result.to_string().contains("synthetic-private-value"));assert_eq!(fixture.fills.load(Ordering::SeqCst),1);fixture.server.abort();
+        let mut fixture = Fixture::new_work(true).await;
+        fixture.state.active_frame_id = None;
+        let result = fill_with_resolver(
+            &mut fixture.state,
+            &work_req(),
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async { Ok("synthetic-private-value".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["submitted"], true);
+        assert_eq!(result["authentication"], "not-established");
+        assert!(!result.to_string().contains("synthetic-private-value"));
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 1);
+        fixture.server.abort();
     }
     #[tokio::test]
     async fn work_password_foreign_origin_refuses_before_lookup() {
         use std::sync::atomic::Ordering;
-        let mut fixture=Fixture::new().await;fixture.state.active_frame_id=None;
-        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {panic!("foreign origin must never resolve")}).await.unwrap_err();
-        assert_eq!(error,BINDING);assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+        let mut fixture = Fixture::new().await;
+        fixture.state.active_frame_id = None;
+        let error = fill_with_resolver(
+            &mut fixture.state,
+            &work_req(),
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async { panic!("foreign origin must never resolve") },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, BINDING);
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
+        fixture.server.abort();
     }
     #[tokio::test]
     async fn work_password_loader_change_after_lookup_refuses_fill_submit() {
         use std::sync::atomic::Ordering;
-        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
-        let generation=fixture.generation.clone();
-        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async move {generation.store(2,Ordering::SeqCst);Ok("synthetic-private-value".into())}).await.unwrap_err();
-        assert_eq!(error,BINDING);assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+        let mut fixture = Fixture::new_work(true).await;
+        fixture.state.active_frame_id = None;
+        let generation = fixture.generation.clone();
+        let error = fill_with_resolver(
+            &mut fixture.state,
+            &work_req(),
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async move {
+                generation.store(2, Ordering::SeqCst);
+                Ok("synthetic-private-value".into())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, BINDING);
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
+        fixture.server.abort();
     }
     #[tokio::test]
     async fn work_password_private_lookup_error_is_redacted() {
         use std::sync::atomic::Ordering;
-        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
-        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {Err("synthetic-private-value".into())}).await.unwrap_err();
-        assert!(!error.contains("synthetic-private-value"));assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+        let mut fixture = Fixture::new_work(true).await;
+        fixture.state.active_frame_id = None;
+        let error = fill_with_resolver(
+            &mut fixture.state,
+            &work_req(),
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async { Err("synthetic-private-value".into()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.contains("synthetic-private-value"));
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
+        fixture.server.abort();
     }
     #[tokio::test]
     async fn work_password_cancelled_lookup_never_fills_or_submits() {
         use std::sync::atomic::Ordering;
-        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
-        let req=work_req();
-        let outcome=tokio::time::timeout(std::time::Duration::from_millis(20),fill_with_resolver(&mut fixture.state,&req,Instant::now()+std::time::Duration::from_secs(2),|_|async {std::future::pending::<Result<String,String>>().await})).await;
-        assert!(outcome.is_err());assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+        let mut fixture = Fixture::new_work(true).await;
+        fixture.state.active_frame_id = None;
+        let req = work_req();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            fill_with_resolver(
+                &mut fixture.state,
+                &req,
+                Instant::now() + std::time::Duration::from_secs(2),
+                |_| async { std::future::pending::<Result<String, String>>().await },
+            ),
+        )
+        .await;
+        assert!(outcome.is_err());
+        assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
+        fixture.server.abort();
     }
 
     #[tokio::test]

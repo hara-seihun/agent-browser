@@ -69,3 +69,5 @@ mod e2e_tests;
 mod lifecycle_fixture;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod work_readiness_tests;
