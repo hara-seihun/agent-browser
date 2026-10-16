@@ -217,7 +217,13 @@ pub async fn handle_auth_fill(
     state: &mut DaemonState,
     deadline: Instant,
 ) -> Result<Value, String> {
-    let req = request(cmd)?;
+    let mut req = request(cmd)?;
+    let work_password = req.provider == "converge-work-password-v5";
+    if work_password {
+        if req.item != "projects/sara-experiments/secrets/shared-google-workspace-kenan-password-global/versions/5" || req.field != "password" || req.selector != r#"input[type="password"][name="Passwd"]"# || req.target != "owned-work-main" || req.frame != "main" || req.format.is_some() { return Err(INVALID.into()); }
+        if state.active_frame_id.is_some() { return Err(BINDING.into()); }
+        req.target = state.browser.as_ref().ok_or(BINDING)?.active_target_id().map_err(|_| BINDING)?.to_string();
+    }
     if state.recording_state.active
         || state.tracing_state.active
         || state.screencasting
@@ -278,9 +284,14 @@ where
     if object_session != bound.frame_session.as_deref().unwrap_or(&bound.session) {
         return Err(BINDING.into());
     }
+    let work_password = req.provider == "converge-work-password-v5";
+    if work_password {
+        let url = url::Url::parse(&bound.url).map_err(|_| BINDING)?;
+        if url.origin().ascii_serialization() != "https://accounts.google.com" || !url.username().is_empty() || url.password().is_some() { return Err(BINDING.into()); }
+    }
     let probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId": object,
-        "functionDeclaration": "function() { if (!this.isConnected || !['INPUT','TEXTAREA'].includes(this.tagName) || (this.tagName === 'INPUT' && !['text','password','email','tel','url','search','number','date','month'].includes(this.type)) || this.matches(':disabled') || this.readOnly || !this.getClientRects().length) return null; return this.ownerDocument; }",
+        "functionDeclaration": if work_password { WORK_PASSWORD_PROBE } else { "function() { if (!this.isConnected || !['INPUT','TEXTAREA'].includes(this.tagName) || (this.tagName === 'INPUT' && !['text','password','email','tel','url','search','number','date','month'].includes(this.type)) || this.matches(':disabled') || this.readOnly || !this.getClientRects().length) return null; return this.ownerDocument; }" },
         "returnByValue": false
     })), Some(&object_session)).await.map_err(|_| PAGE)?;
     if probe.get("exceptionDetails").is_some() {
@@ -407,7 +418,7 @@ where
             "Runtime.callFunctionOn",
             Some(json!({
                 "objectId": object,
-                "functionDeclaration": PRIVATE_FILL,
+                "functionDeclaration": if work_password { WORK_PASSWORD_FILL } else { PRIVATE_FILL },
                 "arguments": [{"value": value}, {"objectId": document}, {"value": req.field},
                     match &segments { Some(array) => json!({"objectId":array}), None => json!({"value":null}) }],
                 "returnByValue": true,
@@ -440,6 +451,7 @@ where
         return Err(PAGE.into());
     }
     match filled["result"]["value"]["status"].as_str() {
+        Some("submitted") if work_password => Ok(json!({"submitted":true,"authentication":"not-established","target":req.target,"frame":req.frame,"field":req.field})),
         Some("filled") => Ok(
             json!({"filled": true, "target": req.target, "frame": req.frame, "field": req.field}),
         ),
@@ -473,6 +485,62 @@ const SEGMENT_GROUP: &str = r#"function(count) {
     }
     return null;
 }"#;
+
+const WORK_PASSWORD_PROBE: &str = r##"function(){return (function(){
+ const doc=this.ownerDocument;
+ if(!this.isConnected||this.tagName!=='INPUT'||this.type!=='password'||this.name!=='Passwd'||this.disabled||this.readOnly||!this.getClientRects().length)return null;
+ if(!doc||doc.defaultView.location.origin!=='https://accounts.google.com'||doc.defaultView!==doc.defaultView.top)return null;
+ const form=this.form;if(!form||!form.isConnected||form.method.toUpperCase()!=='POST')return null;
+ let action;try{action=new URL(form.action,doc.baseURI);}catch{return null;}
+ if(action.origin!=='https://accounts.google.com'||action.username||action.password)return null;
+ const identities=Array.from(doc.querySelectorAll('[data-identifier]')).map(el=>el.getAttribute('data-identifier'));
+ const hidden=Array.from(form.querySelectorAll('input[type="hidden"][name="identifier"]')).map(el=>el.value);
+ const accounts=[...identities,...hidden].filter(value=>typeof value==='string'&&value.length>0);
+ if(accounts.length===0||accounts.some(value=>value!=='kenan@liminal.co'))return null;
+ const controls=Array.from(doc.querySelectorAll('input[type="password"][name="Passwd"]')).filter(el=>el.isConnected&&!el.disabled&&!el.readOnly&&el.getClientRects().length);
+ if(controls.length!==1||controls[0]!==this)return null;
+ const buttons=Array.from(doc.querySelectorAll('#passwordNext button')).filter(el=>el.isConnected&&!el.disabled&&el.getClientRects().length);
+ if(buttons.length!==1)return null;
+ const button=buttons[0];if(button.ownerDocument!==doc)return null;
+ return {doc,form,button,action:action.href};
+}).call(this);}"##;
+const WORK_PASSWORD_FILL: &str = r##"async function(value,bound,field,segments){
+ const inspect=function(){
+ const doc=this.ownerDocument;
+ if(!this.isConnected||this.tagName!=='INPUT'||this.type!=='password'||this.name!=='Passwd'||this.disabled||this.readOnly||!this.getClientRects().length)return null;
+ if(!doc||doc.defaultView.location.origin!=='https://accounts.google.com'||doc.defaultView!==doc.defaultView.top)return null;
+ const form=this.form;if(!form||!form.isConnected||form.method.toUpperCase()!=='POST')return null;
+ let action;try{action=new URL(form.action,doc.baseURI);}catch{return null;}
+ if(action.origin!=='https://accounts.google.com'||action.username||action.password)return null;
+ const identities=Array.from(doc.querySelectorAll('[data-identifier]')).map(el=>el.getAttribute('data-identifier'));
+ const hidden=Array.from(form.querySelectorAll('input[type="hidden"][name="identifier"]')).map(el=>el.value);
+ const accounts=[...identities,...hidden].filter(value=>typeof value==='string'&&value.length>0);
+ if(accounts.length===0||accounts.some(value=>value!=='kenan@liminal.co'))return null;
+ const controls=Array.from(doc.querySelectorAll('input[type="password"][name="Passwd"]')).filter(el=>el.isConnected&&!el.disabled&&!el.readOnly&&el.getClientRects().length);
+ if(controls.length!==1||controls[0]!==this)return null;
+ const buttons=Array.from(doc.querySelectorAll('#passwordNext button')).filter(el=>el.isConnected&&!el.disabled&&el.getClientRects().length);
+ if(buttons.length!==1)return null;
+ const button=buttons[0];if(button.ownerDocument!==doc)return null;
+ return {doc,form,button,action:action.href};
+};
+ const before=inspect.call(this);
+ if(!bound||!before||before.doc!==bound.doc||before.form!==bound.form||before.button!==bound.button||before.action!==bound.action||field!=='password'||segments)return {status:'detached'};
+ const document=bound.doc;
+ const view=document.defaultView;
+ const setter=Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype,'value').set;
+ setter.call(this,value);
+ this.dispatchEvent(new view.Event('input',{bubbles:true}));
+ this.dispatchEvent(new view.Event('change',{bubbles:true}));
+ await new Promise(resolve=>view.setTimeout(resolve,100));
+ const rendered=this.value;
+ const current=inspect.call(this);
+ if(!current||current.doc!==before.doc||current.form!==before.form||current.button!==before.button||current.action!==before.action)return {status:'detached',redactionValue:rendered};
+ if(rendered!==value)return {status:'not_retained',redactionValue:rendered};
+ // Same pinned ordinary continuation, after exact retention and immediately
+ // before native click. A lost reply is unknown, never replayable.
+ current.button.click();
+ return {status:'submitted',redactionValue:rendered};
+}"##;
 
 const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
@@ -522,7 +590,8 @@ mod tests {
     }
 
     impl Fixture {
-        async fn new() -> Self {
+        async fn new() -> Self { Self::new_work(false).await }
+        async fn new_work(work: bool) -> Self {
             use futures_util::{SinkExt, StreamExt};
             use std::sync::{
                 atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -554,9 +623,9 @@ mod tests {
                             if cmd["sessionId"] == "child-session" {
                                 json!({"frameTree":{"frame":{"id":"child", "parentId":if active {"root"} else {"background-root"}, "loaderId":loader, "url":"https://child.test"}}})
                             } else if active {
-                                json!({"frameTree":{"frame":{"id":"root", "loaderId":"topdoc", "url":"https://fixture.test"}, "childFrames":[{"frame":{"id":"child", "parentId":"root", "loaderId":loader, "url":"https://child.test"}}]}})
+                                json!({"frameTree":{"frame":{"id":"root", "loaderId":if work {format!("topdoc{}",server_generation.load(Ordering::SeqCst))}else{"topdoc".to_string()}, "url":if work {"https://accounts.google.com/v3/signin/challenge/pwd"}else{"https://fixture.test"}}, "childFrames":[{"frame":{"id":"child", "parentId":"root", "loaderId":loader, "url":"https://child.test"}}]}})
                             } else {
-                                json!({"frameTree":{"frame":{"id":"root", "loaderId":"topdoc", "url":"https://fixture.test"}}})
+                                json!({"frameTree":{"frame":{"id":"root", "loaderId":if work {format!("topdoc{}",server_generation.load(Ordering::SeqCst))}else{"topdoc".to_string()}, "url":if work {"https://accounts.google.com/v3/signin/challenge/pwd"}else{"https://fixture.test"}}}})
                             }
                         }
                         "Runtime.evaluate" => {
@@ -564,7 +633,11 @@ mod tests {
                         }
                         "DOM.describeNode" => json!({"node":{"backendNodeId":7}}),
                         "Runtime.callFunctionOn" => {
-                            if cmd["params"]["functionDeclaration"] == PRIVATE_FILL {
+                            if work && cmd["params"]["functionDeclaration"] == WORK_PASSWORD_FILL {
+                                assert_eq!(cmd["sessionId"], "page-session");
+                                server_fills.fetch_add(1, Ordering::SeqCst);
+                                json!({"result":{"value":{"status":"submitted", "redactionValue":"synthetic-private-value"}}})
+                            } else if cmd["params"]["functionDeclaration"] == PRIVATE_FILL {
                                 assert_eq!(cmd["sessionId"], "child-session");
                                 assert_eq!(
                                     cmd["params"]["arguments"][1]["objectId"],
@@ -704,6 +777,48 @@ mod tests {
             assert_eq!(error, BINDING);
         }
         fixture.server.abort();
+    }
+
+
+    fn work_req() -> FillRequest {
+        request(&json!({"credentialProvider":"converge-work-password-v5","credentialItem":"projects/sara-experiments/secrets/shared-google-workspace-kenan-password-global/versions/5","field":"password","selector":"input[type=\"password\"][name=\"Passwd\"]","target":"page","frame":"main"})).unwrap()
+    }
+    #[tokio::test]
+    async fn work_password_native_submit_is_metadata_only() {
+        use std::sync::atomic::Ordering;
+        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
+        let result=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {Ok("synthetic-private-value".into())}).await.unwrap();
+        assert_eq!(result["submitted"],true);assert_eq!(result["authentication"],"not-established");assert!(!result.to_string().contains("synthetic-private-value"));assert_eq!(fixture.fills.load(Ordering::SeqCst),1);fixture.server.abort();
+    }
+    #[tokio::test]
+    async fn work_password_foreign_origin_refuses_before_lookup() {
+        use std::sync::atomic::Ordering;
+        let mut fixture=Fixture::new().await;fixture.state.active_frame_id=None;
+        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {panic!("foreign origin must never resolve")}).await.unwrap_err();
+        assert_eq!(error,BINDING);assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+    }
+    #[tokio::test]
+    async fn work_password_loader_change_after_lookup_refuses_fill_submit() {
+        use std::sync::atomic::Ordering;
+        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
+        let generation=fixture.generation.clone();
+        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async move {generation.store(2,Ordering::SeqCst);Ok("synthetic-private-value".into())}).await.unwrap_err();
+        assert_eq!(error,BINDING);assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+    }
+    #[tokio::test]
+    async fn work_password_private_lookup_error_is_redacted() {
+        use std::sync::atomic::Ordering;
+        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
+        let error=fill_with_resolver(&mut fixture.state,&work_req(),Instant::now()+std::time::Duration::from_secs(2),|_|async {Err("synthetic-private-value".into())}).await.unwrap_err();
+        assert!(!error.contains("synthetic-private-value"));assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
+    }
+    #[tokio::test]
+    async fn work_password_cancelled_lookup_never_fills_or_submits() {
+        use std::sync::atomic::Ordering;
+        let mut fixture=Fixture::new_work(true).await;fixture.state.active_frame_id=None;
+        let req=work_req();
+        let outcome=tokio::time::timeout(std::time::Duration::from_millis(20),fill_with_resolver(&mut fixture.state,&req,Instant::now()+std::time::Duration::from_secs(2),|_|async {std::future::pending::<Result<String,String>>().await})).await;
+        assert!(outcome.is_err());assert_eq!(fixture.fills.load(Ordering::SeqCst),0);fixture.server.abort();
     }
 
     #[tokio::test]
