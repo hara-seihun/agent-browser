@@ -12782,3 +12782,90 @@ async fn e2e_console_includes_cross_origin_frame_logs() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     server.abort();
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_launch_preparation_confirmation_resumes_requested_effect_once() {
+    let home = tempfile::tempdir().unwrap();
+    let guard = EnvGuard::new(&[
+        "HOME",
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_PLUGINS",
+        "AGENT_BROWSER_CA_CERT",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+    ]);
+    guard.set("HOME", home.path().to_str().unwrap());
+    for name in [
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_PLUGINS",
+        "AGENT_BROWSER_CA_CERT",
+    ] {
+        guard.remove(name);
+    }
+    let policy = home.path().join("policy.json");
+    std::fs::write(&policy, r#"{"confirm":["launch","evaluate"]}"#).unwrap();
+    let mut state = DaemonState::new();
+    state.policy = Some(super::policy::ActionPolicy::load(policy.to_str().unwrap()).unwrap());
+    let request = json!({"id":"original-effect", "action":"evaluate", "timeout":12000,
+        "script":"globalThis.preparationEffects = (globalThis.preparationEffects || 0) + 1",
+        "launchPreparations":[{"action":"launch", "headless":true, "engine":"chrome"}]});
+    let pending_launch = execute_command(&request, &mut state).await;
+    assert_success(&pending_launch);
+    assert_eq!(pending_launch["id"], "original-effect");
+    assert_eq!(pending_launch["launchPreparation"], "incomplete");
+    assert_eq!(pending_launch["data"]["action"], "launch");
+    assert!(state.browser.is_none());
+    assert_eq!(state.pending_confirmation.as_ref().unwrap().cmd, request);
+
+    let pending_effect = execute_command(
+        &json!({"id":"approve-launch", "action":"confirm", "timeout":12000}),
+        &mut state,
+    )
+    .await;
+    assert_success(&pending_effect);
+    let nested = &pending_effect["data"]["result"];
+    assert_eq!(nested["id"], "original-effect");
+    assert_eq!(nested["launchPreparation"], "complete");
+    assert_eq!(
+        nested["data"]["confirmation_required"], true,
+        "{pending_effect}"
+    );
+    assert_eq!(nested["data"]["action"], "evaluate");
+    assert!(state.browser.is_some());
+    let retained = &state.pending_confirmation.as_ref().unwrap().cmd;
+    assert_eq!(retained["id"], "original-effect");
+    assert_eq!(retained["timeout"], 12000);
+    assert!(retained.get("launchPreparations").is_none());
+
+    std::fs::write(&policy, r#"{"deny":["launch"],"confirm":["evaluate"]}"#).unwrap();
+    let completed = execute_command(
+        &json!({"id":"approve-effect", "action":"confirm", "timeout":12000}),
+        &mut state,
+    )
+    .await;
+    assert_success(&completed);
+    let result = &completed["data"]["result"];
+    assert_success(result);
+    assert_eq!(result["id"], "original-effect");
+    assert_eq!(result["data"]["result"], 1);
+    assert!(state.pending_confirmation.is_none());
+    let repeated_confirm = execute_command(
+        &json!({"id":"no-replay", "action":"confirm", "timeout":12000}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(repeated_confirm["success"], false);
+    std::fs::write(&policy, r#"{"deny":["launch"]}"#).unwrap();
+    assert_evaluate(
+        &mut state,
+        "count",
+        "globalThis.preparationEffects",
+        json!(1),
+    )
+    .await;
+    close_current_browser(&mut state).await.unwrap();
+}

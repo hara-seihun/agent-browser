@@ -30,9 +30,18 @@ pub struct Request {
     pub extra: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchPreparation {
+    Complete,
+    Incomplete,
+}
+
 #[derive(Deserialize, Serialize, Default)]
 pub struct Response {
     pub success: bool,
+    #[serde(rename = "launchPreparation", skip_serializing_if = "Option::is_none")]
+    pub launch_preparation: Option<LaunchPreparation>,
     pub data: Option<Value>,
     pub error: Option<String>,
     /// Machine-readable error code for select failures (e.g. `tab_gone`

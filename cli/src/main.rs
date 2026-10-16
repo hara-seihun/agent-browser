@@ -1649,6 +1649,7 @@ fn main() {
                 code: None,
                 executed: None,
                 warning: None,
+                launch_preparation: None,
             },
             Err(e) => connection::Response {
                 success: false,
@@ -1657,6 +1658,7 @@ fn main() {
                 code: None,
                 executed: None,
                 warning: None,
+                launch_preparation: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -2088,6 +2090,30 @@ fn send_command_with_respawn(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BatchPreparation<'a> {
+    Pending(&'a [serde_json::Value]),
+    Complete,
+}
+
+impl<'a> BatchPreparation<'a> {
+    fn attach(&self, command: &mut serde_json::Value) {
+        if let Self::Pending(preparations) = self {
+            attach_launch_preparations(command, preparations);
+        }
+    }
+
+    fn observe(&mut self, response: &Response) -> bool {
+        if matches!(self, Self::Pending(_)) {
+            match response.launch_preparation {
+                Some(connection::LaunchPreparation::Complete) => *self = Self::Complete,
+                Some(connection::LaunchPreparation::Incomplete) | None => return false,
+            }
+        }
+        confirmation_prompt_from_response(response).is_none()
+    }
+}
+
 fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
@@ -2142,6 +2168,11 @@ fn run_batch(
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
     let mut had_busy = false;
+    let mut preparation = if launch_preparations.is_empty() {
+        BatchPreparation::Complete
+    } else {
+        BatchPreparation::Pending(launch_preparations)
+    };
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
@@ -2185,10 +2216,11 @@ fn run_batch(
 
         attach_pin_tab_to_command(&mut parsed, flags);
 
-        attach_launch_preparations(&mut parsed, launch_preparations);
+        preparation.attach(&mut parsed);
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 let response_exit = resp.exit_code();
+                let may_continue = preparation.observe(&resp);
                 if flags.json {
                     let mut result = json!({
                         "command": cmd_args,
@@ -2211,12 +2243,20 @@ fn run_batch(
                     if let Some(ref warning) = resp.warning {
                         result["warning"] = json!(warning);
                     }
+                    if let Some(status) = resp.launch_preparation {
+                        result["launchPreparation"] = json!(status);
+                    }
                     results.push(result);
                 } else {
                     if i > 0 {
                         println!();
                     }
                     print_response_with_opts(&resp, action.as_deref(), &output_opts);
+                }
+                if !may_continue {
+                    had_error = true;
+                    had_busy |= response_exit == 3;
+                    break;
                 }
                 if response_exit != 0 {
                     had_error = true;
@@ -2245,6 +2285,9 @@ fn run_batch(
                     if bail {
                         exit(1);
                     }
+                }
+                if matches!(preparation, BatchPreparation::Pending(_)) {
+                    break;
                 }
             }
         }
@@ -2931,6 +2974,68 @@ mod tests {
     }
 
     #[test]
+    fn launch_preparation_batch_runs_setup_once_even_after_requested_failure() {
+        let preparations = [json!({"action":"launch", "storageState":"fixture-state"})];
+        let mut phase = BatchPreparation::Pending(&preparations);
+        let mut first = json!({"id":"first", "action":"navigate", "timeout":73});
+        phase.attach(&mut first);
+        assert_eq!(first["launchPreparations"], json!(preparations));
+        let failed_request = Response {
+            success: false,
+            error: Some("requested operation failed after setup".into()),
+            launch_preparation: Some(connection::LaunchPreparation::Complete),
+            ..Response::default()
+        };
+        assert!(phase.observe(&failed_request));
+        assert_eq!(phase, BatchPreparation::Complete);
+        let mut second = json!({"id":"second", "action":"cookies", "timeout":91});
+        phase.attach(&mut second);
+        assert!(second.get("launchPreparations").is_none());
+        assert_eq!(first["id"], "first");
+        assert_eq!(first["timeout"], 73);
+        assert_eq!(second["timeout"], 91);
+    }
+
+    #[test]
+    fn launch_preparation_batch_stops_on_unsettled_setup_or_confirmation() {
+        let preparations = [json!({"action":"launch"})];
+        for response in [
+            Response {
+                success: true,
+                ..Response::default()
+            },
+            Response {
+                success: false,
+                launch_preparation: Some(connection::LaunchPreparation::Incomplete),
+                ..Response::default()
+            },
+            Response {
+                success: true,
+                launch_preparation: Some(connection::LaunchPreparation::Incomplete),
+                data: Some(
+                    json!({"confirmation_required":true, "confirmation_id":"original", "action":"launch"}),
+                ),
+                ..Response::default()
+            },
+        ] {
+            let mut phase = BatchPreparation::Pending(&preparations);
+            assert!(!phase.observe(&response));
+            assert!(matches!(phase, BatchPreparation::Pending(_)));
+        }
+        let mut phase = BatchPreparation::Pending(&preparations);
+        let pending_request = Response {
+            success: true,
+            launch_preparation: Some(connection::LaunchPreparation::Complete),
+            data: Some(
+                json!({"confirmation_required":true, "confirmation_id":"original", "action":"navigate"}),
+            ),
+            ..Response::default()
+        };
+        assert!(!phase.observe(&pending_request));
+        assert_eq!(phase, BatchPreparation::Complete);
+    }
+
+    #[test]
     fn test_confirmation_prompt_from_response_finds_nested_confirm_result() {
         let resp = Response {
             success: true,
@@ -2951,6 +3056,7 @@ mod tests {
             })),
             error: None,
             warning: None,
+            launch_preparation: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();

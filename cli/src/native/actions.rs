@@ -2774,6 +2774,10 @@ pub(crate) fn command_not_executed_response(cmd: &Value) -> Value {
 }
 
 async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
+    let mut requested = cmd.clone();
+    if let Some(object) = requested.as_object_mut() {
+        object.remove("launchPreparations");
+    }
     if let Some(preparations) = cmd.get("launchPreparations") {
         let Some(preparations) = preparations.as_array().filter(|items| {
             items.iter().all(|item| {
@@ -2790,18 +2794,39 @@ async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
             response["executed"] = json!(false);
             return response;
         };
-        for preparation in preparations {
+        for (index, preparation) in preparations.iter().enumerate() {
             let mut preparation = preparation.clone();
+            preparation["id"] = cmd["id"].clone();
             preparation["timeout"] =
                 json!(crate::commands::command_timeout_ms(cmd).expect("validated command budget"));
             let mut response = Box::pin(execute_command_inner(&preparation, state, None)).await;
-            if response["success"] != true || response.get("code").is_some() {
+            if response["success"] != true
+                || response.get("code").is_some()
+                || response["data"]["confirmation_required"] == true
+            {
+                if response["data"]["confirmation_required"] == true {
+                    let pending = state
+                        .pending_confirmation
+                        .as_mut()
+                        .expect("confirmation owns command");
+                    pending.cmd = requested.clone();
+                    pending.cmd["launchPreparations"] = json!(&preparations[index..]);
+                }
+                response["launchPreparation"] = json!("incomplete");
                 response["id"] = cmd["id"].clone();
                 response["preparationAction"] = json!("launch");
                 return response;
             }
         }
     }
+    let mut response = Box::pin(execute_requested_command(&requested, state)).await;
+    if cmd.get("launchPreparations").is_some() {
+        response["launchPreparation"] = json!("complete");
+    }
+    response
+}
+
+async fn execute_requested_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     if !matches!(action, "auth_login" | "auth_fill" | "auth_export") {
         return Box::pin(execute_command_inner(cmd, state, None)).await;

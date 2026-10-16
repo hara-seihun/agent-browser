@@ -949,6 +949,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn launch_preparation_confirmation_defers_requested_effects_and_deny_retires() {
+        let home = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ]);
+        guard.set("HOME", home.path().to_str().unwrap());
+        for name in [
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+        ] {
+            guard.remove(name);
+        }
+        let policy = home.path().join("policy.json");
+        fs::write(&policy, r#"{"confirm":["launch"]}"#).unwrap();
+        let mut initial = DaemonState::new();
+        initial.policy =
+            Some(super::super::policy::ActionPolicy::load(policy.to_str().unwrap()).unwrap());
+        let state = Arc::new(tokio::sync::Mutex::new(initial));
+        let request = serde_json::json!({"id":"original", "action":"close", "timeout":321,
+            "pinTab":true, "launchPreparations":[{"action":"launch", "executablePath":"/must-not-launch"}]});
+        let activity = IdleActivity::new();
+        let stopped = AtomicBool::new(false);
+        let response = dispatch_command(&request, &state, &activity, &stopped).await;
+        assert_eq!(response["id"], "original");
+        assert_eq!(response["launchPreparation"], "incomplete");
+        assert_eq!(
+            response["data"]["confirmation_required"], true,
+            "{response}"
+        );
+        assert_eq!(response["data"]["confirmation_id"], "original");
+        {
+            let held = state.lock().await;
+            assert_eq!(held.pending_confirmation.as_ref().unwrap().cmd, request);
+            assert!(
+                !held.pin_tab,
+                "requested command did not execute while preparation is pending"
+            );
+            assert!(held.browser.is_none());
+        }
+        assert!(!stopped.load(Ordering::SeqCst));
+        let denial = dispatch_command(
+            &serde_json::json!({"id":"deny", "action":"deny", "timeout":321}),
+            &state,
+            &activity,
+            &stopped,
+        )
+        .await;
+        assert_eq!(denial["data"]["denied"], true, "{denial}");
+        let held = state.lock().await;
+        assert!(held.pending_confirmation.is_none());
+        assert!(!held.pin_tab);
+        assert!(held.browser.is_none());
+        assert!(!stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn malformed_launch_preparation_is_rejected_without_effects() {
         let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
         for preparations in [
