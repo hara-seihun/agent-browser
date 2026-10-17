@@ -2168,10 +2168,7 @@ async fn e2e_form_interaction() {
 
 async fn temporal_fixture() -> (String, SensitiveInputServer) {
     let fixture = std::process::Command::new("node")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../scripts/controlled-temporal-fixture.mjs"
-        ))
+        .args(["--input-type=module", "--eval", include_str!("../../../scripts/controlled-temporal-fixture.mjs")])
         .output()
         .expect("node is required for the real React temporal fixture");
     assert!(

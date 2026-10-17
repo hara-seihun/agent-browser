@@ -266,7 +266,7 @@ impl Fixture {
                                         }
                                     }
                                     "function() { return this.dispose(); }" => {
-                                        page_failure("refused", "policy-disposed")
+                                        json!({"result":{"type":"object","value":{"state":"refused","reason":"policy-disposed"}}})
                                     }
                                     "function() { const step = this.readiness(); return {step, diagnostic:this.diagnostic()}; }" => {
                                         t.readiness += 1;
