@@ -387,21 +387,31 @@ pub async fn fill_observed(
                 .await
                 .map_err(|_| unsupported())?;
             let backend = owner["backendNodeId"].as_i64().ok_or_else(unsupported)?;
-            let owner: DomResolveNodeResult = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend),
-                        node_id: None,
-                        object_group: Some("agent-browser".into()),
-                    },
-                    Some(session),
+            let pinned_owner = client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(serde_json::json!({
+                        "objectId":object,
+                        "functionDeclaration":"function() { if (!this.isConnected) return null; const owner = this.ownerDocument.defaultView.frameElement; return owner && owner.isConnected && owner.contentDocument === this.ownerDocument ? owner : null; }",
+                        "returnByValue":false
+                    })),
+                    Some(&target_session),
                 )
                 .await
                 .map_err(|_| unsupported())?;
-            let owner_object = owner.object.object_id.ok_or_else(unsupported)?;
-            let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({"objectId":object,"functionDeclaration":"function(owner) { return this.isConnected && owner.isConnected && owner.contentDocument === this.ownerDocument; }","arguments":[{"objectId":owner_object}],"returnByValue":true})), Some(session)).await.map_err(|_| unsupported())?;
-            if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
+            if pinned_owner.get("exceptionDetails").is_some() {
+                return Err(unsupported());
+            }
+            let owner_object = pinned_owner["result"]["objectId"].as_str().ok_or_else(unsupported)?;
+            let described_owner = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(serde_json::json!({"objectId":owner_object})),
+                    Some(&target_session),
+                )
+                .await
+                .map_err(|_| unsupported())?;
+            if described_owner["node"]["backendNodeId"].as_i64() != Some(backend) {
                 return Err(unsupported());
             }
         }
