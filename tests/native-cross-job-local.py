@@ -26,11 +26,11 @@ def ok(args):
 try:
  opened=ok(['open',f'http://127.0.0.1:{server.server_port}/index.html'])
  s=ok(['snapshot','-i']);ref='@'+re.search(r'ref=(e\d+)',s['snapshot']).group(1)
- before=ok(['session','info']);report['before']=before
+ before=ok(['session','info'])['runtime'];report['before']=before
  assert before['daemonOwner']['kind']=='systemd-user-service',before
  pid=before['backgroundPid'];report['daemonCgroup']=pathlib.Path(f'/proc/{pid}/cgroup').read_text();assert before['daemonOwner']['unit'] in report['daemonCgroup']
  ok(['fill',ref,'retained-across-job-cgroups']);value=ok(['get','value',ref]);assert 'retained-across-job-cgroups' in json.dumps(value),value
- after=ok(['session','info']);assert after['backgroundPid']==pid and after['daemonOwner']==before['daemonOwner'],after
+ after=ok(['session','info'])['runtime'];assert after['backgroundPid']==pid and after['daemonOwner']==before['daemonOwner'],after
  ok(['close'])
  deadline=time.monotonic()+3
  while pathlib.Path(f'/proc/{pid}').exists() and time.monotonic()<deadline:time.sleep(.02)

@@ -423,7 +423,7 @@ pub async fn fill_observed(
     {
         return Err(unsupported());
     }
-    let function = format!("async function(value) {{ {} if (!this.isConnected || kindOf(this)) return {{status:'sensitive'}}; return await ({}).call(this,value,'bound-form'); }}", super::sensitive::classifier_js(), include_str!("fill.js"));
+    let function = format!("async function(value) {{ {} const loginTarget = this.matches('input[type=email], [autocomplete~=username]') || (this.form && this.form.querySelector('input[type=password]')); if (!this.isConnected || kindOf(this) || loginTarget) return {{status:'sensitive'}}; return await ({}).call(this,value,'bound-form'); }}", super::sensitive::classifier_js(), include_str!("fill.js"));
     let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
         "objectId":object,"functionDeclaration":function,"arguments":[{"value":value}],"returnByValue":true,"awaitPromise":true
     })), Some(&target_session)).await.map_err(|_| unsupported())?;

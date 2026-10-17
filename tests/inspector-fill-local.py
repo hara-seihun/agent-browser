@@ -9,8 +9,8 @@ for k in list(env):
 env.update(HOME=str(r/'home'),AGENT_BROWSER_SOCKET_DIR=str(r/'s'),AGENT_BROWSER_PLUGINS='[]')
 pre=[str(n),'--config',str(r/'empty.json'),'--engine','chrome','--executable-path','/srv/pi-stack-next/toolchains/chrome-154.0.8037.92/chrome','--namespace','proof','--session','proof','--json']
 secret='SYNTHETIC-LOGIN-SECRET-921704'
-(r/'web/index.html').write_text('<!doctype html><title>Authenticated dashboard</title><input type=password id=login value="'+secret+'" hidden><button id=detach onclick="document.querySelector(\'iframe\').remove()">Detach inspector</button><iframe id=inspector src="http://localhost:PORT/inspector.html"></iframe><input aria-label="XPath" id=decoy value=unchanged>')
-(r/'web/inspector.html').write_text('<!doctype html><title>Appium Inspector fixture</title><label for=search>XPath</label><input id=search placeholder="Search for element"><input type=password id=frame-secret value="FRAME-SYNTHETIC-SECRET">')
+(r/'web/index.html').write_text('<!doctype html><title>Authenticated dashboard</title><input type=password id=login value="'+secret+'" hidden><button id=detach onclick="document.querySelector(\'iframe\').remove()">Detach inspector</button><iframe id=inspector src="http://localhost:PORT/inspector.html"></iframe><input aria-label="XPath" id=decoy value=unchanged><input id=auth-user autocomplete=username value=untouched-user>')
+(r/'web/inspector.html').write_text('<!doctype html><title>Appium Inspector fixture</title><label for=search>XPath</label><input id=search placeholder="Search for element"><input type=password id=frame-secret value="FRAME-SYNTHETIC-SECRET"><div id=unsupported contenteditable=true>unsupported editor</div>')
 class Q(http.server.SimpleHTTPRequestHandler):
  def log_message(self,*args):pass
 server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Q,directory=str(r/'web')))
@@ -40,9 +40,13 @@ try:
   assert d['exit']==0,d
   value=ok(['get','value',ref]);assert 'Start admitted top-level panel' in json.dumps(value),value
   d=cli(['fill','#frame-secret','not-a-secret']);assert d['exit']!=0 and 'SENSITIVE_OUTPUT_UNSUPPORTED' in json.dumps(d),d
+  d=cli(['fill','#unsupported','must-not-edit']);assert d['exit']!=0 and 'fill_not_editable' in json.dumps(d),d
   d=cli(['eval','document.body.innerText']);assert d['exit']!=0 and 'SENSITIVE_OUTPUT_UNSUPPORTED' in json.dumps(d),d
   s=ok(['snapshot','-i']);assert 'FRAME-SYNTHETIC-SECRET' not in json.dumps(s)
-  ok(['frame','main']);ok(['click','#detach'])
+  ok(['frame','main'])
+  d=cli(['fill','#auth-user','must-not-edit-login']);assert d['exit']!=0 and 'SENSITIVE_OUTPUT_UNSUPPORTED' in json.dumps(d),d
+  user=ok(['get','value','#auth-user']);assert 'untouched-user' in json.dumps(user),user
+  ok(['click','#detach'])
   d=cli(['fill',ref,'must-not-hit-decoy']);assert d['exit']!=0,d
   value=ok(['get','value','#decoy']);assert 'unchanged' in json.dumps(value) and 'must-not-hit-decoy' not in json.dumps(value),value
  report['accepted']=True
