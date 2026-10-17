@@ -7,6 +7,21 @@ function() {
     const own = 'kenan@liminal.co';
     const origin = 'https://accounts.google.com';
     let pinned = null;
+    let summary = null;
+    function summarize() {
+        const markers = query('[data-identifier]').map(el => el.getAttribute('data-identifier')).filter(v => typeof v === 'string' && v.length > 0);
+        const fields = query('input[name="identifier"],input[type="email"]').map(el => el.value).filter(v => typeof v === 'string' && v.length > 0);
+        const values = [...markers, ...fields];
+        const emails = query('input[type="email"]').filter(editable).length;
+        const passwords = query('input[type="password"]').filter(editable).length;
+        const challenges = query('[data-challengetype],input[name="totpPin"],input[name="idvPin"],input[name="backupCodePin"],#totpPin,#idvPin,#backupCodePin').filter(visible).length;
+        const classes = Number(emails > 0) + Number(passwords > 0) + Number(challenges > 0);
+        return Object.freeze({
+            controlClass: classes > 1 ? 'mixed' : emails > 1 || passwords > 1 ? 'ambiguous' : emails ? 'identifier' : passwords ? 'password' : challenges ? 'challenge' : 'none',
+            identity: values.length === 0 ? 'missing' : values.every(v => v === own) ? 'own' : values.some(v => v === own) ? 'conflicting' : 'foreign',
+            markerPresent: markers.length > 0, identifierPresent: fields.length > 0,
+        });
+    }
     let setterUsed = false;
     let filled = false;
     let clickUsed = false;
@@ -63,7 +78,9 @@ function() {
         return {ok: true, form, action: action.href};
     }
     function classify() {
+        summary = null;
         if (!sameDocument()) return diagnostic('refused', 'document-binding');
+        summary = summarize();
         if (!account(false)) return diagnostic('refused', 'account-mismatch');
         const allEmails = query('input[type="email"]');
         const allPasswords = query('input[type="password"]');
@@ -217,6 +234,7 @@ function() {
         } catch { return fail('policy-exception'); }
     }
     return Object.freeze({
+        diagnostic() { return summary; },
         inspect,
         fillIdentifier,
         clickNext,

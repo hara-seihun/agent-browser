@@ -72,11 +72,11 @@ struct Fixture {
 }
 
 fn page_state(state: &str) -> Value {
-    json!({"result":{"type":"object","value":{"state":state}}})
+    json!({"result":{"type":"object","value":{"step":{"state":state},"diagnostic":null}}})
 }
 
 fn page_failure(state: &str, reason: &str) -> Value {
-    json!({"result":{"type":"object","value":{"state":state,"reason":reason}}})
+    json!({"result":{"type":"object","value":{"step":{"state":state,"reason":reason},"diagnostic":null}}})
 }
 
 fn password_policy_constant(name: &str) -> &'static str {
@@ -184,7 +184,7 @@ impl Fixture {
                                     "function() { return this.identifierNode(); }" => {
                                         json!({"result":{"type":"object","objectId":"identifier-control"}})
                                     }
-                                    "function() { return this.inspect(); }" => {
+                                    "function() { const step = this.inspect(); return {step, diagnostic:this.diagnostic()}; }" => {
                                         t.inspect += 1;
                                         if t.factory != 1
                                             || (t.inspect != 1
@@ -229,7 +229,7 @@ impl Fixture {
                                             _ => page_state("identifier-ready"),
                                         }
                                     }
-                                    "function() { return this.fillIdentifier(); }" => {
+                                    "async function() { const step = await this.fillIdentifier(); return {step, diagnostic:this.diagnostic()}; }" => {
                                         t.fills += 1;
                                         if t.inspect != 1 || t.fills != 1 || t.clicks != 0 {
                                             t.violations.push(
@@ -246,7 +246,7 @@ impl Fixture {
                                             page_state("identifier-filled")
                                         }
                                     }
-                                    "function() { return this.clickNext(); }" => {
+                                    "function() { const step = this.clickNext(); return {step, diagnostic:this.diagnostic()}; }" => {
                                         t.clicks += 1;
                                         if t.fills != 1 || t.clicks != 1 {
                                             t.violations.push(
@@ -268,7 +268,7 @@ impl Fixture {
                                     "function() { return this.dispose(); }" => {
                                         page_failure("refused", "policy-disposed")
                                     }
-                                    "function() { return this.readiness(); }" => {
+                                    "function() { const step = this.readiness(); return {step, diagnostic:this.diagnostic()}; }" => {
                                         t.readiness += 1;
                                         if t.clicks != 1 {
                                             t.violations.push("readiness before one Next".into());
@@ -456,6 +456,16 @@ fn closed(reply: &Value, state: &str) {
             "{reply}"
         );
         expected["reason"] = reply["data"]["reason"].clone();
+    }
+    if !reply["data"]["diagnostic"].is_null() {
+        let diagnostic = &reply["data"]["diagnostic"];
+        assert_eq!(diagnostic.as_object().unwrap().len(), 6);
+        assert_eq!(diagnostic["policySha256"], "6986d57dc8d0fdf906cc7709232f68bada8efdd4601eab0b33fc42fb84a183f8");
+        assert!(["initial", "fill-identifier", "click-next", "post-next"].contains(&diagnostic["phase"].as_str().unwrap()));
+        assert!(["identifier", "password", "challenge", "mixed", "ambiguous", "none"].contains(&diagnostic["controlClass"].as_str().unwrap()));
+        assert!(["missing", "own", "foreign", "conflicting"].contains(&diagnostic["identity"].as_str().unwrap()));
+        assert!(diagnostic["markerPresent"].is_boolean() && diagnostic["identifierPresent"].is_boolean());
+        expected["diagnostic"] = diagnostic.clone();
     }
     assert_eq!(reply["data"], expected, "{reply}");
     nonleak(reply);
