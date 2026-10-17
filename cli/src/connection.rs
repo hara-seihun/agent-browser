@@ -893,8 +893,91 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[allow(unused_assignments)]
     let mut daemon_child: Option<std::process::Child> = None;
 
+    #[cfg(target_os = "linux")]
+    let mut managed_pid = None;
+    #[cfg(target_os = "linux")]
+    let mut managed_unit = None;
+    #[cfg(target_os = "linux")]
+    let managed = std::path::Path::new("/run/systemd/system").exists();
+    #[cfg(not(target_os = "linux"))]
+    let managed = false;
+
+    #[cfg(target_os = "linux")]
+    if managed {
+        let unit = format!("agent-browser-{}.service", uuid::Uuid::new_v4().simple());
+        let mut run = Command::new("systemd-run");
+        run.args([
+            "--user",
+            "--quiet",
+            "--collect",
+            "--service-type=exec",
+            "--property=KillMode=control-group",
+            "--property=TimeoutStopSec=10s",
+            "--property=StandardOutput=null",
+            "--property=StandardError=journal",
+        ])
+        .arg(format!("--unit={unit}"));
+        let cwd = env::current_dir()
+            .map_err(|_| "daemon_owner_unavailable: current directory unavailable")?;
+        run.arg(format!("--working-directory={}", cwd.display()));
+        apply_daemon_env(&mut run, session, opts);
+        run.env("AGENT_BROWSER_SERVICE_UNIT", &unit);
+        let mut names: std::collections::BTreeSet<std::ffi::OsString> = env::vars_os()
+            .filter(|(key, _)| {
+                key.to_string_lossy().starts_with("AGENT_BROWSER_")
+                    || matches!(
+                        key.to_str(),
+                        Some(
+                            "HOME"
+                                | "PATH"
+                                | "TMPDIR"
+                                | "DISPLAY"
+                                | "WAYLAND_DISPLAY"
+                                | "XDG_RUNTIME_DIR"
+                                | "DBUS_SESSION_BUS_ADDRESS"
+                        )
+                    )
+            })
+            .map(|(key, _)| key)
+            .collect();
+        names.extend(
+            run.get_envs()
+                .filter(|(_, value)| value.is_some())
+                .map(|(key, _)| key.to_owned()),
+        );
+        for key in names {
+            run.arg(format!("--setenv={}", key.to_string_lossy()));
+        }
+        run.arg("--").arg(&exe_path);
+        let result = run
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|_| "daemon_owner_unavailable: cannot contact systemd user service owner")?;
+        if !result.status.success() {
+            return Err("daemon_owner_unavailable: user-service admission failed; no detached process fallback".into());
+        }
+        let pid = Command::new("systemctl")
+            .args(["--user", "show", &unit, "--property=MainPID", "--value"])
+            .output()
+            .map_err(|_| "daemon_owner_unavailable: admitted service identity unavailable")?;
+        managed_pid = String::from_utf8_lossy(&pid.stdout)
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0);
+        managed_unit = Some(unit.clone());
+        if managed_pid.is_none() {
+            let _ = Command::new("systemctl")
+                .args(["--user", "stop", &unit])
+                .status();
+            return Err(
+                "daemon_owner_failed: admitted daemon exited before identity capture".into(),
+            );
+        }
+    }
+
     #[cfg(unix)]
-    {
+    if !managed {
         use std::os::unix::process::CommandExt;
 
         let mut cmd = Command::new(&exe_path);
@@ -939,6 +1022,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     }
 
     let spawned_pid = daemon_child.as_ref().map(|child| child.id());
+    #[cfg(target_os = "linux")]
+    let spawned_pid = managed_pid.or(spawned_pid);
 
     for _ in 0..50 {
         if daemon_ready(session) {
@@ -1013,6 +1098,21 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(windows)]
     let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
 
+    #[cfg(target_os = "linux")]
+    if let Some(unit) = managed_unit {
+        let stopped = Command::new("systemctl")
+            .args(["--user", "stop", &unit])
+            .status()
+            .map_err(|_| {
+                "daemon_owner_cleanup_failed: startup timed out and service stop unavailable"
+            })?;
+        if !stopped.success() {
+            return Err(
+                "daemon_owner_cleanup_failed: startup timed out; owning user service stop failed"
+                    .into(),
+            );
+        }
+    }
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
 

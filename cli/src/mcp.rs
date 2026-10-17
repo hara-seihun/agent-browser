@@ -866,7 +866,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector. Temporal inputs accept ISO values (YYYY-MM-DD or YYYY-MM-DDTHH:mm), including controlled fields. Direct and find fills require two animation frames and a following task (at most 100 ms); an unfinished barrier returns fill_render_timeout with effectDispatched:true and retention:unknown, never success or automatic replay. Invalid, non-editable, reset or replaced inputs return a fill_* code.",
+            "Clear and fill an input by @ref or CSS selector. Protected tabs permit exact nonsecret form targets; sensitive or unbound iframe targets refuse. Native Linux sessions use explicit systemd user-service custody. Temporal inputs accept ISO values (YYYY-MM-DD or YYYY-MM-DDTHH:mm), including controlled fields. Direct and find fills require two animation frames and a following task (at most 100 ms); an unfinished barrier returns fill_render_timeout with effectDispatched:true and retention:unknown, never success or automatic replay. Invalid, non-editable, reset or replaced inputs return a fill_* code.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }

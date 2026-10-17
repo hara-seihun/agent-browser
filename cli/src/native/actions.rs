@@ -3272,7 +3272,7 @@ async fn execute_command_inner(
                         .values()
                         .any(|marker| marker == "[redacted: credential]");
                 if known.has_sensitive()
-                    && (super::sensitive::guarded(action, cmd) || private_projection_unavailable)
+                    && ((action != "fill" && super::sensitive::guarded(action, cmd)) || private_projection_unavailable)
                 {
                     return error_response(
                         &id,
@@ -6723,6 +6723,15 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    if let Some(observation) = state.sensitive_observations.get(&session_id) {
+        if observation.has_sensitive() {
+            interaction::fill_observed(
+                &mgr.client, &session_id, &state.ref_map, selector, value,
+                &state.iframe_sessions, observation,
+            ).await?;
+            return Ok(json!({ "filled": selector }));
+        }
+    }
     interaction::fill(
         &mgr.client,
         &session_id,
@@ -7628,6 +7637,7 @@ fn session_info(state: &mut DaemonState) -> Value {
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
+        "daemonOwner": match env::var("AGENT_BROWSER_SERVICE_UNIT") { Ok(unit) => json!({"kind":"systemd-user-service", "unit":unit}), Err(_) => json!({"kind":"process-session"}) },
         "browserLaunched": state.browser.is_some(),
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,

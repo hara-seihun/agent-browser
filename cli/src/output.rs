@@ -1748,6 +1748,9 @@ Examples:
             r##"
 agent-browser fill - Clear and fill an input field
 
+Protected tabs allow exact nonsecret form controls; sensitive or unbound frame targets refuse.
+Linux systemd sessions use independent user-service custody; close ends the owned daemon.
+
 Usage: agent-browser fill <selector> <text>
 
 Clears the input field and fills it with the specified text.

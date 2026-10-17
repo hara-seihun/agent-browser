@@ -1,9 +1,10 @@
-async function(value) {
+async function(value, route) {
     const input = this.tagName === 'INPUT';
     const textarea = this.tagName === 'TEXTAREA';
     const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
     if (this.matches(':disabled') || this.readOnly) return { status: 'not_editable' };
-    if (!temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
+    if (route === 'bound-form' && (!input && !textarea)) return { status: 'not_editable' };
+    if (route !== 'bound-form' && !temporal && !(value === '' && (input || textarea))) return { status: 'keyboard_required' };
     const probe = this.ownerDocument.createElement(input ? 'input' : 'textarea');
     if (input) probe.type = this.type;
     probe.value = value;

@@ -324,6 +324,116 @@ pub async fn fill(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn fill_observed(
+    client: &CdpClient,
+    session: &str,
+    refs: &RefMap,
+    selector: &str,
+    value: &str,
+    frames: &HashMap<String, String>,
+    observation: &super::sensitive::Observation,
+) -> Result<(), String> {
+    let unsupported = || {
+        format!(
+            "{}: fill target is sensitive or cannot be bound safely",
+            super::sensitive::UNSUPPORTED
+        )
+    };
+    let (object, target_session) = if let Some(reference) = super::element::parse_ref(selector) {
+        let entry = refs.get(&reference).ok_or_else(unsupported)?;
+        let backend = entry.backend_node_id.ok_or_else(unsupported)?;
+        let target_session = entry
+            .frame_id
+            .as_ref()
+            .and_then(|frame| frames.get(frame))
+            .map(String::as_str)
+            .unwrap_or(session);
+        let resolved: DomResolveNodeResult = client
+            .send_command_typed(
+                "DOM.resolveNode",
+                &DomResolveNodeParams {
+                    backend_node_id: Some(backend),
+                    node_id: None,
+                    object_group: Some("agent-browser".into()),
+                },
+                Some(target_session),
+            )
+            .await
+            .map_err(|_| unsupported())?;
+        (
+            resolved.object.object_id.ok_or_else(unsupported)?,
+            target_session.to_owned(),
+        )
+    } else {
+        resolve_element_object_id(client, session, refs, selector, frames)
+            .await
+            .map_err(|_| unsupported())?
+    };
+    if let Some(frame) = super::element::parse_ref(selector)
+        .and_then(|reference| refs.get(&reference))
+        .and_then(|entry| entry.frame_id.as_ref())
+    {
+        let document = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({"objectId":object,"functionDeclaration":"function() { return this.ownerDocument; }","returnByValue":false})), Some(&target_session)).await.map_err(|_| unsupported())?;
+        let document_object = document["result"]["objectId"]
+            .as_str()
+            .ok_or_else(unsupported)?;
+        let owner = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({"objectId":document_object})),
+                Some(&target_session),
+            )
+            .await
+            .map_err(|_| unsupported())?;
+        if owner["node"]["frameId"].as_str() != Some(frame.as_str()) {
+            return Err(unsupported());
+        }
+    }
+    let described = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({"objectId":object})),
+            Some(&target_session),
+        )
+        .await
+        .map_err(|_| unsupported())?;
+    let backend = described["node"]["backendNodeId"]
+        .as_i64()
+        .ok_or_else(unsupported)?;
+    if observation
+        .controls
+        .contains_key(&(target_session.clone(), backend))
+    {
+        return Err(unsupported());
+    }
+    let function = format!("async function(value) {{ {} if (!this.isConnected || kindOf(this)) return {{status:'sensitive'}}; return await ({}).call(this,value,'bound-form'); }}", super::sensitive::classifier_js(), include_str!("fill.js"));
+    let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId":object,"functionDeclaration":function,"arguments":[{"value":value}],"returnByValue":true,"awaitPromise":true
+    })), Some(&target_session)).await.map_err(|_| unsupported())?;
+    if result.get("exceptionDetails").is_some() {
+        return Err(unsupported());
+    }
+    match result["result"]["value"]["status"].as_str() {
+        Some("filled") => Ok(()),
+        Some("sensitive") => Err(unsupported()),
+        Some("not_editable") => {
+            Err("fill_not_editable: target is not an editable form control".into())
+        }
+        Some("invalid_value") => Err("fill_invalid_value: invalid value for input".into()),
+        Some("value_not_retained") => {
+            Err("fill_value_not_retained: input did not retain supplied value".into())
+        }
+        Some("render_timeout") => {
+            Err("fill_render_timeout: fill dispatched but retention unknown; do not replay".into())
+        }
+        Some("target_detached") => {
+            Err("fill_target_detached: pinned input detached after dispatch".into())
+        }
+        _ => Err(unsupported()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn type_text(
     client: &CdpClient,
     session_id: &str,
