@@ -3302,6 +3302,10 @@ async fn execute_command_inner(
         None
     };
 
+    let target_scoped_fill = action == "fill" && observation_session.as_ref()
+        .and_then(|session| state.sensitive_observations.get(session))
+        .is_some_and(|observed| observed.has_sensitive());
+
     let result = match action {
         "launch" => {
             let webmcp_enabled = cmd
@@ -3634,7 +3638,7 @@ async fn execute_command_inner(
             }
         }
         if let Some(known) = state.sensitive_observations.get(&session) {
-            if known.has_sensitive() && super::sensitive::guarded(action, cmd) {
+            if known.has_sensitive() && super::sensitive::guarded(action, cmd) && !target_scoped_fill {
                 return error_response(
                     &id,
                     &format!(
