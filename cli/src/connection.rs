@@ -730,7 +730,7 @@ fn concurrent_daemon_config_error(session: &str) -> String {
 fn daemon_version_matches(session: &str) -> bool {
     let version_path = get_version_path(session);
     match fs::read_to_string(&version_path) {
-        Ok(v) => v.trim() == env!("CARGO_PKG_VERSION"),
+        Ok(v) => v.trim() == env!("AGENT_BROWSER_DAEMON_BUILD"),
         Err(_) => false,
     }
 }
@@ -1729,7 +1729,7 @@ mod tests {
         _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
 
         let version_path = dir.join("test-session.version");
-        let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+        let _ = fs::write(&version_path, env!("AGENT_BROWSER_DAEMON_BUILD"));
 
         assert!(daemon_version_matches("test-session"));
 

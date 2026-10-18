@@ -12,7 +12,11 @@ pub struct EnvGuard<'a> {
 
 impl<'a> EnvGuard<'a> {
     pub fn new(var_names: &[&str]) -> Self {
-        let lock = ENV_MUTEX.lock().unwrap();
+        // A test that panics while holding the lock restores its variables on
+        // drop, so the poison flag carries no broken state into other tests.
+        let lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let vars = var_names
             .iter()
             .map(|&name| (name.to_string(), std::env::var(name).ok()))

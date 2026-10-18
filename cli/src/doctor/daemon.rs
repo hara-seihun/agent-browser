@@ -6,7 +6,7 @@ use crate::connection::{walk_daemons, CleanReason};
 
 pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Daemons";
-    let cli_version = env!("CARGO_PKG_VERSION");
+    let cli_version = env!("AGENT_BROWSER_DAEMON_BUILD");
 
     let inventory = walk_daemons();
 

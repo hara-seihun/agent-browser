@@ -18,8 +18,42 @@ fn ensure_dashboard_dir() {
     }
 }
 
+/// The daemon identity is the package version plus the source commit, so a
+/// rebuilt binary at the same package version still replaces daemons that
+/// run older code. Builds outside a Git checkout (published npm sources)
+/// are identified by the package version alone.
+fn emit_daemon_build_identity() {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let identity = match git(&["rev-parse", "HEAD"]) {
+        Some(commit) => {
+            for path in ["HEAD", "packed-refs"] {
+                if let Some(file) = git(&["rev-parse", "--git-path", path]) {
+                    println!("cargo:rerun-if-changed={file}");
+                }
+            }
+            if let Some(file) = git(&["rev-parse", "--symbolic-full-name", "HEAD"])
+                .and_then(|reference| git(&["rev-parse", "--git-path", &reference]))
+            {
+                println!("cargo:rerun-if-changed={file}");
+            }
+            format!("{version}+{commit}")
+        }
+        None => version,
+    };
+    println!("cargo:rustc-env=AGENT_BROWSER_DAEMON_BUILD={identity}");
+}
+
 fn main() {
     ensure_dashboard_dir();
+    emit_daemon_build_identity();
 
     let protocol_dir = Path::new("cdp-protocol");
     let out_dir = env::var("OUT_DIR").unwrap();

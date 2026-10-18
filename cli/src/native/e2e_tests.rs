@@ -2168,7 +2168,11 @@ async fn e2e_form_interaction() {
 
 async fn temporal_fixture() -> (String, SensitiveInputServer) {
     let fixture = std::process::Command::new("node")
-        .args(["--input-type=module", "--eval", include_str!("../../../scripts/controlled-temporal-fixture.mjs")])
+        .args([
+            "--input-type=module",
+            "--eval",
+            include_str!("../../../scripts/controlled-temporal-fixture.mjs"),
+        ])
         .output()
         .expect("node is required for the real React temporal fixture");
     assert!(
@@ -11753,11 +11757,10 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
     .await;
     assert_frame_violations(&resp);
 
-    // Simulate a popup created outside the tab commands. Target lifecycle
-    // events must move active iframe scoping to the popup and back when it is
-    // externally closed.
+    // A tab another CDP client creates in the same Chrome is listed but
+    // must not take over the session's active frame scope.
     let browser_client = state.browser.as_ref().unwrap().client.clone();
-    let created = browser_client
+    let foreign = browser_client
         .send_command(
             "Target.createTarget",
             Some(json!({
@@ -11767,7 +11770,37 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
         )
         .await
         .unwrap();
-    let external_target_id = created["targetId"].as_str().unwrap().to_string();
+    let foreign_target_id = foreign["targetId"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let resp = execute_command(
+        &json!({ "id": "foreign-open", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.active_iframe_sessions, top_iframe_sessions);
+    browser_client
+        .send_command(
+            "Target.closeTarget",
+            Some(json!({ "targetId": foreign_target_id })),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // A popup the active page opens is followed: target lifecycle events
+    // move active iframe scoping to the popup and back when it is
+    // externally closed.
+    let resp = execute_command(
+        &json!({
+            "id": "popup-open",
+            "action": "evaluate",
+            "script": format!("setTimeout(() => window.open('http://localhost:{port}/background'), 100); 'scheduled'")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let resp = execute_command(
         &json!({ "id": "external-open", "action": "tab_list" }),
@@ -11785,6 +11818,13 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
     let external_iframe_sessions = state.active_iframe_sessions.clone();
     assert!(!external_iframe_sessions.is_empty());
     assert!(top_iframe_sessions.is_disjoint(&external_iframe_sessions));
+    let external_target_id = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
 
     browser_client
         .send_command(
@@ -12934,4 +12974,208 @@ async fn e2e_launch_preparation_confirmation_resumes_requested_effect_once() {
     )
     .await;
     close_current_browser(&mut state).await.unwrap();
+}
+
+async fn start_foreign_client_server() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path.starts_with("/churn") {
+                    format!(
+                        r#"<!doctype html><title>Foreign</title><h1>Foreign</h1><div id="f"></div><script>
+let n = 0; setInterval(() => {{ const f = document.getElementById('f');
+if (f.children.length > 3) f.firstChild.remove();
+const i = document.createElement('iframe'); i.src = 'http://localhost:{port}/frame?' + n++;
+f.appendChild(i); }}, 100);</script>"#
+                    )
+                } else if path.starts_with("/frame") {
+                    r#"<!doctype html><p>frame</p><input aria-label="Card">"#.to_string()
+                } else {
+                    format!(
+                        r#"<!doctype html><title>Own</title><main><h1>Own</h1><button>Go</button>
+<iframe title="Own frame" src="http://localhost:{port}/frame?own"></iframe></main>"#
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (port, handle)
+}
+
+struct ForeignCdpClient {
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next_id: u64,
+}
+
+impl ForeignCdpClient {
+    async fn send(&mut self, method: &str, params: Value, session: Option<&str>) -> Value {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        self.next_id += 1;
+        let mut message = json!({ "id": self.next_id, "method": method, "params": params });
+        if let Some(session) = session {
+            message["sessionId"] = json!(session);
+        }
+        self.ws
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .unwrap();
+        while let Some(Ok(frame)) = self.ws.next().await {
+            if let Message::Text(text) = frame {
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                if reply["id"] == json!(self.next_id) {
+                    return reply["result"].clone();
+                }
+            }
+        }
+        Value::Null
+    }
+}
+
+/// A second CDP client on its own connection, shaped like Playwright's
+/// `connectOverCDP`: it opens, navigates and closes its own tabs, foreground
+/// and background, each churning cross-origin iframes.
+async fn run_foreign_cdp_client(
+    ws_url: String,
+    port: u16,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let (ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+    let mut client = ForeignCdpClient { ws, next_id: 0 };
+    let background = client
+        .send(
+            "Target.createTarget",
+            json!({ "url": "about:blank", "background": true }),
+            None,
+        )
+        .await;
+    let background_target = background["targetId"].as_str().unwrap().to_string();
+    let attached = client
+        .send(
+            "Target.attachToTarget",
+            json!({ "targetId": background_target, "flatten": true }),
+            None,
+        )
+        .await;
+    let background_session = attached["sessionId"].as_str().unwrap().to_string();
+    let mut round = 0;
+    while !stop.load(Ordering::SeqCst) {
+        round += 1;
+        client
+            .send(
+                "Page.navigate",
+                json!({ "url": format!("http://127.0.0.1:{port}/churn?background={round}") }),
+                Some(&background_session),
+            )
+            .await;
+        let created = client
+            .send(
+                "Target.createTarget",
+                json!({ "url": format!("http://127.0.0.1:{port}/churn?new={round}") }),
+                None,
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        client
+            .send(
+                "Target.closeTarget",
+                json!({ "targetId": created["targetId"] }),
+                None,
+            )
+            .await;
+    }
+    client
+        .send(
+            "Target.closeTarget",
+            json!({ "targetId": background_target }),
+            None,
+        )
+        .await;
+}
+
+/// Regression: another CDP client creating, navigating and closing its own
+/// tabs in the same Chrome must not redirect or abort this session's
+/// commands (formerly `SENSITIVE_OUTPUT_UNSUPPORTED: active observation
+/// target changed`, `frame observation deadline elapsed`, or commands acting
+/// on the other client's tab). Same shape as cli/scripts/foreign-cdp-client-repro.mjs.
+#[tokio::test]
+#[ignore]
+async fn e2e_foreign_cdp_client_tabs_do_not_disturb_session() {
+    let (port, server) = start_foreign_client_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "launch",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let own = |round: usize| format!("http://127.0.0.1:{port}/own?round={round}");
+    let resp = execute_command(
+        &json!({ "id": "first", "action": "navigate", "url": own(0) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "cdp", "action": "cdp_url" }), &mut state).await;
+    let ws_url = get_data(&resp)["cdpUrl"].as_str().unwrap().to_string();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let foreign = tokio::spawn(run_foreign_cdp_client(ws_url, port, stop.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    for round in 1..=8 {
+        let resp = execute_command(
+            &json!({ "id": format!("open-{round}"), "action": "navigate", "url": own(round) }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": format!("snapshot-{round}"), "action": "snapshot" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["snapshot"]
+                .as_str()
+                .is_some_and(|tree| tree.contains("Own")),
+            "snapshot must read this session's tab: {resp}"
+        );
+        let resp = current_url(&mut state, &format!("url-{round}")).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["url"], own(round));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_secs(10), foreign)
+        .await
+        .expect("foreign client should stop")
+        .unwrap();
+    let _ = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    server.abort();
 }

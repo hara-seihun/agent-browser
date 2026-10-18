@@ -2267,9 +2267,12 @@ impl BrowserManager {
 
     /// Single decision point for both CDP target drains
     /// (`Target.attachedToTarget` and `Target.targetCreated`). A tracked
-    /// target only has its metadata refreshed; a new one is appended and
-    /// activated per pin mode: a pinned session never lets a discovered tab
-    /// steal the active tab or pin binding, a legacy session follows it.
+    /// target only has its metadata refreshed; a new one is appended to the
+    /// tab list. The session's active tab follows a discovered target only
+    /// when it is a popup opened by that active tab in a legacy (non-pin)
+    /// session. Tabs other CDP clients or humans create in the shared Chrome
+    /// (no opener, or opened by a tab the session is not on) never become
+    /// active, so another client's tab churn cannot redirect this session.
     /// Explicit commands (`tab new`, `window new`, `click --new-tab`) take
     /// their own `add_page` path. Covered by `test_register_discovered_page_*`.
     pub fn register_discovered_page(
@@ -2279,6 +2282,7 @@ impl BrowserManager {
         url: String,
         title: String,
         target_type: String,
+        opener_id: Option<&str>,
     ) -> bool {
         if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
             p.url = url;
@@ -2287,9 +2291,7 @@ impl BrowserManager {
             return false;
         }
         let tab_id = self.assign_tab_id();
-        // Pinned sessions never activate a discovered tab (strict no-steal);
-        // legacy sessions follow it, matching pre-pin behavior.
-        let activate = !self.pin_tab;
+        let activate = self.discovered_page_activates(opener_id);
         self.add_page_with_activation(
             PageInfo {
                 tab_id,
@@ -2303,6 +2305,23 @@ impl BrowserManager {
             activate,
         );
         true
+    }
+
+    /// Whether a newly discovered page with this opener would become the
+    /// session's active tab.
+    pub fn discovered_page_activates(&self, opener_id: Option<&str>) -> bool {
+        !self.pin_tab && self.is_popup_of_active_page(opener_id)
+    }
+
+    fn is_popup_of_active_page(&self, opener_id: Option<&str>) -> bool {
+        let Some(opener) = opener_id else {
+            return false;
+        };
+        !self.bound_target_is_gone()
+            && self
+                .pages
+                .get(self.active_page_index)
+                .is_some_and(|page| page.target_id == opener)
     }
 
     pub fn page_count(&self) -> usize {
@@ -2666,6 +2685,7 @@ mod tests {
             url: String::new(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(should_track_target(&target));
@@ -2680,6 +2700,7 @@ mod tests {
             url: "chrome://newtab/".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(!should_track_target(&target));
@@ -2703,6 +2724,7 @@ mod tests {
             url: "https://example.com/popup".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));
@@ -3841,13 +3863,10 @@ mod tests {
         );
     }
 
-    /// A legacy (non-pin) session follows an event-discovered tab; no-steal is
-    /// scoped to pinned sessions. Force-red: register without activation and
-    /// the active tab stays on TARGET_A.
+    /// A legacy (non-pin) session follows a popup its active tab opened.
     #[tokio::test]
-    async fn test_register_discovered_page_activates_for_non_pin_session() {
+    async fn test_register_discovered_page_follows_popup_of_active_tab() {
         let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
-        // No set_pin_tab(true): legacy session, active on its only tab.
         assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
 
         let newly_added = mgr.register_discovered_page(
@@ -3856,14 +3875,40 @@ mod tests {
             "https://popup.example".to_string(),
             String::new(),
             "page".to_string(),
+            Some(TARGET_A),
         );
 
         assert!(newly_added, "an untracked target must be registered");
-        assert_eq!(
-            mgr.active_target_id().unwrap(),
-            TARGET_B,
-            "a non-pin session must follow the newly discovered tab (legacy behavior)"
-        );
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
+    }
+
+    /// Tabs another CDP client creates (no opener) or that another tab opened
+    /// are listed but never become active, even in a legacy session.
+    #[tokio::test]
+    async fn test_register_discovered_page_ignores_foreign_tabs_in_legacy_session() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+
+        for (target, opener) in [("foreign-created", None), ("foreign-popup", Some(TARGET_B))] {
+            assert!(mgr.register_discovered_page(
+                target,
+                "session-foreign",
+                "https://foreign.example".to_string(),
+                String::new(),
+                "page".to_string(),
+                opener,
+            ));
+            assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+        }
+        assert_eq!(mgr.tab_list().len(), 4);
+
+        mgr.remove_page_by_target_id(TARGET_B);
+        mgr.remove_page_by_target_id("foreign-created");
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
     }
 
     #[tokio::test]
@@ -3882,6 +3927,7 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
         );
 
         assert!(newly_added, "an untracked target must be registered");
@@ -3963,6 +4009,7 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
         );
         assert!(
             newly_added,
@@ -3999,6 +4046,7 @@ mod tests {
             "https://mine.example/updated".to_string(),
             "Updated Title".to_string(),
             "page".to_string(),
+            None,
         );
 
         assert!(

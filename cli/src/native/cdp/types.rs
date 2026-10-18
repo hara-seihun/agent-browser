@@ -110,6 +110,10 @@ pub struct TargetInfo {
     pub url: String,
     pub attached: Option<bool>,
     pub browser_context_id: Option<String>,
+    /// The target that opened this one (`window.open`, `target=_blank`).
+    /// Unset for tabs created through `Target.createTarget`, which is how
+    /// other CDP clients and humans open tabs.
+    pub opener_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

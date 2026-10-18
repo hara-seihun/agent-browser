@@ -239,6 +239,8 @@ struct DrainedEvents {
     attached_page_sessions: Vec<(TargetInfo, String)>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
+    /// (iframe session_id, parent session_id) for auto-attached iframes.
+    iframe_parents: Vec<(String, String)>,
     /// Worker-like targets that can initiate network traffic but do not support
     /// page-domain setup.
     attached_worker_sessions: Vec<(TargetInfo, String)>,
@@ -279,6 +281,22 @@ pub(super) fn is_active_iframe_console_event(
         method,
         "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
     ) && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
+/// A discovered page that stays in the background (another CDP client's or
+/// a human's tab) is only listed and resumed: its CDP domains are enabled
+/// when the session switches to it, so a slow or closing foreign tab cannot
+/// stall this session's commands. Network controls still require full setup
+/// before any page runs.
+fn discovered_page_needs_setup(
+    mgr: &BrowserManager,
+    target_id: &str,
+    opener_id: Option<&str>,
+    controls_active: bool,
+) -> bool {
+    controls_active
+        || mgr.active_target_id().ok() == Some(target_id)
+        || (!mgr.has_target(target_id) && mgr.discovered_page_activates(opener_id))
 }
 
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
@@ -612,6 +630,9 @@ pub struct DaemonState {
     /// Attachment/setup custody survives cancellation of protected observation.
     pending_iframe_attachments: HashMap<String, PendingIframeAttachment>,
     pending_iframe_setup: HashSet<String>,
+    /// Parent session of each auto-attached iframe session, so frame setup
+    /// stays scoped to the active tab's frame tree.
+    iframe_parent_sessions: HashMap<String, String>,
     /// Dedicated iframe sessions reachable from the currently active page.
     /// Network tracking uses this subset so background-tab iframe traffic is
     /// not mixed into the active tab's request list or HAR capture.
@@ -756,6 +777,7 @@ impl DaemonState {
             iframe_sessions: HashMap::new(),
             pending_iframe_attachments: HashMap::new(),
             pending_iframe_setup: HashSet::new(),
+            iframe_parent_sessions: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
@@ -1231,10 +1253,15 @@ impl DaemonState {
         // of event so network capture stays scoped to the active page.
         let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
         // Retain the entire consumed attachment batch before any await.
+        for (iframe_sid, parent_sid) in &drained.iframe_parents {
+            self.iframe_parent_sessions
+                .insert(iframe_sid.clone(), parent_sid.clone());
+        }
         for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
             self.retain_iframe_attachment(frame_id, iframe_sid);
         }
         for sid in &drained.detached_iframe_sessions {
+            self.iframe_parent_sessions.remove(sid);
             self.iframe_sessions.retain(|_, value| value != sid);
             self.pending_iframe_setup.remove(sid);
             self.active_iframe_sessions.remove(sid);
@@ -1275,6 +1302,22 @@ impl DaemonState {
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
+                    if !discovered_page_needs_setup(
+                        mgr,
+                        &target_info.target_id,
+                        target_info.opener_id.as_deref(),
+                        controls_active,
+                    ) {
+                        mgr.register_discovered_page(
+                            &target_info.target_id,
+                            page_sid,
+                            target_info.url.clone(),
+                            target_info.title.clone(),
+                            target_info.target_type.clone(),
+                            target_info.opener_id.as_deref(),
+                        );
+                        return mgr.resume_if_waiting_pub(page_sid).await;
+                    }
                     mgr.prepare_domains_pub(page_sid).await?;
                     if controls_active {
                         install_network_controls_for_session(
@@ -1301,26 +1344,20 @@ impl DaemonState {
                         }
                     }
 
-                    // This handler drains `Target.attachedToTarget` for a
-                    // page that browser-level auto-attach discovered before
-                    // its own `Target.targetCreated` was drained (e.g. a
-                    // human-opened tab, or a JS-opened popup in the shared
-                    // Chrome). Explicit agent commands (`tab new`, `window
-                    // new`, `click --new-tab`) already register their own
-                    // page via `add_page` on their own path before this
-                    // event is ever drained, so this branch never runs for
-                    // agent-initiated tabs. `register_discovered_page` is the
-                    // single decision point shared with the
-                    // `Target.targetCreated` handler below: a pinned session
-                    // never activates a discovered target (that would steal
-                    // the active tab and overwrite its binding); a legacy
-                    // session follows it.
+                    // A page that browser-level auto-attach discovered before
+                    // its own `Target.targetCreated` was drained (a popup, or
+                    // a tab another CDP client or a human opened in the shared
+                    // Chrome). Explicit agent commands register their own page
+                    // via `add_page` before this event is drained.
+                    // `register_discovered_page` is the single decision point
+                    // shared with the `Target.targetCreated` handler below.
                     mgr.register_discovered_page(
                         &target_info.target_id,
                         page_sid,
                         page_url,
                         target_info.title.clone(),
                         target_info.target_type.clone(),
+                        target_info.opener_id.as_deref(),
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1407,6 +1444,22 @@ impl DaemonState {
                             None,
                         )
                         .await?;
+                    if !discovered_page_needs_setup(
+                        mgr,
+                        &te.target_info.target_id,
+                        te.target_info.opener_id.as_deref(),
+                        controls_active,
+                    ) {
+                        mgr.register_discovered_page(
+                            &te.target_info.target_id,
+                            &attach.session_id,
+                            te.target_info.url.clone(),
+                            te.target_info.title.clone(),
+                            te.target_info.target_type.clone(),
+                            te.target_info.opener_id.as_deref(),
+                        );
+                        return mgr.resume_if_waiting_pub(&attach.session_id).await;
+                    }
                     mgr.prepare_domains_pub(&attach.session_id).await?;
                     if controls_active {
                         install_network_controls_for_session(
@@ -1433,20 +1486,16 @@ impl DaemonState {
                         }
                     }
 
-                    // Event-discovered target (e.g. a tab the human opened in the
-                    // shared Chrome, or a JS-opened popup): register it via the
-                    // same `register_discovered_page` decision point used by the
-                    // `Target.attachedToTarget` handler above, which activates it
-                    // only for legacy sessions; a pinned session never adopts a
-                    // discovered tab (that steal would also overwrite its
-                    // binding). Explicit commands (`tab new`, `window new`,
-                    // `click --new-tab`) activate via their own paths.
+                    // Event-discovered target: registered through the same
+                    // `register_discovered_page` decision point as the
+                    // `Target.attachedToTarget` handler above.
                     mgr.register_discovered_page(
                         &te.target_info.target_id,
                         &attach.session_id,
                         page_url,
                         te.target_info.title.clone(),
                         te.target_info.target_type.clone(),
+                        te.target_info.opener_id.as_deref(),
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
@@ -1611,16 +1660,55 @@ impl DaemonState {
         Ok(())
     }
 
+    /// Whether an iframe session belongs to the frame tree of `top_session`.
+    /// Sessions attached without a recorded parent (explicit recovery
+    /// attachments of the active tab) belong to it; a chain that ends at any
+    /// other page belongs to another tab.
+    fn iframe_session_within(&self, session: &str, top_session: &str) -> bool {
+        let Some(mut parent) = self.iframe_parent_sessions.get(session) else {
+            return true;
+        };
+        for _ in 0..self.iframe_parent_sessions.len() {
+            if parent == top_session {
+                return true;
+            }
+            match self.iframe_parent_sessions.get(parent) {
+                Some(next) => parent = next,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Prepares pending iframe sessions of the active tab. Iframes of other
+    /// tabs (including tabs other CDP clients churn) stay pending until their
+    /// tab becomes active, so their setup cannot stall or fail this session's
+    /// commands. With network controls active every frame is prepared, since
+    /// controls must be installed before a frame runs.
     async fn prepare_pending_iframes(&mut self) -> Result<(), String> {
-        let mut pending: Vec<_> = self.pending_iframe_setup.iter().cloned().collect();
-        pending.sort();
-        if pending.is_empty() {
+        if self.pending_iframe_setup.is_empty() {
             return Ok(());
         }
         let filter = self.domain_filter.read().await.clone();
         let has_proxy_creds = self.proxy_credentials.read().await.is_some();
         let controls_active = filter.is_some() || has_proxy_creds;
         let mgr = self.browser.as_ref().ok_or("Browser not launched")?;
+        let top_session = mgr.active_session_id().ok().map(str::to_owned);
+        let mut pending: Vec<_> = self
+            .pending_iframe_setup
+            .iter()
+            .filter(|session| {
+                controls_active
+                    || top_session
+                        .as_deref()
+                        .is_none_or(|top| self.iframe_session_within(session, top))
+            })
+            .cloned()
+            .collect();
+        pending.sort();
+        if pending.is_empty() {
+            return Ok(());
+        }
         // Domain admissions are independent; controls and resume depend on all
         // mandatory replies. Parallel frames and domains share the original budget.
         let outcomes = futures_util::future::join_all(pending.into_iter().map(|session| {
@@ -1682,6 +1770,7 @@ impl DaemonState {
     fn clear_iframe_custody(&mut self) {
         self.pending_iframe_attachments.clear();
         self.pending_iframe_setup.clear();
+        self.iframe_parent_sessions.clear();
         self.iframe_sessions.clear();
     }
 
@@ -1699,6 +1788,7 @@ impl DaemonState {
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_page_target_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
+        let mut iframe_parents: Vec<(String, String)> = Vec::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
@@ -1805,6 +1895,10 @@ impl DaemonState {
                                     Ok(target_info) if target_info.target_type == "iframe" => {
                                         // For OOPIF targets, Chrome uses the frameId as
                                         // the targetId, so we can key iframe_sessions by it.
+                                        if let Some(parent) = event.session_id.as_deref() {
+                                            iframe_parents
+                                                .push((sid.to_string(), parent.to_string()));
+                                        }
                                         attached_iframe_sessions
                                             .push((target_info.target_id, sid.to_string()));
                                     }
@@ -2268,6 +2362,7 @@ impl DaemonState {
             destroyed_targets,
             attached_page_sessions,
             attached_iframe_sessions,
+            iframe_parents,
             attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
@@ -3272,7 +3367,8 @@ async fn execute_command_inner(
                         .values()
                         .any(|marker| marker == "[redacted: credential]");
                 if known.has_sensitive()
-                    && ((action != "fill" && super::sensitive::guarded(action, cmd)) || private_projection_unavailable)
+                    && ((action != "fill" && super::sensitive::guarded(action, cmd))
+                        || private_projection_unavailable)
                 {
                     return error_response(
                         &id,
@@ -3302,9 +3398,11 @@ async fn execute_command_inner(
         None
     };
 
-    let target_scoped_fill = action == "fill" && observation_session.as_ref()
-        .and_then(|session| state.sensitive_observations.get(session))
-        .is_some_and(|observed| observed.has_sensitive());
+    let target_scoped_fill = action == "fill"
+        && observation_session
+            .as_ref()
+            .and_then(|session| state.sensitive_observations.get(session))
+            .is_some_and(|observed| observed.has_sensitive());
 
     let result = match action {
         "launch" => {
@@ -3638,7 +3736,10 @@ async fn execute_command_inner(
             }
         }
         if let Some(known) = state.sensitive_observations.get(&session) {
-            if known.has_sensitive() && super::sensitive::guarded(action, cmd) && !target_scoped_fill {
+            if known.has_sensitive()
+                && super::sensitive::guarded(action, cmd)
+                && !target_scoped_fill
+            {
                 return error_response(
                     &id,
                     &format!(
@@ -6730,9 +6831,15 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     if let Some(observation) = state.sensitive_observations.get(&session_id) {
         if observation.has_sensitive() {
             interaction::fill_observed(
-                &mgr.client, &session_id, &state.ref_map, selector, value,
-                &state.iframe_sessions, observation,
-            ).await?;
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                value,
+                &state.iframe_sessions,
+                observation,
+            )
+            .await?;
             return Ok(json!({ "filled": selector }));
         }
     }

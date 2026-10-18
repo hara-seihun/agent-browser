@@ -86,7 +86,7 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::write(&pid_path, process::id().to_string());
 
     let version_path = socket_dir.join(format!("{}.version", session));
-    let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+    let _ = fs::write(&version_path, env!("AGENT_BROWSER_DAEMON_BUILD"));
 
     // On Unix the daemon listens on a Unix domain socket; on Windows it uses
     // TCP, so there is no .sock file — only a .port file written by the server.
