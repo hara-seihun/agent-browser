@@ -477,6 +477,21 @@ async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_nod
         .await;
 }
 
+async fn is_connected(client: &CdpClient, session_id: &str, object_id: &str) -> bool {
+    client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { return this.isConnected; }",
+                "returnByValue": true
+            })),
+            Some(session_id),
+        )
+        .await
+        .is_ok_and(|r| r["result"]["value"] == true)
+}
+
 pub async fn resolve_element_object_id(
     client: &CdpClient,
     session_id: &str,
@@ -508,10 +523,13 @@ pub async fn resolve_element_object_id(
 
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
-                    return Ok((object_id, effective_session_id.to_string()));
+                    if is_connected(client, effective_session_id, &object_id).await {
+                        return Ok((object_id, effective_session_id.to_string()));
+                    }
                 }
             }
-            // backend_node_id is stale; re-query the accessibility tree below
+            // backend_node_id is stale (unresolvable, or resolves to a node the page
+            // has detached); re-query the accessibility tree below
         }
 
         // Fallback: re-query the accessibility tree to find a fresh node by role/name
