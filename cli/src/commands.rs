@@ -357,7 +357,12 @@ pub fn command_timeout_ms(cmd: &Value) -> Result<u64, ParseError> {
     if let Some(value) = cmd.get("commandTimeoutMs") {
         return timeout_value(value);
     }
-    if cmd["action"] == "wait" && cmd.get("selector").is_none() && cmd.get("text").is_none() {
+    let timeout_is_wait_duration = match cmd["action"].as_str() {
+        Some("wait") => cmd.get("selector").is_none() && cmd.get("text").is_none(),
+        Some("webmcp_invoke" | "webmcp_result" | "webmcp_cancel") => true,
+        _ => false,
+    };
+    if timeout_is_wait_duration {
         if let Some(value) = cmd.get("timeout") {
             let duration = value.as_u64().ok_or_else(|| ParseError::InvalidValue {
                 message: "Wait duration must be an unsigned integer in milliseconds".into(),
