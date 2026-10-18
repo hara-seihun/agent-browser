@@ -50,21 +50,23 @@ const newTabChurn = async () => {
   while (!stop) {
     const page = await context.newPage();
     await page.goto(`${base}/churn?new`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await page.waitForTimeout(700);
+    await new Promise(resolve => setTimeout(resolve, 700));
     await page.close().catch(() => {});
   }
 };
+const cdp = await browser.newBrowserCDPSession();
+const waiting = context.waitForEvent('page');
+await cdp.send('Target.createTarget', { url: 'about:blank#foreign', background: true });
+const backgroundPage = await waiting;
 const backgroundTabNav = async () => {
-  const cdp = await browser.newBrowserCDPSession();
-  const waiting = context.waitForEvent('page');
-  await cdp.send('Target.createTarget', { url: 'about:blank#foreign', background: true });
-  const page = await waiting;
   for (let i = 0; !stop; i++) {
-    await page.goto(`${base}/churn?bg=${i}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await page.waitForTimeout(400);
+    await backgroundPage.goto(`${base}/churn?bg=${i}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 400));
+    if (backgroundPage.isClosed()) throw Error('the foreign background tab was closed');
   }
 };
-const probes = [newTabChurn(), backgroundTabNav()];
+const probeErrors = [];
+const probes = [newTabChurn(), backgroundTabNav()].map(probe => probe.catch(error => probeErrors.push(String(error))));
 const failures = [];
 for (let i = 0; i < rounds; i++) {
   for (const args of [['open', `${base}/own?round=${i}`], ['snapshot'], ['get', 'url']]) {
@@ -79,5 +81,5 @@ await browser.close().catch(() => {});
 await ab(['close']);
 server.close();
 rmSync(profile, { recursive: true, force: true });
-console.log(JSON.stringify({ rounds, commands: rounds * 3, failures }, null, 2));
-process.exit(failures.length ? 1 : 0);
+console.log(JSON.stringify({ rounds, commands: rounds * 3, failures, probeErrors }, null, 2));
+process.exit(failures.length || probeErrors.length ? 1 : 0);
