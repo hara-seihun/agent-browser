@@ -485,6 +485,11 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
     if !opts.json {
+        if let Some(tab) = resp.data.as_ref().and_then(|data| data.get("activeTab")) {
+            if let (Some(tab_id), Some(url)) = (tab["tabId"].as_str(), tab["url"].as_str()) {
+                println!("Switched to new tab {tab_id}: {url}");
+            }
+        }
         if let Some(context) = resp
             .data
             .as_ref()

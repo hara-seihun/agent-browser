@@ -3050,6 +3050,12 @@ async fn execute_command_inner(
         server.broadcast_command(action, &id, cmd_for_broadcast);
     }
 
+    let started_on_target = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.active_target_id().ok())
+        .map(str::to_owned);
+
     // Lifecycle commands must not wait for renderer or iframe setup events.
     if !matches!(action, "snapshot" | "session_info" | "close") && !lifecycle_confirmation {
         if let Err(e) = state.drain_cdp_events_background().await {
@@ -3721,35 +3727,61 @@ async fn execute_command_inner(
     }
 
     if let Some(session) = observation_session {
+        // The command can move the session to a tab it opened itself (a popup
+        // or `click --new-tab`). That tab is the one observed after effects;
+        // the starting tab keeps its pre-command observation.
+        let switched_to = state
+            .browser
+            .as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok())
+            .filter(|active| *active != session)
+            .map(str::to_owned);
         // Refresh after effects such as typing. The old and new values are
         // protected before returning JSON, diagnostics or persisted snapshots.
-        if !matches!(action, "auth_fill" | "auth_export") {
-            if state.browser.is_some() {
-                match observe_sensitive_tab(state, &session).await {
-                    Ok(current) => state
-                        .sensitive_observations
-                        .entry(session.clone())
-                        .or_default()
-                        .merge(current),
-                    Err(error) => return error_response(&id, &error),
+        if !matches!(action, "auth_fill" | "auth_export") && state.browser.is_some() {
+            let current = switched_to.clone().unwrap_or_else(|| session.clone());
+            match observe_sensitive_tab(state, &current).await {
+                Ok(observation) => state
+                    .sensitive_observations
+                    .entry(current)
+                    .or_default()
+                    .merge(observation),
+                Err(error) => return error_response(&id, &error),
+            }
+        }
+        for observed in std::iter::once(&session).chain(switched_to.as_ref()) {
+            if let Some(known) = state.sensitive_observations.get(observed) {
+                if known.has_sensitive()
+                    && super::sensitive::guarded(action, cmd)
+                    && !target_scoped_fill
+                {
+                    return error_response(
+                        &id,
+                        &format!(
+                            "{}: sensitive controls appeared during the operation",
+                            super::sensitive::UNSUPPORTED
+                        ),
+                    );
                 }
+                known.protect(&mut resp);
             }
         }
-        if let Some(known) = state.sensitive_observations.get(&session) {
-            if known.has_sensitive()
-                && super::sensitive::guarded(action, cmd)
-                && !target_scoped_fill
-            {
-                return error_response(
-                    &id,
-                    &format!(
-                        "{}: sensitive controls appeared during the operation",
-                        super::sensitive::UNSUPPORTED
-                    ),
-                );
-            }
-            known.protect(&mut resp);
-        }
+    }
+
+    // A popup the session followed, during this command or since the last
+    // one, is reported by the command that observed the switch.
+    if started_on_target.is_some()
+        && !matches!(
+            action,
+            "launch" | "close" | "tab_new" | "tab_switch" | "tab_close" | "window_new"
+        )
+        && state
+            .browser
+            .as_ref()
+            .and_then(|mgr| mgr.active_target_id().ok())
+            != started_on_target.as_deref()
+    {
+        attach_active_tab(&mut resp, state);
     }
 
     if action == "snapshot" {
@@ -5491,13 +5523,6 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 // ---------------------------------------------------------------------------
 
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    if let Some(value) = cmd.get("storageState") {
-        let path = value
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or("storageState must be a nonempty file path")?;
-        state::validate_state_file(path)?;
-    }
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
     // Absent field falls back to the daemon's spawn-time env (mirrors
     // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
@@ -5569,6 +5594,13 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         restore_key: restore_key.as_deref(),
         storage_state,
     })?;
+    if let Some(value) = cmd.get("storageState") {
+        let path = value
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("storageState must be a nonempty file path")?;
+        state::validate_state_file(path)?;
+    }
 
     let mut launch_options = LaunchOptions {
         headless,
@@ -13974,6 +14006,21 @@ fn error_response(id: &str, error: &str) -> Value {
     resp
 }
 
+/// Reports the tab a command switched the session to, so a click that opened
+/// a popup tells the caller which tab is now active.
+fn attach_active_tab(resp: &mut Value, state: &DaemonState) {
+    let Some(tab) = state.browser.as_ref().and_then(|mgr| {
+        mgr.tab_list()
+            .into_iter()
+            .find(|tab| tab["active"] == json!(true))
+    }) else {
+        return;
+    };
+    if let Some(data) = resp.get_mut("data").and_then(Value::as_object_mut) {
+        data.insert("activeTab".to_string(), tab);
+    }
+}
+
 fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
     if resp.get("code").and_then(Value::as_str) != Some("tab_gone") {
         return;
@@ -20499,21 +20546,21 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[test]
     fn test_default_timeout_ms_from_env() {
+        use super::super::daemon::configured_default_timeout_ms;
         let env = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
-        // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
         env.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
-        let state = DaemonState::new();
-        assert_eq!(state.default_timeout_ms, 3000);
+        assert_eq!(configured_default_timeout_ms(), Ok(3000));
+        env.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "0");
+        assert!(configured_default_timeout_ms().is_err());
     }
 
     #[test]
     fn test_default_timeout_ms_fallback() {
+        use super::super::daemon::configured_default_timeout_ms;
         let env = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
-        // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses the
-        // documented 25s default (below the CLI's 30s IPC read timeout).
         env.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
-        let state = DaemonState::new();
-        assert_eq!(state.default_timeout_ms, 25_000);
+        assert_eq!(configured_default_timeout_ms(), Ok(25_000));
+        assert_eq!(DaemonState::new().default_timeout_ms, 25_000);
     }
 
     #[tokio::test]

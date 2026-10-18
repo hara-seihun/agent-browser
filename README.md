@@ -812,7 +812,7 @@ With `--pin-tab`:
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
 
-Every session, pinned or not, keeps its active tab when other CDP clients (Playwright `connectOverCDP`, Puppeteer, another agent-browser session) or a human create, navigate or close tabs in the same Chrome. Those tabs appear in `tab list`, but only a popup opened by the session's own active tab (`window.open`, `target=_blank`) becomes active automatically; switch to any other tab explicitly with `tab <ref>`. Iframes inside other tabs are not set up until their tab becomes active, so another client's iframe churn cannot stall or abort this session's commands.
+Every session, pinned or not, keeps its active tab when other CDP clients (Playwright `connectOverCDP`, Puppeteer, another agent-browser session) or a human create, navigate or close tabs in the same Chrome. Those tabs appear in `tab list`, but only a popup opened by the session's own active tab (`window.open`, `target=_blank`) becomes active automatically; switch to any other tab explicitly with `tab <ref>`. The command that opened the popup (a `click`, `press` or `eval`) succeeds and reports the tab it switched to in `data.activeTab`; the CLI prints `Switched to new tab tN: URL`. A pinned session lists the popup without switching. Iframes inside other tabs are not set up until their tab becomes active, so another client's iframe churn cannot stall or abort this session's commands.
 
 The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again.
 

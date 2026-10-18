@@ -25,18 +25,23 @@ use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 
-pub async fn run_daemon(session: &str) {
-    let default_timeout_ms = match env::var("AGENT_BROWSER_DEFAULT_TIMEOUT") {
-        Ok(raw) => match crate::commands::parse_timeout_ms(&raw) {
-            Ok(ms) => ms,
-            Err(error) => {
-                eprintln!("invalid_input: {}", error.format());
-                process::exit(1);
-            }
-        },
-        Err(env::VarError::NotPresent) => crate::commands::DEFAULT_COMMAND_TIMEOUT_MS,
+/// The daemon's command budget: `AGENT_BROWSER_DEFAULT_TIMEOUT` when set,
+/// otherwise the documented initial budget. A malformed value is an error.
+pub fn configured_default_timeout_ms() -> Result<u64, String> {
+    match env::var("AGENT_BROWSER_DEFAULT_TIMEOUT") {
+        Ok(raw) => crate::commands::parse_timeout_ms(&raw).map_err(|error| error.format()),
+        Err(env::VarError::NotPresent) => Ok(crate::commands::DEFAULT_COMMAND_TIMEOUT_MS),
         Err(env::VarError::NotUnicode(_)) => {
-            eprintln!("invalid_input: AGENT_BROWSER_DEFAULT_TIMEOUT must be UTF-8 milliseconds");
+            Err("AGENT_BROWSER_DEFAULT_TIMEOUT must be UTF-8 milliseconds".to_string())
+        }
+    }
+}
+
+pub async fn run_daemon(session: &str) {
+    let default_timeout_ms = match configured_default_timeout_ms() {
+        Ok(ms) => ms,
+        Err(error) => {
+            eprintln!("invalid_input: {}", error);
             process::exit(1);
         }
     };
