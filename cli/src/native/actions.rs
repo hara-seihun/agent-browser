@@ -16641,8 +16641,11 @@ mod tests {
             let mut refs = RefMap::new();
             refs.add("e1".into(), Some(999), "button", "previous", None);
             refs.set_next_ref_num(2);
+            // The held AX read never answers, so the short budget is the
+            // cancellation; the refusal case only needs room to finish.
+            let budget = if cancelled { 100 } else { 10_000 };
             let result = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(budget),
                 snapshot::take_snapshot(
                     &client,
                     &session,
