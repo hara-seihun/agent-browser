@@ -1,10 +1,11 @@
 #[cfg(windows)]
 use super::windows_process::Child;
-use std::io::{BufRead, BufReader, Write};
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
@@ -873,6 +874,18 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
 
+    // Chrome and every helper it forks write to this pipe for their whole life.
+    // An unread pipe fills (64 KiB) and blocks Chrome's UI thread on write,
+    // hanging the browser, so it is drained for as long as any writer holds it.
+    let stderr = match child.stderr.take() {
+        Some(stderr) => drain_chrome_stderr(stderr),
+        None => {
+            terminate_launched_chrome(&mut child);
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err("Failed to capture Chrome stderr".to_string());
+        }
+    };
+
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
@@ -882,14 +895,8 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
         Ok(url) => url,
         Err(primary_err) => {
-            // Fallback: scrape stderr (legacy behavior) for better diagnostics.
-            let stderr = child.stderr.take().ok_or_else(|| {
-                terminate_launched_chrome(&mut child);
-                cleanup_temp_dir(&temp_user_data_dir);
-                "Failed to capture Chrome stderr".to_string()
-            })?;
-            let reader = BufReader::new(stderr);
-            match wait_for_ws_url_until(reader, deadline) {
+            // Fallback: the DevTools URL Chrome prints on stderr, with its output for diagnostics.
+            match stderr.wait_for_ws_url(deadline) {
                 Ok(url) => url,
                 Err(fallback_err) => {
                     terminate_launched_chrome(&mut child);
@@ -955,31 +962,68 @@ fn wait_for_devtools_active_port(
     Err("Timeout waiting for DevToolsActivePort".to_string())
 }
 
-fn wait_for_ws_url_until(
-    reader: impl BufRead,
-    deadline: std::time::Instant,
-) -> Result<String, String> {
-    let prefix = "DevTools listening on ";
-    let mut stderr_lines: Vec<String> = Vec::new();
+const CHROME_STDERR_TAIL_LINES: usize = 50;
 
-    for line in reader.lines() {
-        if std::time::Instant::now() > deadline {
-            return Err(chrome_launch_error(
+struct ChromeStderr {
+    tail: Arc<Mutex<VecDeque<String>>>,
+    ws_url: mpsc::Receiver<String>,
+}
+
+fn drain_chrome_stderr(stderr: impl Read + Send + 'static) -> ChromeStderr {
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(CHROME_STDERR_TAIL_LINES)));
+    let (ws_tx, ws_url) = mpsc::channel();
+    let thread_tail = Arc::clone(&tail);
+    std::thread::Builder::new()
+        .name("chrome-stderr".to_string())
+        .spawn(move || {
+            let prefix = "DevTools listening on ";
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                if let Some(url) = line.strip_prefix(prefix) {
+                    let _ = ws_tx.send(url.trim().to_string());
+                }
+                let mut tail = thread_tail.lock().unwrap_or_else(|e| e.into_inner());
+                if tail.len() == CHROME_STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        })
+        .expect("spawn chrome stderr drain thread");
+    ChromeStderr { tail, ws_url }
+}
+
+impl ChromeStderr {
+    fn wait_for_ws_url(&self, deadline: std::time::Instant) -> Result<String, String> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match self.ws_url.recv_timeout(remaining) {
+            Ok(url) => Ok(url),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(chrome_launch_error(
                 "Timeout waiting for Chrome DevTools URL",
-                &stderr_lines,
-            ));
+                &self.tail_lines(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(chrome_launch_error(
+                "Chrome exited before providing DevTools URL",
+                &self.tail_lines(),
+            )),
         }
-        let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
-        if let Some(url) = line.strip_prefix(prefix) {
-            return Ok(url.trim().to_string());
-        }
-        stderr_lines.push(line);
     }
 
-    Err(chrome_launch_error(
-        "Chrome exited before providing DevTools URL",
-        &stderr_lines,
-    ))
+    fn tail_lines(&self) -> Vec<String> {
+        self.tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
@@ -1845,6 +1889,29 @@ mod tests {
     fn test_should_disable_sandbox_skips_if_already_set() {
         let args = vec!["--headless=new".to_string(), "--no-sandbox".to_string()];
         assert!(!should_disable_sandbox(&args));
+    }
+
+    #[test]
+    fn chrome_stderr_is_drained_past_the_pipe_buffer() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let drain = drain_chrome_stderr(reader);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for i in 0..20_000 {
+                writeln!(writer, "[{}:ERROR:gpu] ContextResult::kFatalFailure: WebGL1 blocklisted", i).unwrap();
+            }
+            writeln!(writer, "DevTools listening on ws://127.0.0.1:1/devtools/browser/x").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Chrome's stderr writes blocked: the pipe is not drained");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            drain.wait_for_ws_url(deadline).unwrap(),
+            "ws://127.0.0.1:1/devtools/browser/x"
+        );
+        assert!(drain.tail_lines().len() <= CHROME_STDERR_TAIL_LINES);
     }
 
     #[test]
