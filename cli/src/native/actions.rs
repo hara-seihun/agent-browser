@@ -3337,6 +3337,7 @@ async fn execute_command_inner(
     // Snapshot owns the complete protected inventory/projection under one deadline.
     // A throwaway preflight/postflight would spend separate budgets and erase its
     // useful incomplete result, while exposing no additional protected content.
+    let mut guard_incomplete: Option<String> = None;
     let observation_session = if action == "snapshot" {
         None
     } else if let Some(mgr) = state.browser.as_ref() {
@@ -3359,14 +3360,23 @@ async fn execute_command_inner(
             {
                 let session = session.to_string();
                 let current = match observe_sensitive_tab(state, &session).await {
-                    Ok(observation) => observation,
+                    Ok(observation) => Some(observation),
+                    Err(error)
+                        if super::sensitive::content_free(action, cmd)
+                            || super::sensitive::masked_screenshot(action, cmd) =>
+                    {
+                        guard_incomplete.get_or_insert(error);
+                        None
+                    }
                     Err(error) => return error_response(&id, &error),
                 };
                 let known = state
                     .sensitive_observations
                     .entry(session.clone())
                     .or_default();
-                known.merge(current);
+                if let Some(current) = current {
+                    known.merge(current);
+                }
                 let private_projection_unavailable = matches!(action, "content" | "read")
                     && known
                         .controls
@@ -3390,7 +3400,8 @@ async fn execute_command_inner(
         }
     } else {
         if action != "read"
-            && super::sensitive::guarded(action, cmd)
+            && (super::sensitive::guarded(action, cmd)
+                || super::sensitive::masked_screenshot(action, cmd))
             && state.webdriver_backend.is_some()
         {
             return error_response(
@@ -3738,7 +3749,11 @@ async fn execute_command_inner(
             .map(str::to_owned);
         // Refresh after effects such as typing. The old and new values are
         // protected before returning JSON, diagnostics or persisted snapshots.
-        if !matches!(action, "auth_fill" | "auth_export") && state.browser.is_some() {
+        // A masked screenshot observes after capture itself, before writing.
+        if !matches!(action, "auth_fill" | "auth_export")
+            && !super::sensitive::masked_screenshot(action, cmd)
+            && state.browser.is_some()
+        {
             let current = switched_to.clone().unwrap_or_else(|| session.clone());
             match observe_sensitive_tab(state, &current).await {
                 Ok(observation) => state
@@ -3746,6 +3761,9 @@ async fn execute_command_inner(
                     .entry(current)
                     .or_default()
                     .merge(observation),
+                Err(error) if super::sensitive::content_free(action, cmd) => {
+                    guard_incomplete.get_or_insert(error);
+                }
                 Err(error) => return error_response(&id, &error),
             }
         }
@@ -3764,6 +3782,21 @@ async fn execute_command_inner(
                     );
                 }
                 known.protect(&mut resp);
+            }
+        }
+    }
+
+    if let Some(error) = guard_incomplete {
+        if resp["success"] == true {
+            if let Some(data) = resp.get_mut("data").and_then(Value::as_object_mut) {
+                let guard = data
+                    .entry("guard")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("guard is an object");
+                guard
+                    .entry("observation")
+                    .or_insert_with(|| json!({"status": "incomplete", "reason": error}));
             }
         }
     }
@@ -6687,7 +6720,12 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         state.ref_map = refs;
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let result = screenshot::take_screenshot(
+    let remembered = state
+        .sensitive_observations
+        .get(&session_id)
+        .map(|known| known.controls.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut capture = screenshot::capture_screenshot(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -6695,8 +6733,44 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &state.iframe_sessions,
     )
     .await?;
+    // Controls that appeared during capture are masked too. When the inventory
+    // cannot be taken, every control earlier observations identified is masked
+    // and the response says the observation was incomplete.
+    let mut controls = remembered;
+    let after = match observe_sensitive_tab(state, &session_id).await {
+        Ok(observation) => {
+            controls.extend(observation.controls.keys().cloned());
+            state
+                .sensitive_observations
+                .entry(session_id.clone())
+                .or_default()
+                .merge(observation);
+            None
+        }
+        Err(error) => Some(error),
+    };
+    controls.sort();
+    controls.dedup();
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let masks = screenshot::sensitive_control_rects(
+        &mgr.client,
+        &session_id,
+        &controls,
+        &state.iframe_sessions,
+        &state.iframe_parent_sessions,
+    )
+    .await?;
+    let masked = screenshot::apply_masks(&mut capture, &masks, &options)?;
+    let result = screenshot::save_capture(capture, &options)?;
 
     let mut response = json!({ "path": result.path });
+    if !controls.is_empty() || after.is_some() {
+        let mut guard = json!({ "maskedControls": masked });
+        if let Some(error) = after {
+            guard["observation"] = json!({"status": "incomplete", "reason": error});
+        }
+        response["guard"] = guard;
+    }
     if !result.annotations.is_empty() {
         response["annotations"] = serde_json::to_value(&result.annotations)
             .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
@@ -15052,6 +15126,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unreadable_inventory_keeps_content_free_commands_and_guards_the_rest() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.frame_inventory.lock().unwrap().documents.insert(
+            "synthetic-top".into(),
+            json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}),
+        );
+        let session = fixture.manager.active_session_id().unwrap().to_owned();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        let observed = observe_sensitive_tab(&mut state, &session).await.unwrap();
+        assert!(observed.has_sensitive());
+        state
+            .sensitive_observations
+            .entry(session.clone())
+            .or_default()
+            .merge(observed);
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .unreadable
+            .insert("synthetic-top".into());
+        let resp = execute_command(&json!({"id":"u", "action":"url"}), &mut state).await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["guard"]["observation"]["status"], "incomplete");
+        assert!(resp["data"]["guard"]["observation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("pierced DOM unavailable"));
+        for command in [
+            json!({"id":"e", "action":"evaluate", "script":"1"}),
+            json!({"id":"g", "action":"gettext", "selector":"input"}),
+        ] {
+            let resp = execute_command(&command, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(resp["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(super::super::sensitive::UNSUPPORTED));
+        }
+    }
+
+    #[tokio::test]
     async fn test_protected_inventory_remote_siblings_nested_controls_fit_total_deadline() {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
         let mut state = DaemonState::new();
@@ -15132,7 +15249,7 @@ mod tests {
                     )
             );
             if method == "DOM.getDocument" {
-                if command["params"]["depth"] == -1 {
+                if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
                     deep += 1;
                 } else {
                     shallow += 1;
@@ -15424,7 +15541,7 @@ mod tests {
                         )
                 );
                 if method == "DOM.getDocument" {
-                    if command["params"]["depth"] == -1 {
+                    if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
                         deep += 1;
                     } else {
                         shallow += 1;
@@ -15619,7 +15736,9 @@ mod tests {
             assert_ne!(command["sessionId"], "unrepresented-session");
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
-            if method == "DOM.getDocument" && command["params"]["depth"] == -1 {
+            if method == "DOM.getDocument"
+                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+            {
                 deep += 1;
             }
             if method == "Target.attachToTarget" {
@@ -15789,7 +15908,7 @@ mod tests {
             );
             *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
             if method == "DOM.getDocument" {
-                if command["params"]["depth"] == -1 {
+                if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
                     deep += 1;
                 } else {
                     shallow += 1;
@@ -15828,7 +15947,7 @@ mod tests {
                 assert_ne!(command["sessionId"], "unrepresented-session");
                 deeper |= command["sessionId"] == "session-2"
                     && command["method"] == "DOM.getDocument"
-                    && command["params"]["depth"] == -1;
+                    && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH;
                 resolved |= command["sessionId"] == "synthetic-session"
                     && command["method"] == "DOM.resolveNode";
                 read |= command["sessionId"] == "synthetic-session"
@@ -16256,7 +16375,7 @@ mod tests {
                 );
                 *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
                 if method == "DOM.getDocument" {
-                    if command["params"]["depth"] == -1 {
+                    if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
                         deep += 1;
                     } else {
                         shallow += 1;
@@ -16366,7 +16485,10 @@ mod tests {
             .iter()
             .find(|c| c["method"] == "DOM.getDocument")
             .unwrap();
-        assert_eq!(dom["params"], json!({"depth":-1,"pierce":true}));
+        assert_eq!(
+            dom["params"],
+            json!({"depth":crate::native::sensitive::PIERCE_LAYER_DEPTH,"pierce":true})
+        );
         assert_eq!(client.pending_len().await, 2);
         let (state, error) = observer.await.unwrap();
         assert!(error.contains("deadline elapsed"));
@@ -16734,7 +16856,9 @@ mod tests {
                 assert_eq!(command["sessionId"], session);
                 ax_frames.insert(command["params"]["frameId"].as_str().unwrap().to_owned());
             }
-            if command["method"] == "DOM.getDocument" && command["params"]["depth"] == -1 {
+            if command["method"] == "DOM.getDocument"
+                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+            {
                 deep += 1;
             }
         }
@@ -16786,7 +16910,9 @@ mod tests {
         assert_eq!(state.active_iframe_sessions.len(), 2);
         let mut deep = 0;
         while let Ok(command) = fixture.commands.try_recv() {
-            if command["method"] == "DOM.getDocument" && command["params"]["depth"] == -1 {
+            if command["method"] == "DOM.getDocument"
+                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+            {
                 deep += 1;
             }
         }
@@ -16845,7 +16971,9 @@ mod tests {
                 if command["sessionId"] == "late-session" {
                     assert!(initial_validation_seen);
                 }
-                if method == "DOM.getDocument" && command["params"]["depth"] == -1 {
+                if method == "DOM.getDocument"
+                    && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                {
                     deep += 1;
                 }
                 if method == "DOM.getDocument" && command["params"]["depth"] == 0 {
@@ -16901,7 +17029,9 @@ mod tests {
         while let Ok(command) = fixture.commands.try_recv() {
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
-            if method == "DOM.getDocument" && command["params"]["depth"] == -1 {
+            if method == "DOM.getDocument"
+                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+            {
                 deep += 1;
             }
             if method == "Accessibility.getFullAXTree" {
@@ -17114,7 +17244,9 @@ mod tests {
         while let Ok(command) = fixture.commands.try_recv() {
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
-            if method == "DOM.getDocument" && command["params"]["depth"] == -1 {
+            if method == "DOM.getDocument"
+                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+            {
                 deep += 1;
             }
         }

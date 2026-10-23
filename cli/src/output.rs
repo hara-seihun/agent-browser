@@ -485,6 +485,9 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
     if !opts.json {
+        if let Some(note) = resp.data.as_ref().and_then(format_guard_note) {
+            println!("{note}");
+        }
         if let Some(tab) = resp.data.as_ref().and_then(|data| data.get("activeTab")) {
             if let (Some(tab_id), Some(url)) = (tab["tabId"].as_str(), tab["url"].as_str()) {
                 println!("Switched to new tab {tab_id}: {url}");
@@ -3888,12 +3891,21 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
   inspect/expose, addinitscript.
   Guarded on current or remembered sensitive tabs: eval/evalhandle, addscript,
-  wait --fn, screenshots/PDF/diffs, downloads, active-tab read and browser-data
-  output (logs/network/React/a11y/WebMCP/clipboard/storage/cookies/state).
+  wait --fn, annotated screenshots/PDF/diffs, downloads, active-tab read and
+  browser-data output (logs/network/React/a11y/WebMCP/clipboard/storage/cookies/state).
   Guarded commands stay functional on benign tabs. Detection is sticky for the
-  daemon/tab lifetime, including field removal and navigation. Observation errors
-  fail closed. Refusals use SENSITIVE_OUTPUT_UNSUPPORTED before execution,
-  capture or writes. Use protected snapshots/getters on sensitive tabs.
+  daemon/tab lifetime, including field removal and navigation. Refusals use
+  SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes. Use protected
+  snapshots/getters on sensitive tabs.
+  Plain screenshots are never refused: every rendered sensitive control the guard
+  identifies (current, remembered, or appearing during capture, in shadow roots and
+  cross-origin frames) is painted black before the image is written; the response
+  reports guard.maskedControls.
+  When the inventory cannot be taken, commands with no page content in their output
+  (open, url, title, click, type, press, scroll, waits, tab list, frame switches...)
+  and plain screenshots still run, protected by what earlier observations identified,
+  and report guard.observation {status: incomplete, reason}. Other observation errors
+  fail closed.
   MCP delegates to the canonical CLI; profiles, extraArgs and approval do not bypass it.";
 
 pub fn print_help() {
@@ -4332,6 +4344,28 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios tap @e1                             # Touch element
 "#
     );
+}
+
+/// The sensitive-input guard's state travels with output it did not refuse.
+pub(crate) fn format_guard_note(data: &Value) -> Option<String> {
+    let guard = data.get("guard")?;
+    let mut lines = Vec::new();
+    if let Some(masked) = guard.get("maskedControls").and_then(Value::as_u64) {
+        if masked > 0 {
+            lines.push(format!(
+                "Masked {masked} sensitive form control{} (passwords, card fields, one-time codes) in black.",
+                if masked == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    if let Some(observation) = guard.get("observation") {
+        lines.push(format!(
+            "{} Sensitive-input check incomplete; only controls identified earlier are protected. {}",
+            color::warning_indicator(),
+            serde_json::to_string(observation).expect("observation JSON serializes")
+        ));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Incomplete observation metadata must survive text-only CLI/MCP consumers.

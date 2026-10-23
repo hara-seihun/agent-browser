@@ -690,6 +690,7 @@ pub(crate) enum InventoryError {
 pub(crate) enum DocumentChange {
     FrameBindings,
     BackendIdentity,
+    PiercedSubtree,
 }
 
 impl From<String> for InventoryError {
@@ -708,6 +709,7 @@ impl InventoryError {
                 match change {
                     DocumentChange::FrameBindings => "frame bindings",
                     DocumentChange::BackendIdentity => "DOM backend identity",
+                    DocumentChange::PiercedSubtree => "pierced DOM subtree",
                 }
             ),
             Self::Coverage(gap) => format!(
@@ -971,6 +973,134 @@ struct InventoryDocument {
     backend: i64,
 }
 
+/// Chrome converts every protocol response through CBOR with a 300-level
+/// nesting limit, two levels per element, so a pierced tree deeper than about
+/// 147 elements (long Gmail threads) cannot be read in one response. Read it in
+/// layers: a node reporting children it did not include is described again from
+/// there, and the description is spliced in, until no such node remains.
+pub(crate) const PIERCE_LAYER_DEPTH: i64 = 120;
+
+#[derive(Clone, Copy)]
+enum TreeStep {
+    Child(usize),
+    Shadow(usize),
+    Content,
+    Template,
+}
+
+fn truncated_nodes(root: &Value) -> Vec<(Vec<TreeStep>, i64)> {
+    // Steps are kept as a parent-linked list so the walk stays linear in nodes.
+    let mut steps: Vec<(usize, TreeStep)> = Vec::new();
+    let mut found = Vec::new();
+    let mut stack = vec![(root, usize::MAX)];
+    while let Some((node, at)) = stack.pop() {
+        let reported = node["childNodeCount"].as_u64().unwrap_or(0);
+        if reported > 0 && node.get("children").is_none() {
+            if let Some(backend) = node["backendNodeId"].as_i64() {
+                let mut path = Vec::new();
+                let mut cursor = at;
+                while cursor != usize::MAX {
+                    let (parent, step) = steps[cursor];
+                    path.push(step);
+                    cursor = parent;
+                }
+                path.reverse();
+                found.push((path, backend));
+            }
+        }
+        let mut next: Vec<(&Value, TreeStep)> = Vec::new();
+        if let Some(items) = node["children"].as_array() {
+            next.extend(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (item, TreeStep::Child(i))),
+            );
+        }
+        if let Some(items) = node["shadowRoots"].as_array() {
+            next.extend(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (item, TreeStep::Shadow(i))),
+            );
+        }
+        if let Some(item) = node.get("contentDocument").filter(|item| item.is_object()) {
+            next.push((item, TreeStep::Content));
+        }
+        if let Some(item) = node.get("templateContent").filter(|item| item.is_object()) {
+            next.push((item, TreeStep::Template));
+        }
+        for (item, step) in next {
+            steps.push((at, step));
+            stack.push((item, steps.len() - 1));
+        }
+    }
+    found
+}
+
+fn node_at<'a>(mut node: &'a mut Value, path: &[TreeStep]) -> Option<&'a mut Value> {
+    for step in path {
+        node = match step {
+            TreeStep::Child(index) => node.get_mut("children")?.get_mut(*index)?,
+            TreeStep::Shadow(index) => node.get_mut("shadowRoots")?.get_mut(*index)?,
+            TreeStep::Content => node.get_mut("contentDocument")?,
+            TreeStep::Template => node.get_mut("templateContent")?,
+        };
+    }
+    Some(node)
+}
+
+async fn pierced_document(client: &CdpClient, session: &str) -> Result<Value, InventoryError> {
+    let unavailable = || InventoryError::from(format!("{UNSUPPORTED}: pierced DOM unavailable"));
+    let mut document = client
+        .send_command(
+            "DOM.getDocument",
+            Some(json!({ "depth": PIERCE_LAYER_DEPTH, "pierce": true })),
+            Some(session),
+        )
+        .await
+        .map_err(|_| unavailable())?;
+    loop {
+        let pending = truncated_nodes(&document["root"]);
+        if pending.is_empty() {
+            return Ok(document);
+        }
+        let described = futures_util::future::join_all(pending.iter().map(|(_, backend)| {
+            client.send_command(
+                "DOM.describeNode",
+                Some(json!({ "backendNodeId": backend, "depth": PIERCE_LAYER_DEPTH, "pierce": true })),
+                Some(session),
+            )
+        }))
+        .await;
+        for ((path, backend), described) in pending.into_iter().zip(described) {
+            let described =
+                described.map_err(|_| InventoryError::Changed(DocumentChange::PiercedSubtree))?;
+            let mut subtree = described.get("node").cloned().ok_or_else(unavailable)?;
+            if subtree["backendNodeId"].as_i64() != Some(backend)
+                || subtree.get("children").is_none()
+            {
+                return Err(InventoryError::Changed(DocumentChange::PiercedSubtree));
+            }
+            let node = node_at(&mut document["root"], &path).ok_or_else(unavailable)?;
+            let fields = node.as_object_mut().ok_or_else(unavailable)?;
+            let described = subtree.as_object_mut().ok_or_else(unavailable)?;
+            for field in [
+                "children",
+                "shadowRoots",
+                "contentDocument",
+                "templateContent",
+                "pseudoElements",
+            ] {
+                if let Some(value) = described.remove(field) {
+                    fields.insert(field.to_owned(), value);
+                }
+            }
+        }
+    }
+}
+
 async fn inventory_document(
     client: &CdpClient,
     session: String,
@@ -983,14 +1113,9 @@ async fn inventory_document(
             Phase::InitialFrameTree,
             client.send_command_no_params("Page.getFrameTree", Some(&session))
         ),
-        client.observation_progress.track(
-            Phase::InitialDocument,
-            client.send_command(
-                "DOM.getDocument",
-                Some(json!({ "depth": -1, "pierce": true })),
-                Some(&session),
-            )
-        )
+        client
+            .observation_progress
+            .track(Phase::InitialDocument, pierced_document(client, &session))
     );
     let live = live.map_err(|_| format!("{UNSUPPORTED}: frame session unavailable"))?;
     let bindings = frame_bindings(&live["frameTree"])?;
@@ -1001,7 +1126,7 @@ async fn inventory_document(
     {
         return Err(format!("{UNSUPPORTED}: frame session association changed").into());
     }
-    let document = document.map_err(|_| format!("{UNSUPPORTED}: pierced DOM unavailable"))?;
+    let document = document?;
     let root = document
         .get("root")
         .filter(|root| root["nodeName"] == "#document")
@@ -1342,6 +1467,63 @@ pub fn always_denied(action: &str) -> bool {
     )
 }
 
+/// Commands whose responses carry no page content. When the protected
+/// inventory cannot be taken they still run, protected by what earlier
+/// observations remember, and report the incomplete observation alongside.
+pub fn content_free(action: &str, cmd: &Value) -> bool {
+    matches!(
+        action,
+        "navigate"
+            | "url"
+            | "title"
+            | "back"
+            | "forward"
+            | "reload"
+            | "click"
+            | "dblclick"
+            | "type"
+            | "press"
+            | "hover"
+            | "scroll"
+            | "scrollintoview"
+            | "check"
+            | "uncheck"
+            | "focus"
+            | "mouse"
+            | "keyboard"
+            | "wheel"
+            | "keydown"
+            | "keyup"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
+            | "inserttext"
+            | "tab_list"
+            | "viewport"
+            | "bringtofront"
+            | "isvisible"
+            | "isenabled"
+            | "ischecked"
+            | "count"
+            | "boundingbox"
+            | "waitforurl"
+            | "waitforloadstate"
+            | "frame"
+            | "mainframe"
+            | "dialog"
+    ) || (action == "wait" && cmd.get("expression").is_none())
+}
+
+/// Plain screenshots paint every identified sensitive control black instead
+/// of refusing. Annotated captures still need a protected snapshot.
+pub fn masked_screenshot(action: &str, cmd: &Value) -> bool {
+    action == "screenshot"
+        && !cmd
+            .get("annotate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 pub fn guarded(action: &str, cmd: &Value) -> bool {
     matches!(
         action,
@@ -1350,7 +1532,6 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
             | "evalhandle"
             | "addscript"
             | "waitforfunction"
-            | "screenshot"
             | "pdf"
             | "diff_screenshot"
             | "download"
@@ -1374,6 +1555,7 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
             | "state_load_tab"
             | "state_show"
     ) || (action == "wait" && cmd.get("expression").is_some())
+        || (action == "screenshot" && !masked_screenshot(action, cmd))
         || (action == "read" && cmd.get("url").is_none())
 }
 

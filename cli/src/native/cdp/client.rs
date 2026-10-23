@@ -179,8 +179,19 @@ fn sanitize_lone_surrogates(msg: &str) -> Option<String> {
     out
 }
 
+/// Chrome nests a pierced DOM two JSON levels per element, so serde_json's
+/// default 128-level limit refused any page about 60 elements deep (Gmail).
+/// Parse without that limit, growing the stack on the heap instead.
+pub(crate) fn parse_cdp<T: serde::de::DeserializeOwned>(msg: &str) -> serde_json::Result<T> {
+    let mut deserializer = serde_json::Deserializer::from_str(msg);
+    deserializer.disable_recursion_limit();
+    let value = T::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()?;
+    Ok(value)
+}
+
 fn extract_command_id(msg: &str) -> Option<u64> {
-    let envelope: CdpIdEnvelope = serde_json::from_str(msg).ok()?;
+    let envelope: CdpIdEnvelope = parse_cdp(msg).ok()?;
     envelope.id.filter(|id| *id > 0)
 }
 
@@ -343,7 +354,7 @@ impl CdpClient {
                 // Broadcast raw message for inspect proxy subscribers before typed parse,
                 // so messages with negative IDs (used by the inspect proxy) are still delivered.
                 if raw_tx_clone.receiver_count() > 0 {
-                    let session_id = serde_json::from_str::<serde_json::Value>(&msg)
+                    let session_id = parse_cdp::<serde_json::Value>(&msg)
                         .ok()
                         .and_then(|v| v.get("sessionId")?.as_str().map(String::from));
                     let _ = raw_tx_clone.send(RawCdpMessage {
@@ -352,12 +363,12 @@ impl CdpClient {
                     });
                 }
 
-                let parsed: CdpMessage = match serde_json::from_str(&msg) {
+                let parsed: CdpMessage = match parse_cdp(&msg) {
                     Ok(parsed) => parsed,
                     Err(_) => {
                         let repaired = sanitize_lone_surrogates(&msg);
                         let candidate = repaired.as_deref().unwrap_or(&msg);
-                        match serde_json::from_str(candidate) {
+                        match parse_cdp(candidate) {
                             Ok(parsed) => parsed,
                             Err(error) => {
                                 if let Some(id) = extract_command_id(candidate) {

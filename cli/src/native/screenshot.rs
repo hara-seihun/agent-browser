@@ -96,16 +96,25 @@ impl Serialize for ScreenshotAnnotation {
     }
 }
 
+/// Captured bytes held in memory until sensitive controls are masked and the
+/// image is written. Coordinates map viewport CSS pixels to image pixels:
+/// `image = (viewport + offset) * scale`.
+pub struct Capture {
+    pub base64: String,
+    pub annotations: Vec<ScreenshotAnnotation>,
+    offset: (f64, f64),
+    scale: f64,
+}
+
 /// Captures a screenshot via CDP and optionally overlays numbered annotations
-/// that mirror the Node.js screenshot `annotate` mode.
-pub async fn take_screenshot(
+/// that mirror the Node.js screenshot `annotate` mode. Nothing is written.
+pub async fn capture_screenshot(
     client: &Arc<CdpClient>,
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<ScreenshotResult, String> {
-    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+) -> Result<Capture, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
             Some(selector) => {
@@ -132,45 +141,297 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 =
+    let captured =
         capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
     }
 
-    let base64 = base64?;
-    // Captured bytes stay in memory until the complete frame inventory is
-    // public again. Do not create a raw file and redact or delete it later.
-    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+    let (base64, clip_origin) = captured?;
+    let scroll = if options.full_page {
+        Some(get_scroll_offsets(client, session_id).await?)
+    } else {
+        None
+    };
     let annotations = if options.annotate {
-        let scroll = if options.full_page {
-            Some(get_scroll_offsets(client, session_id).await?)
-        } else {
-            None
-        };
         project_annotations(&overlay_items, target_rect.as_ref(), scroll)
     } else {
         Vec::new()
     };
+    let offset = match (clip_origin, scroll) {
+        (Some((x, y)), _) => (-x, -y),
+        (None, Some(scroll)) => scroll,
+        (None, None) => (0.0, 0.0),
+    };
+    let scale = device_scale(client, session_id).await?;
+    Ok(Capture {
+        base64,
+        annotations,
+        offset,
+        scale,
+    })
+}
 
+/// Captures and saves a screenshot only when the tab holds no sensitive controls.
+pub async fn take_screenshot(
+    client: &Arc<CdpClient>,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ScreenshotResult, String> {
+    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+    let capture = capture_screenshot(client, session_id, ref_map, options, iframe_sessions).await?;
+    // Captured bytes stay in memory until the complete frame inventory is
+    // public again. Do not create a raw file and redact or delete it later.
+    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+    save_capture(capture, options)
+}
+
+pub fn save_capture(
+    capture: Capture,
+    options: &ScreenshotOptions,
+) -> Result<ScreenshotResult, String> {
     let ext = if options.format == "jpeg" {
         "jpg"
     } else {
         "png"
     };
     let path = save_screenshot(
-        &base64,
+        &capture.base64,
         options.path.as_deref(),
         ext,
         options.output_dir.as_deref(),
     )?;
-
     Ok(ScreenshotResult {
         path,
-        base64,
-        annotations,
+        base64: capture.base64,
+        annotations: capture.annotations,
     })
+}
+
+async fn device_scale(client: &CdpClient, session_id: &str) -> Result<f64, String> {
+    let metrics: Value = client
+        .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
+        .await?;
+    let device = metrics["visualViewport"]["clientWidth"].as_f64();
+    let css = metrics["cssVisualViewport"]["clientWidth"].as_f64();
+    match (device, css) {
+        (Some(device), Some(css)) if device > 0.0 && css > 0.0 => Ok(device / css),
+        _ => Err("Screenshot scale unavailable: layout metrics lack viewport widths".to_string()),
+    }
+}
+
+/// Viewport rectangles, in top-level CSS pixels, of every rendered sensitive
+/// control. A control with no layout box is not painted and needs no mask.
+/// A rendered control inside a frame whose position cannot be established
+/// refuses the capture: an unplaced mask would leave the value visible.
+pub async fn sensitive_control_rects(
+    client: &CdpClient,
+    top_session: &str,
+    controls: &[(String, i64)],
+    iframe_sessions: &HashMap<String, String>,
+    parent_sessions: &HashMap<String, String>,
+) -> Result<Vec<MaskRect>, String> {
+    let mut offsets: HashMap<String, (f64, f64)> = HashMap::new();
+    offsets.insert(top_session.to_string(), (0.0, 0.0));
+    let mut rects = Vec::new();
+    for (session, backend) in controls {
+        let Some(local) = content_box(client, session, *backend).await else {
+            continue;
+        };
+        let (dx, dy) = match offsets.get(session) {
+            Some(offset) => *offset,
+            None => {
+                let offset = frame_offset(
+                    client,
+                    top_session,
+                    session,
+                    iframe_sessions,
+                    parent_sessions,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "{}: sensitive control position unavailable",
+                        super::sensitive::UNSUPPORTED
+                    )
+                })?;
+                offsets.insert(session.clone(), offset);
+                offset
+            }
+        };
+        rects.push(MaskRect(Rect {
+            x: local.x + dx,
+            y: local.y + dy,
+            width: local.width,
+            height: local.height,
+        }));
+    }
+    Ok(rects)
+}
+
+#[derive(Debug, Clone)]
+pub struct MaskRect(Rect);
+
+async fn content_box(client: &CdpClient, session: &str, backend: i64) -> Option<Rect> {
+    let quads = client
+        .send_command(
+            "DOM.getContentQuads",
+            Some(serde_json::json!({ "backendNodeId": backend })),
+            Some(session),
+        )
+        .await
+        .ok()?;
+    bounding_box(quads["quads"].as_array()?)
+}
+
+fn bounding_box(quads: &[Value]) -> Option<Rect> {
+    let points = quads
+        .iter()
+        .filter_map(Value::as_array)
+        .flat_map(|quad| {
+            quad.chunks(2)
+                .map(|p| (p[0].as_f64(), p.get(1).and_then(Value::as_f64)))
+        })
+        .map(|(x, y)| Some((x?, y?)))
+        .collect::<Option<Vec<_>>>()?;
+    if points.is_empty() {
+        return None;
+    }
+    let min_x = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let max_x = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    Some(Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    })
+}
+
+/// Offset of an out-of-process frame's viewport within the top-level viewport,
+/// accumulated through each owner iframe's content box.
+async fn frame_offset(
+    client: &CdpClient,
+    top_session: &str,
+    session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    parent_sessions: &HashMap<String, String>,
+) -> Option<(f64, f64)> {
+    let mut current = session.to_string();
+    let (mut x, mut y) = (0.0, 0.0);
+    for _ in 0..=iframe_sessions.len() {
+        if current == top_session {
+            return Some((x, y));
+        }
+        let frame = iframe_sessions
+            .iter()
+            .find(|(_, attached)| **attached == current)
+            .map(|(frame, _)| frame.clone())?;
+        let candidates: Vec<String> = match parent_sessions.get(&current) {
+            Some(parent) => vec![parent.clone()],
+            None => std::iter::once(top_session.to_string())
+                .chain(iframe_sessions.values().filter(|s| **s != current).cloned())
+                .collect(),
+        };
+        let mut placed = None;
+        for parent in candidates {
+            let Ok(owner) = client
+                .send_command(
+                    "DOM.getFrameOwner",
+                    Some(serde_json::json!({ "frameId": frame })),
+                    Some(&parent),
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some(owner) = owner["backendNodeId"].as_i64() else {
+                continue;
+            };
+            let Ok(model) = client
+                .send_command(
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({ "backendNodeId": owner })),
+                    Some(&parent),
+                )
+                .await
+            else {
+                continue;
+            };
+            let content = model["model"]["content"].as_array()?;
+            placed = Some((
+                content.first()?.as_f64()?,
+                content.get(1)?.as_f64()?,
+                parent,
+            ));
+            break;
+        }
+        let (ox, oy, parent) = placed?;
+        x += ox;
+        y += oy;
+        current = parent;
+    }
+    None
+}
+
+/// Paints every mask opaque black in the captured image. Masks extend two CSS
+/// pixels past each control to cover focus rings and antialiased edges.
+pub fn apply_masks(
+    capture: &mut Capture,
+    masks: &[MaskRect],
+    options: &ScreenshotOptions,
+) -> Result<usize, String> {
+    if masks.is_empty() {
+        return Ok(0);
+    }
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &capture.base64)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
+    let mut image = image::load_from_memory(&bytes)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    const PAD: f64 = 2.0;
+    let mut painted = 0;
+    for MaskRect(rect) in masks {
+        let to_px = |v: f64, offset: f64| (v + offset) * capture.scale;
+        let x0 = to_px(rect.x - PAD, capture.offset.0).floor().max(0.0);
+        let y0 = to_px(rect.y - PAD, capture.offset.1).floor().max(0.0);
+        let x1 = to_px(rect.x + rect.width + PAD, capture.offset.0)
+            .ceil()
+            .min(width as f64);
+        let y1 = to_px(rect.y + rect.height + PAD, capture.offset.1)
+            .ceil()
+            .min(height as f64);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        for y in y0 as u32..y1 as u32 {
+            for x in x0 as u32..x1 as u32 {
+                image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        painted += 1;
+    }
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    if options.format == "jpeg" {
+        let quality = options.quality.unwrap_or(80).clamp(1, 100) as u8;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, quality)
+            .encode_image(&image::DynamicImage::ImageRgba8(image).to_rgb8())
+            .map_err(|e| format!("Failed to encode screenshot: {}", e))?;
+    } else {
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to encode screenshot: {}", e))?;
+    }
+    capture.base64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        encoded.into_inner(),
+    );
+    Ok(painted)
 }
 
 /// Prepare the target for a screenshot.
@@ -219,9 +480,10 @@ async fn capture_screenshot_base64(
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<String, String> {
+) -> Result<(String, Option<(f64, f64)>), String> {
     prepare_target_for_capture(client, session_id).await;
 
+    let mut clip_origin = None;
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
         quality: if options.format == "jpeg" {
@@ -258,6 +520,7 @@ async fn capture_screenshot_base64(
         if let Some(rect) =
             get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
         {
+            clip_origin = Some((rect.x, rect.y));
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -272,7 +535,7 @@ async fn capture_screenshot_base64(
         .send_command_typed("Page.captureScreenshot", &params, Some(session_id))
         .await?;
 
-    Ok(result.data)
+    Ok((result.data, clip_origin))
 }
 
 async fn collect_annotations(

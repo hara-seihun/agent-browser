@@ -1365,7 +1365,13 @@ fn main() {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        // Deep pages produce deeply nested CDP values; walking and dropping them
+        // recurses once per level, so give workers room beyond tokio's 2 MiB.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(64 * 1024 * 1024)
+            .build()
+            .expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
         return;
     }

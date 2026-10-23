@@ -899,7 +899,7 @@ mod tests {
             if command["method"] == "DOM.getDocument" {
                 assert_eq!(
                     command["params"],
-                    serde_json::json!({"depth": -1, "pierce": true})
+                    serde_json::json!({"depth": crate::native::sensitive::PIERCE_LAYER_DEPTH, "pierce": true})
                 );
             }
             methods.push(command["method"].as_str().unwrap().to_owned());

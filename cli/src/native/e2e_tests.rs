@@ -420,18 +420,17 @@ async fn e2e_sensitive_inputs() {
             json!({"action":"evaluate", "script":"document.querySelector('input')?.value"}),
             json!({"action":"evaluate", "script":format!("btoa(eval(atob('{encoded_script}')))")}),
             json!({"action":"evalhandle", "script":"document.body"}),
-            json!({"action":"screenshot", "path":artifacts.path().join(format!("{surface}.png"))}),
             json!({"action":"screenshot", "annotate":true, "fullPage":true, "path":artifacts.path().join(format!("{surface}-annotated.png"))}),
             json!({"action":"pdf", "path":artifacts.path().join(format!("{surface}.pdf"))}),
         ];
         // Each guarded output family gets a fresh-tab detection assertion,
         // rather than all but evaluate passing solely because of sticky state.
         guarded_commands.rotate_left(match surface {
-            "root" => 3,
-            "same" => 5,
-            "cross" => 2,
+            "root" => 4,
+            "same" => 3,
+            "cross" => 1,
             "shadow" => 0,
-            "closed-shadow" => 3,
+            "closed-shadow" => 2,
             _ => unreachable!(),
         });
         for command in guarded_commands {
@@ -444,6 +443,19 @@ async fn e2e_sensitive_inputs() {
                 );
             }
         }
+        // Plain screenshots are never refused: they paint the controls black.
+        let masked_image = artifacts.path().join(format!("{surface}-masked.png"));
+        let resp = execute_command(
+            &json!({"action":"screenshot", "path":masked_image}),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["guard"]["maskedControls"].as_u64().unwrap() > 0,
+            "{surface} screenshot masked nothing: {resp}"
+        );
+        assert!(masked_image.is_file());
         if surface == "same" || surface == "cross" {
             let resp = execute_command(
                 &json!({"id":"frame", "action":"frame", "selector":"#child"}),
@@ -599,7 +611,7 @@ async fn e2e_sensitive_inputs() {
         )
         .await;
         assert_success(&resp);
-        for action in ["evaluate", "evalhandle", "screenshot", "pdf"] {
+        for action in ["evaluate", "evalhandle", "pdf"] {
             let path = artifacts.path().join(format!("{surface}-sticky-{action}"));
             let resp = execute_command(
                 &json!({"id":"sticky", "action":action, "script":"1 + 1", "path":path}),
@@ -1437,7 +1449,6 @@ fn cleanup_restore_state_files(restore_key: &str) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Core: launch, navigate, evaluate, url, title, close
 // ---------------------------------------------------------------------------
@@ -1586,7 +1597,6 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
-
 // ---------------------------------------------------------------------------
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
@@ -1632,7 +1642,11 @@ async fn e2e_snapshot_and_click_ref() {
 
     let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["title"], "clicked", "Ref click should hit the link");
+    assert_eq!(
+        get_data(&resp)["title"],
+        "clicked",
+        "Ref click should hit the link"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -5659,7 +5673,6 @@ async fn e2e_get_cdp_url() {
     assert_success(&resp);
 }
 
-
 // ---------------------------------------------------------------------------
 // Stale ref fallback (#805): clicking a ref after the DOM has been replaced
 // should fall back to role/name lookup instead of failing.
@@ -6514,7 +6527,7 @@ async fn start_stateful_auth_login_server(
     </script>
   </body>
 </html>"#
-                .replace("</body>", &format!("{FORM_STATE_TITLE_SCRIPT}</body>"));
+                    .replace("</body>", &format!("{FORM_STATE_TITLE_SCRIPT}</body>"));
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -7714,7 +7727,6 @@ async fn expect_no_stream_url(
     }
 }
 
-
 async fn seeded_stream_tabs(port: u64, iteration: usize) -> Vec<Value> {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
         .await
@@ -7741,7 +7753,6 @@ async fn seeded_stream_tabs(port: u64, iteration: usize) -> Vec<Value> {
         }
     }
 }
-
 
 #[tokio::test]
 #[ignore]
@@ -7866,7 +7877,6 @@ async fn e2e_lightpanda_stream_url_tracks_active_full_navigation() {
     let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
-
 // ---------------------------------------------------------------------------
 // Upload: ref-based selector support (issue #1107)
 // ---------------------------------------------------------------------------
@@ -7959,8 +7969,6 @@ async fn e2e_upload_with_css_selector() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
-
-
 
 // ---------------------------------------------------------------------------
 // tab new: session setup inheritance
@@ -11309,4 +11317,162 @@ async fn e2e_foreign_cdp_client_tabs_do_not_disturb_session() {
         .unwrap();
     let _ = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
     server.abort();
+}
+
+/// Gmail-shaped page: a DOM deeper than serde_json's default nesting limit,
+/// a closed shadow root and a cross-origin iframe, each holding a password.
+async fn start_deep_page_server() -> (String, SensitiveInputServer) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).await.unwrap();
+                if size == 0 {
+                    return;
+                }
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let Some(path) = request.split_whitespace().nth(1) else {
+                    return;
+                };
+                let depth = 300;
+                let content = match path {
+                    "/deep" => format!(
+                        "<style>input{{width:160px;height:24px;margin:8px;display:block}}</style>\
+                         {open}<p id='deepest'>deep-text</p>{close}\
+                         <div id='closed-host'></div>\
+                         <script>const root = document.getElementById('closed-host').attachShadow({{mode:'closed'}});\
+                         root.innerHTML = \"<input id='shadow-password' type='password' value='deep-secret-shadow'>\";\
+                         window.closedRoot = root;</script>\
+                         <iframe id='child' style='position:absolute;left:300px;top:40px;width:240px;height:120px;border:0' \
+                         src='http://localhost:{port}/child'></iframe>",
+                        open = "<div>".repeat(depth),
+                        close = "</div>".repeat(depth),
+                    ),
+                    "/child" => "<style>body{margin:0}input{width:160px;height:24px;margin:20px}</style>\
+                                 <input id='frame-password' type='password' value='deep-secret-frame'>"
+                        .to_string(),
+                    _ => "<title>Empty fixture</title>".to_string(),
+                };
+                let body =
+                    format!("<!doctype html><html><body style='margin:0'>{content}</body></html>");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    (
+        format!("http://127.0.0.1:{port}"),
+        SensitiveInputServer(server),
+    )
+}
+
+fn pixel_is_black(path: &std::path::Path, x: f64, y: f64) -> bool {
+    let image = image::open(path).unwrap().to_rgba8();
+    let pixel = image.get_pixel(x.round() as u32, y.round() as u32);
+    pixel.0[..3] == [0, 0, 0]
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_deep_shadow_and_cross_origin_page_stays_observable() {
+    let execute_command = sensitive_test_command;
+    let vars = ["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"];
+    let guard = EnvGuard::new(&vars);
+    let artifacts = tempfile::tempdir().unwrap();
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        artifacts.path().to_str().unwrap(),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-deep-page");
+    let (base_url, _server) = start_deep_page_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({"id":"launch", "action":"launch", "headless":true, "engine":"chrome", "args":["--no-sandbox", "--disable-dev-shm-usage", "--site-per-process"]}),
+        &mut state,
+    ).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({"id":"open", "action":"navigate", "url":format!("{base_url}/deep")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let ready = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            state.drain_cdp_events_background().await.unwrap();
+            if !state.iframe_sessions.is_empty() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(ready.is_ok(), "cross-origin child never attached");
+
+    let resp = execute_command(&json!({"id":"url", "action":"url"}), &mut state).await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["url"].as_str().unwrap().ends_with("/deep"));
+    assert!(get_data(&resp).get("guard").is_none(), "{resp}");
+
+    let resp = execute_command(&json!({"id":"snapshot", "action":"snapshot"}), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["observation"]["status"],
+        "complete",
+        "{resp}"
+    );
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot.contains("deep-text"), "{snapshot}");
+    assert!(!resp.to_string().contains("deep-secret-"));
+
+    // The page holds sensitive controls, so the screenshot masks them rather
+    // than refusing, in the closed shadow root and in the cross-origin frame.
+    let image = artifacts.path().join("deep.png");
+    let resp = execute_command(
+        &json!({"id":"shot", "action":"screenshot", "path":image}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["guard"]["maskedControls"], 2, "{resp}");
+    assert!(
+        get_data(&resp)["guard"].get("observation").is_none(),
+        "{resp}"
+    );
+    let centres = trusted_sensitive_fixture_evaluate(
+        &state,
+        "(() => { const s = window.closedRoot.getElementById('shadow-password').getBoundingClientRect(); \
+         const f = document.getElementById('child').getBoundingClientRect(); \
+         return [s.x + s.width / 2, s.y + s.height / 2, f.x + 20 + 80, f.y + 20 + 12]; })()",
+    )
+    .await;
+    let centres: Vec<f64> = serde_json::from_value(centres).unwrap();
+    assert!(
+        pixel_is_black(&image, centres[0], centres[1]),
+        "shadow password not masked"
+    );
+    assert!(
+        pixel_is_black(&image, centres[2], centres[3]),
+        "frame password not masked"
+    );
+    assert!(
+        !pixel_is_black(&image, 2.0, 2.0),
+        "mask spread over the page"
+    );
+
+    let resp = execute_command(
+        &json!({"id":"away", "action":"navigate", "url":format!("{base_url}/empty")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    close_current_browser(&mut state).await.unwrap();
 }
