@@ -369,10 +369,22 @@ impl WorkStep {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum WorkControlClass { Identifier, Password, Challenge, Mixed, Ambiguous, None }
+enum WorkControlClass {
+    Identifier,
+    Password,
+    Challenge,
+    Mixed,
+    Ambiguous,
+    None,
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum WorkIdentityPresence { Missing, Own, Foreign, Conflicting }
+enum WorkIdentityPresence {
+    Missing,
+    Own,
+    Foreign,
+    Conflicting,
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct WorkDiagnostic {
@@ -464,7 +476,9 @@ async fn work_step(
     if work_bound(state, location).await? != page.bound {
         return Err(WorkReason::NativeBinding);
     }
-    if method != "dispose" { *observation = None; }
+    if method != "dispose" {
+        *observation = None;
+    }
     let declaration = match method {
         "inspect" => "function() { const step = this.inspect(); return {step, diagnostic:this.diagnostic()}; }",
         "fillIdentifier" => "async function() { const step = await this.fillIdentifier(); return {step, diagnostic:this.diagnostic()}; }",
@@ -482,15 +496,30 @@ async fn work_step(
     if method != "clickNext" && work_bound(state, location).await? != page.bound {
         return Err(WorkReason::NativeBinding);
     }
-    if method == "dispose" { return WorkStep::decode(&value["result"]["value"]); }
+    if method == "dispose" {
+        return WorkStep::decode(&value["result"]["value"]);
+    }
     let reply = &value["result"]["value"];
     if reply.as_object().map(|o| o.len()) != Some(2) || reply.get("diagnostic").is_none() {
         return Err(WorkReason::NativeProtocol);
     }
     let result = WorkStep::decode(&reply["step"])?;
-    *observation = if reply["diagnostic"].is_null() { None } else {
-        let diagnostic: WorkDiagnostic = serde_json::from_value(reply["diagnostic"].clone()).map_err(|_| WorkReason::NativeProtocol)?;
-        Some(WorkObservation { phase: match method { "inspect" => "initial", "fillIdentifier" => "fill-identifier", "clickNext" => "click-next", "readiness" => "post-next", _ => return Err(WorkReason::NativeProtocol) }, policy_sha256: "6986d57dc8d0fdf906cc7709232f68bada8efdd4601eab0b33fc42fb84a183f8", diagnostic })
+    *observation = if reply["diagnostic"].is_null() {
+        None
+    } else {
+        let diagnostic: WorkDiagnostic = serde_json::from_value(reply["diagnostic"].clone())
+            .map_err(|_| WorkReason::NativeProtocol)?;
+        Some(WorkObservation {
+            phase: match method {
+                "inspect" => "initial",
+                "fillIdentifier" => "fill-identifier",
+                "clickNext" => "click-next",
+                "readiness" => "post-next",
+                _ => return Err(WorkReason::NativeProtocol),
+            },
+            policy_sha256: "6986d57dc8d0fdf906cc7709232f68bada8efdd4601eab0b33fc42fb84a183f8",
+            diagnostic,
+        })
     };
 
     Ok(result)
@@ -575,7 +604,17 @@ async fn work_identifier_transition(
     observation: &mut Option<WorkObservation>,
 ) -> Result<WorkStep, WorkReason> {
     let page = work_page(state, location).await?;
-    match work_observe(state, location, &page, "inspect", deadline, false, observation).await? {
+    match work_observe(
+        state,
+        location,
+        &page,
+        "inspect",
+        deadline,
+        false,
+        observation,
+    )
+    .await?
+    {
         terminal @ (WorkStep::PasswordReady
         | WorkStep::ChallengeReady
         | WorkStep::Refused(_)
@@ -606,7 +645,17 @@ async fn work_identifier_transition(
     if ready.bound.session != page.bound.session || ready.bound.frame != page.bound.frame {
         return Err(WorkReason::NativeBinding);
     }
-    match work_observe(state, location, &ready, "readiness", deadline, true, observation).await? {
+    match work_observe(
+        state,
+        location,
+        &ready,
+        "readiness",
+        deadline,
+        true,
+        observation,
+    )
+    .await?
+    {
         terminal @ (WorkStep::PasswordReady | WorkStep::ChallengeReady) => Ok(terminal),
         WorkStep::Refused(reason) | WorkStep::Unknown(reason) => Ok(WorkStep::Unknown(reason)),
         _ => Err(WorkReason::NativeProtocol),
@@ -644,7 +693,11 @@ async fn work_identifier_readiness(
         .checked_sub(std::time::Duration::from_millis(100))
         .unwrap_or(deadline);
     let mut observation = None;
-    let outcome = tokio::time::timeout_at(end, work_identifier_transition(state, &location, end, &mut observation)).await;
+    let outcome = tokio::time::timeout_at(
+        end,
+        work_identifier_transition(state, &location, end, &mut observation),
+    )
+    .await;
     let result = match outcome {
         Ok(Ok(state)) => state,
         Ok(Err(reason)) => WorkStep::Unknown(reason),
@@ -652,7 +705,8 @@ async fn work_identifier_readiness(
     };
     let mut public = result.public();
     if let Some(observation) = observation {
-        public["diagnostic"] = serde_json::to_value(observation).map_err(|_| "Native WORK diagnostic encoding failed".to_owned())?;
+        public["diagnostic"] = serde_json::to_value(observation)
+            .map_err(|_| "Native WORK diagnostic encoding failed".to_owned())?;
     }
     Ok(public)
 }

@@ -970,7 +970,9 @@ struct ChromeStderr {
 }
 
 fn drain_chrome_stderr(stderr: impl Read + Send + 'static) -> ChromeStderr {
-    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(CHROME_STDERR_TAIL_LINES)));
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(
+        CHROME_STDERR_TAIL_LINES,
+    )));
     let (ws_tx, ws_url) = mpsc::channel();
     let thread_tail = Arc::clone(&tail);
     std::thread::Builder::new()
@@ -1898,9 +1900,18 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             for i in 0..20_000 {
-                writeln!(writer, "[{}:ERROR:gpu] ContextResult::kFatalFailure: WebGL1 blocklisted", i).unwrap();
+                writeln!(
+                    writer,
+                    "[{}:ERROR:gpu] ContextResult::kFatalFailure: WebGL1 blocklisted",
+                    i
+                )
+                .unwrap();
             }
-            writeln!(writer, "DevTools listening on ws://127.0.0.1:1/devtools/browser/x").unwrap();
+            writeln!(
+                writer,
+                "DevTools listening on ws://127.0.0.1:1/devtools/browser/x"
+            )
+            .unwrap();
             done_tx.send(()).unwrap();
         });
         done_rx

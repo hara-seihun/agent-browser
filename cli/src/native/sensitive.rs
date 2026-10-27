@@ -83,6 +83,62 @@ const IDENTIFIERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+const OTP_HINTS: &[&str] = &[
+    "otp",
+    "code",
+    "token",
+    "pin",
+    "passcode",
+    "2fa",
+    "mfa",
+    "verif",
+    "sms",
+    "authenticator",
+];
+const OTP_TYPES: &[&str] = &["", "text", "number"];
+
+/// `autocomplete="one-time-code"` alone does not make a field a one-time code:
+/// some forms put it on every field. It protects only a single-line input that
+/// is code-shaped (short maxlength, numeric inputmode or pattern, or a code-like
+/// name, id, aria-label or placeholder).
+fn otp_shaped(attributes: &HashMap<String, String>) -> bool {
+    if attributes
+        .get("tagname")
+        .is_some_and(|t| !t.eq_ignore_ascii_case("input"))
+    {
+        return false;
+    }
+    let kind = attributes
+        .get("type")
+        .map(|t| t.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !OTP_TYPES.contains(&kind.as_str()) {
+        return false;
+    }
+    if attributes
+        .get("maxlength")
+        .and_then(|m| m.trim().parse::<i64>().ok())
+        .is_some_and(|m| (1..=12).contains(&m))
+    {
+        return true;
+    }
+    if kind == "number"
+        || attributes.contains_key("pattern")
+        || attributes
+            .get("inputmode")
+            .is_some_and(|m| m.eq_ignore_ascii_case("numeric"))
+    {
+        return true;
+    }
+    ["name", "id", "aria-label", "placeholder"]
+        .iter()
+        .filter_map(|key| attributes.get(*key))
+        .any(|value| {
+            let normalized = normalize(value);
+            OTP_HINTS.iter().any(|hint| normalized.contains(hint))
+        })
+}
+
 pub fn marker(kind: &str) -> String {
     format!("[redacted: {kind}]")
 }
@@ -107,7 +163,9 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
                 .iter()
                 .find(|(a, _)| token.eq_ignore_ascii_case(a))
             {
-                return Some(kind);
+                if *kind != "one-time-code" || otp_shaped(attributes) {
+                    return Some(kind);
+                }
             }
         }
         if autocomplete
@@ -142,7 +200,19 @@ pub fn classifier_js() -> String {
       if ((el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
       const autos = {};
-      for (const token of tokens) if (autos[token]) return autos[token];
+      const otpShaped = () => {{
+        if (el.tagName !== 'INPUT') return false;
+        const type = (el.getAttribute('type') || '').trim().toLowerCase();
+        if (!['', 'text', 'number'].includes(type)) return false;
+        const max = parseInt((el.getAttribute('maxlength') || '').trim(), 10);
+        if (max >= 1 && max <= 12) return true;
+        if (type === 'number' || el.hasAttribute('pattern') || (el.getAttribute('inputmode') || '').toLowerCase() === 'numeric') return true;
+        return ['name', 'id', 'aria-label', 'placeholder'].some(key => {{
+          const name = (el.getAttribute(key) || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          return {}.some(hint => name.includes(hint));
+        }});
+      }};
+      for (const token of tokens) if (autos[token] && (autos[token] !== 'one-time-code' || otpShaped())) return autos[token];
       if (tokens.includes('cc-name')) return null;
       const rules = {};
       const root = el.getRootNode();
@@ -166,6 +236,7 @@ pub fn classifier_js() -> String {
       return null;
     }};"#,
         serde_json::to_string(&AUTOCOMPLETE.iter().copied().collect::<HashMap<_, _>>()).unwrap(),
+        serde_json::to_string(OTP_HINTS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
     )
 }
@@ -591,6 +662,9 @@ fn collect_nodes(
                         Some("INPUT" | "TEXTAREA" | "SELECT")
                     ))
             {
+                if let Some(name) = node["nodeName"].as_str() {
+                    attrs.insert("tagname".into(), name.to_owned());
+                }
                 if let Some(kind) = classify(&attrs) {
                     controls.push(Control {
                         session: session.to_owned(),
@@ -1980,13 +2054,50 @@ mod tests {
     }
 
     #[test]
+    fn one_time_code_autocomplete_protects_only_code_shaped_inputs() {
+        let field = |pairs: &[(&str, &str)]| {
+            let mut m: HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            m.insert("autocomplete".into(), "one-time-code".into());
+            m
+        };
+        let otc = Some("one-time-code");
+        assert_eq!(
+            classify(&field(&[("name", "company"), ("type", "text")])),
+            None
+        );
+        assert_eq!(
+            classify(&field(&[("type", "email"), ("name", "email")])),
+            None
+        );
+        assert_eq!(
+            classify(&field(&[("tagname", "TEXTAREA"), ("maxlength", "6")])),
+            None
+        );
+        assert_eq!(
+            classify(&field(&[("name", "message"), ("maxlength", "500")])),
+            None
+        );
+        assert_eq!(classify(&field(&[("maxlength", "6")])), otc);
+        assert_eq!(classify(&field(&[("inputmode", "numeric")])), otc);
+        assert_eq!(classify(&field(&[("type", "number")])), otc);
+        assert_eq!(classify(&field(&[("name", "sms_code")])), otc);
+        assert_eq!(
+            classify(&field(&[("placeholder", "Verification code")])),
+            otc
+        );
+    }
+
+    #[test]
     fn sensitive_classifier_and_markers() {
         for (token, kind) in AUTOCOMPLETE {
             assert_eq!(
-                classify(&HashMap::from([(
-                    "autocomplete".into(),
-                    format!("section-payment {token}")
-                )])),
+                classify(&HashMap::from([
+                    ("autocomplete".into(), format!("section-payment {token}")),
+                    ("maxlength".into(), "6".into()),
+                ])),
                 Some(*kind)
             );
         }

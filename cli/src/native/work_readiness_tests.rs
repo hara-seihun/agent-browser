@@ -460,11 +460,27 @@ fn closed(reply: &Value, state: &str) {
     if !reply["data"]["diagnostic"].is_null() {
         let diagnostic = &reply["data"]["diagnostic"];
         assert_eq!(diagnostic.as_object().unwrap().len(), 6);
-        assert_eq!(diagnostic["policySha256"], "6986d57dc8d0fdf906cc7709232f68bada8efdd4601eab0b33fc42fb84a183f8");
-        assert!(["initial", "fill-identifier", "click-next", "post-next"].contains(&diagnostic["phase"].as_str().unwrap()));
-        assert!(["identifier", "password", "challenge", "mixed", "ambiguous", "none"].contains(&diagnostic["controlClass"].as_str().unwrap()));
-        assert!(["missing", "own", "foreign", "conflicting"].contains(&diagnostic["identity"].as_str().unwrap()));
-        assert!(diagnostic["markerPresent"].is_boolean() && diagnostic["identifierPresent"].is_boolean());
+        assert_eq!(
+            diagnostic["policySha256"],
+            "6986d57dc8d0fdf906cc7709232f68bada8efdd4601eab0b33fc42fb84a183f8"
+        );
+        assert!(["initial", "fill-identifier", "click-next", "post-next"]
+            .contains(&diagnostic["phase"].as_str().unwrap()));
+        assert!([
+            "identifier",
+            "password",
+            "challenge",
+            "mixed",
+            "ambiguous",
+            "none"
+        ]
+        .contains(&diagnostic["controlClass"].as_str().unwrap()));
+        assert!(["missing", "own", "foreign", "conflicting"]
+            .contains(&diagnostic["identity"].as_str().unwrap()));
+        assert!(
+            diagnostic["markerPresent"].is_boolean()
+                && diagnostic["identifierPresent"].is_boolean()
+        );
         expected["diagnostic"] = diagnostic.clone();
     }
     assert_eq!(reply["data"], expected, "{reply}");
