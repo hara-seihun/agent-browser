@@ -1678,6 +1678,13 @@ impl BrowserManager {
         }
     }
 
+    pub fn target_id_for_tab(&self, tab_id: u32) -> Option<String> {
+        self.pages
+            .iter()
+            .find(|p| p.tab_id == tab_id)
+            .map(|p| p.target_id.clone())
+    }
+
     /// Exact, case-insensitive match of a CDP target id to a stable tab id.
     fn find_tab_id_by_target(&self, target_id: &str) -> Option<u32> {
         self.pages

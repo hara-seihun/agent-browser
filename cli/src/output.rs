@@ -2767,12 +2767,13 @@ Login Options:
   --password-selector <s>   Password selector override for this login
   --submit-selector <s>     Submit selector override for this login
 
-Private Fill Options (all binding flags required):
+Private Fill Options:
   --credential-provider <p> Configured credential.read provider
   --item <title>            Provider item reference
   --field <field>           Provider field name
   --selector <css>          CSS selector in selected frame (no refs)
-  --target <target-id>      Exact active browser target ID
+  --target <tab>            Active tab as `tab list` names it (t1, label or target ID);
+                            omitted: the active tab. Never switches tabs
   --frame <frame-id|main>   Exact selected frame ID, or main after frame main
   --format mm/yy           Only expiration_date; omitted preserves provider format
   --timeout <ms>           Total deadline 1..300000ms; initial 180000ms unless configured
@@ -2797,7 +2798,7 @@ Private fill behavior:
   Refused/unknown carry a closed reason code, never private page or account data.
 
 Private export:
-  auth export --selector <css> --target <target-id> --frame <frame-id|main>
+  auth export --selector <css> [--target <tab>] --frame <frame-id|main>
               --output <absolute-path> [--timeout <ms>]
   One unique visible input/textarea value (readonly allowed) or text-only element.
   Pins live target/frame/document/field; existing browser required, no navigation.
@@ -4059,10 +4060,10 @@ Batch:
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth fill --credential-provider <p> --item <title> --field <field>
-            --selector <css> --target <target-id> --frame <frame-id|main>
+            --selector <css> [--target <tab>] --frame <frame-id|main>
             [--format mm/yy] [--timeout <ms>]
                              Private pinned fill, metadata only, no submit/retry
-  auth export --selector <css> --target <target-id> --frame <frame-id|main>
+  auth export --selector <css> [--target <tab>] --frame <frame-id|main>
               --output <absolute-path> [--timeout <ms>]
                              Private exclusive0600 file, path/byteCount only
   auth login <name> [--timeout <ms>]  Login with one total lookup/form deadline

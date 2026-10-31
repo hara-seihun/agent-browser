@@ -4,6 +4,7 @@
 //! The closed WORK provider additionally owns identifier readiness and explicit submit.
 
 use super::actions::DaemonState;
+use super::browser::TabRef;
 use super::element::{resolve_element_object_id, RefMap};
 use crate::plugins::{resolve_credential_field_with_plugins, PluginConfig};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ use tokio::time::Instant;
 
 const INVALID: &str = "auth_fill_invalid_request: explicit provider, item, field, CSS selector, target and frame are required";
 const BINDING: &str = "auth_fill_binding_changed: active target, selected frame or live document association changed; not replayed";
+/// Same closed code as BINDING, so callers' handling is unchanged; the text says which tab.
+const TARGET_NOT_ACTIVE: &str = "auth_fill_binding_changed: --target";
 const PAGE: &str = "auth_fill_page_error: private field operation failed; dispatched effects may still settle; not replayed";
 
 #[derive(Deserialize)]
@@ -24,6 +27,8 @@ struct FillRequest {
     item: String,
     field: String,
     selector: String,
+    /// Empty means the active tab; see `canonical_target`.
+    #[serde(default)]
     target: String,
     frame: String,
     format: Option<String>,
@@ -51,7 +56,6 @@ fn request(cmd: &Value) -> Result<FillRequest, String> {
         &req.item,
         &req.field,
         &req.selector,
-        &req.target,
         &req.frame,
     ]
     .iter()
@@ -88,6 +92,33 @@ fn find_frame<'a>(tree: &'a Value, id: &str) -> Option<&'a Value> {
         .and_then(Value::as_array)?
         .iter()
         .find_map(|child| find_frame(child, id))
+}
+
+/// Turns the caller's `--target` into the CDP target id the binding checks.
+/// It may name the tab the way `tab list` shows it (`t1`, a label or the CDP
+/// target id); empty means the active tab. Agents naturally pass `t1`, and
+/// before 2026-10-31 that never matched and every fill (GitHub's login among
+/// them) failed as a changed binding. The named tab must still be the active
+/// one: a fill never switches tabs.
+pub(crate) fn canonical_target(state: &DaemonState, target: &str) -> Result<String, String> {
+    let mgr = state.browser.as_ref().ok_or(BINDING)?;
+    let active = mgr.active_target_id().map_err(|_| BINDING)?.to_string();
+    if target.trim().is_empty() {
+        return Ok(active);
+    }
+    let named = TabRef::parse(target)
+        .and_then(|tab| mgr.resolve_tab_ref(&tab))
+        .ok()
+        .and_then(|tab| mgr.target_id_for_tab(tab))
+        .ok_or_else(|| {
+            format!("{TARGET_NOT_ACTIVE} `{target}` is not an open tab; use the active tab's id from `tab list`, or omit --target")
+        })?;
+    if !named.eq_ignore_ascii_case(&active) {
+        return Err(format!(
+            "{TARGET_NOT_ACTIVE} `{target}` is not the active tab; switch to it first (`tab {target}`), or omit --target to fill the active tab"
+        ));
+    }
+    Ok(active)
 }
 
 async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String> {
@@ -235,6 +266,8 @@ pub async fn handle_auth_fill(
             .active_target_id()
             .map_err(|_| BINDING)?
             .to_string();
+    } else {
+        req.target = canonical_target(state, &req.target)?;
     }
     if state.recording_state.active
         || state.tracing_state.active
@@ -1249,6 +1282,35 @@ mod tests {
         fixture.server.abort();
     }
 
+    /// Regression (2026-10-31, GitHub login for Modal): agents pass the tab id
+    /// `tab list` prints (`t1`), not the CDP target id. That used to fail every
+    /// fill as auth_fill_binding_changed. A tab id, the target id or nothing
+    /// (the active tab) all bind to the active tab; another tab is still refused.
+    #[tokio::test]
+    async fn tab_id_or_omitted_target_binds_the_active_tab() {
+        let mut fixture = Fixture::new().await;
+        for given in ["t1", "T1", "page", ""] {
+            assert_eq!(canonical_target(&fixture.state, given).unwrap(), "page");
+        }
+        for other in ["t2", "nosuchlabel", "0123456789ABCDEF0123456789ABCDEF"] {
+            let error = canonical_target(&fixture.state, other).unwrap_err();
+            assert!(error.starts_with("auth_fill_binding_changed: --target"), "{error}");
+        }
+        let mut req = Fixture::req();
+        req.target = canonical_target(&fixture.state, "t1").unwrap();
+        let result = fill_with_resolver(
+            &mut fixture.state,
+            &req,
+            Instant::now() + std::time::Duration::from_secs(2),
+            |_| async { Ok("synthetic-private-value".to_string()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["filled"], true);
+        assert_eq!(result["target"], "page");
+        fixture.server.abort();
+    }
+
     #[tokio::test]
     async fn wrong_target_frame_or_association_never_looks_up() {
         let mut fixture = Fixture::new().await;
@@ -1714,13 +1776,15 @@ mod tests {
             "credentialItem",
             "field",
             "selector",
-            "target",
             "frame",
         ] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert_eq!(request(&missing).err().unwrap(), INVALID);
         }
+        let mut active = valid.clone();
+        active.as_object_mut().unwrap().remove("target");
+        assert_eq!(request(&active).unwrap().target, "");
         let mut formatted = valid;
         formatted["format"] = json!("mm/yy");
         assert!(request(&formatted).is_err());

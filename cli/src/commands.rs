@@ -1233,7 +1233,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("export") => {
-                    const USAGE: &str = "agent-browser auth export --selector <css> --target <target-id> --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]";
+                    const USAGE: &str = "agent-browser auth export --selector <css> [--target <tab>] --frame <frame-id|main> --output <absolute-path> [--timeout <ms>]";
                     let mut cmd = json!({"id":id,"action":"auth_export","timeout":configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
@@ -1279,7 +1279,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                         j += 2;
                     }
-                    if ["selector", "target", "frame", "output"]
+                    if ["selector", "frame", "output"]
                         .iter()
                         .any(|key| cmd.get(*key).is_none())
                     {
@@ -1308,7 +1308,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("fill") => {
-                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]";
+                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> [--target <tab>] --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]";
                     let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
@@ -1362,7 +1362,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         "credentialItem",
                         "field",
                         "selector",
-                        "target",
                         "frame",
                     ]
                     .iter()
@@ -6970,6 +6969,14 @@ mod tests {
             &default_flags()
         )
         .is_err());
+        // The target defaults to the active tab and may be a tab id such as `t1`;
+        // the daemon resolves it (see native auth_fill::canonical_target).
+        let active = parse_command(&args(&base.replace(" --target page", "")), &default_flags())
+            .unwrap();
+        assert!(active.get("target").is_none());
+        let tab = parse_command(&args(&base.replace("--target page", "--target t1")), &default_flags())
+            .unwrap();
+        assert_eq!(tab["target"], "t1");
     }
 
     #[test]

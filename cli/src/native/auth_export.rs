@@ -45,7 +45,11 @@ pub async fn handle_auth_export(
     };
     let selector = field("selector")?;
     let location = FieldLocation {
-        target: field("target")?.into(),
+        target: super::auth_fill::canonical_target(
+            state,
+            cmd.get("target").and_then(Value::as_str).unwrap_or(""),
+        )
+        .map_err(|_| BINDING)?,
         frame: field("frame")?.into(),
     };
     let output = field("output")?;
