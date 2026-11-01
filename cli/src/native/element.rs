@@ -202,46 +202,86 @@ pub(super) async fn frame_owner_object_id(
         .ok_or_else(|| format!("No objectId for the owner element of frame {}", frame_id))
 }
 
+/// Object handle for a same-process frame's own `document`, in that frame's
+/// realm. Same process does not mean same origin: a sibling subdomain
+/// (passport.example.com inside account.example.com) shares the process but
+/// the parent's `owner.contentDocument` is null for it. CDP resolves the node
+/// with privilege, and functions called on it compile in the frame's realm.
+pub(super) async fn frame_document_object_id(
+    client: &CdpClient,
+    session_id: &str,
+    frame_id: &str,
+) -> Result<String, String> {
+    let owner = client
+        .send_command(
+            "DOM.getFrameOwner",
+            Some(serde_json::json!({ "frameId": frame_id })),
+            Some(session_id),
+        )
+        .await?;
+    let backend_node_id = owner
+        .get("backendNodeId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Could not resolve the owner element of frame {}", frame_id))?;
+    let described = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 0 })),
+            Some(session_id),
+        )
+        .await?;
+    let document = described["node"]["contentDocument"]["backendNodeId"]
+        .as_i64()
+        .ok_or_else(|| format!("Frame {} has no document yet", frame_id))?;
+    let result: DomResolveNodeResult = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(document),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await?;
+    result
+        .object
+        .object_id
+        .ok_or_else(|| format!("No objectId for the document of frame {}", frame_id))
+}
+
 /// Find a selector inside a same-process iframe and return its center in
 /// top-level viewport coordinates (input events dispatch in that space).
-/// Same-origin access to contentDocument is what makes this possible; a
-/// cross-origin frame never takes this path because it has its own session.
+/// The element is found in the frame's own realm (it may be cross-origin), and
+/// the frame's offset is added from the owner element in the parent's realm.
 async fn resolve_center_in_same_process_frame(
     client: &CdpClient,
     session_id: &str,
     frame_id: &str,
     selector: &str,
 ) -> Result<(f64, f64), String> {
+    let document_object_id = frame_document_object_id(client, session_id, frame_id).await?;
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
     let function = format!(
         r#"function() {{
-            const doc = this.contentDocument;
-            if (!doc) return null;
+            const doc = this;
             const el = {find_expr};
             if (!el) return null;
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
             else el.scrollIntoView({{ block: 'center', inline: 'center' }});
             const rect = el.getBoundingClientRect();
-            let x = rect.x + rect.width / 2;
-            let y = rect.y + rect.height / 2;
-            let win = doc.defaultView;
-            while (win && win.frameElement) {{
-                const frameRect = win.frameElement.getBoundingClientRect();
-                x += frameRect.x + win.frameElement.clientLeft;
-                y += frameRect.y + win.frameElement.clientTop;
-                win = win.parent;
-            }}
+            const x = rect.x + rect.width / 2;
+            const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
-            const topDoc = win ? win.document : doc;
-            return {{ x: x, y: y, blocker: blockerAt(topDoc, el, x, y) }};
+            return {{ x: x, y: y, blocker: blockerAt(doc, el, x, y) }};
         }}"#,
     );
     let result = client
         .send_command(
             "Runtime.callFunctionOn",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
+                "objectId": document_object_id,
                 "functionDeclaration": function,
                 "returnByValue": true,
             })),
@@ -257,12 +297,40 @@ async fn resolve_center_in_same_process_frame(
     }
     let x = value.and_then(|v| v.get("x")).and_then(|v| v.as_f64());
     let y = value.and_then(|v| v.get("y")).and_then(|v| v.as_f64());
-    match (x, y) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!(
+    let (Some(x), Some(y)) = (x, y) else {
+        return Err(format!(
             "Element not found in the selected frame: {}",
             selector
-        )),
+        ));
+    };
+    // The frame's offset in top-level viewport space, from the parent's realm.
+    let offset = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": owner_object_id,
+                "functionDeclaration": r#"function() {
+                    let x = 0, y = 0, owner = this;
+                    while (owner) {
+                        const r = owner.getBoundingClientRect();
+                        x += r.x + owner.clientLeft;
+                        y += r.y + owner.clientTop;
+                        owner = owner.ownerDocument.defaultView.frameElement;
+                    }
+                    return { x: x, y: y };
+                }"#,
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let offset = offset.get("result").and_then(|r| r.get("value"));
+    match (
+        offset.and_then(|v| v.get("x")).and_then(|v| v.as_f64()),
+        offset.and_then(|v| v.get("y")).and_then(|v| v.as_f64()),
+    ) {
+        (Some(dx), Some(dy)) => Ok((x + dx, y + dy)),
+        _ => Err(format!("Could not place frame {} in the viewport", frame_id)),
     }
 }
 
@@ -273,16 +341,14 @@ async fn resolve_object_in_same_process_frame(
     frame_id: &str,
     selector: &str,
 ) -> Result<String, String> {
-    let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
+    let document_object_id = frame_document_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return null; return {find_expr}; }}",
-    );
+    let function = format!("function() {{ const doc = this; return {find_expr}; }}");
     let result = client
         .send_command(
             "Runtime.callFunctionOn",
             Some(serde_json::json!({
-                "objectId": owner_object_id,
+                "objectId": document_object_id,
                 "functionDeclaration": function,
                 "returnByValue": false,
             })),
@@ -1269,12 +1335,35 @@ pub async fn get_element_bounding_box(
         .ok_or_else(|| format!("Could not get bounding box for: {}", selector_or_ref))
 }
 
+/// Counts in the frame selected with `frame`, like every other selector command.
 pub async fn get_element_count(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<i64, String> {
     let js = build_count_elements_js(selector);
+    let frame = active_frame();
+    if let Some(frame_id) = frame.as_deref().filter(|f| !iframe_sessions.contains_key(*f)) {
+        let document = frame_document_object_id(client, session_id, frame_id).await?;
+        let result = client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(serde_json::json!({
+                    "objectId": document,
+                    "functionDeclaration": format!("function() {{ const document = this; return {js}; }}"),
+                    "returnByValue": true,
+                })),
+                Some(session_id),
+            )
+            .await?;
+        return Ok(result["result"]["value"].as_i64().unwrap_or(0));
+    }
+    let session_id = frame
+        .as_deref()
+        .and_then(|f| iframe_sessions.get(f))
+        .map(String::as_str)
+        .unwrap_or(session_id);
 
     let result: EvaluateResult = client
         .send_command_typed(

@@ -50,7 +50,11 @@ pub async fn handle_auth_export(
             cmd.get("target").and_then(Value::as_str).unwrap_or(""),
         )
         .map_err(|_| BINDING)?,
-        frame: field("frame")?.into(),
+        frame: super::auth_fill::canonical_frame(
+            state,
+            cmd.get("frame").and_then(Value::as_str).unwrap_or(""),
+        )
+        .map_err(|_| BINDING)?,
     };
     let output = field("output")?;
     if selector.starts_with('@') || selector.starts_with("xpath=") || selector.starts_with("//") {

@@ -2014,6 +2014,13 @@ impl DaemonState {
                                     } else {
                                         self.webmcp.clear_page_tools(session_id);
                                     }
+                                    // A new document reuses backend node ids, so controls
+                                    // pinned in the old one would redact unrelated nodes.
+                                    if let Some(known) =
+                                        self.sensitive_observations.get_mut(session_id)
+                                    {
+                                        known.forget_document_controls();
+                                    }
                                 }
                                 if let (Some(frame_id), Some(origin)) = (
                                     frame.get("id").and_then(Value::as_str),
@@ -6452,11 +6459,6 @@ async fn protected_snapshot_observation(
 ) -> Result<(String, RefMap), super::sensitive::InventoryError> {
     let deadline = state.protected_deadline();
     let progress = state.protected_observation_progress();
-    let private_observation = state
-        .sensitive_observations
-        .get(session)
-        .cloned()
-        .unwrap_or_default();
     state.ref_map.clear();
     progress
         .before(deadline, async {
@@ -6474,6 +6476,12 @@ async fn protected_snapshot_observation(
                     )
                     .await?;
                 state.prepare_pending_iframes().await?;
+                // Read after draining: a navigation drained above retires old controls.
+                let private_observation = state
+                    .sensitive_observations
+                    .get(session)
+                    .cloned()
+                    .unwrap_or_default();
                 let mgr = state
                     .browser
                     .as_ref()
@@ -7582,8 +7590,8 @@ async fn wait_for_function(
 }
 
 /// wait_for_selector inside a same-process iframe selected via `frame <sel>`:
-/// polls through the owner element's contentDocument, which stays correct
-/// even if the frame navigates (the getter re-resolves every poll).
+/// polls the frame's own document, re-resolved every poll so a navigating
+/// frame stays correct, and in the frame's realm so cross-origin works.
 async fn wait_for_selector_in_frame(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
@@ -7592,8 +7600,6 @@ async fn wait_for_selector_in_frame(
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let owner_object_id =
-        super::element::frame_owner_object_id(client, session_id, frame_id).await?;
     let sel = serde_json::to_string(selector).unwrap_or_default();
     let check = match state {
         "attached" => format!("!!doc.querySelector({sel})"),
@@ -7617,16 +7623,24 @@ async fn wait_for_selector_in_frame(
         ),
         _ => return Err("Invalid wait element state".into()),
     };
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
-    );
+    let function = format!("function() {{ const doc = this; return {check}; }}");
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
     loop {
+        // Re-resolved every poll: the frame may navigate to a new document.
+        let Ok(document_object_id) =
+            super::element::frame_document_object_id(client, session_id, frame_id).await
+        else {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!("Wait timed out after {}ms", timeout_ms));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            continue;
+        };
         let result = client
             .send_command(
                 "Runtime.callFunctionOn",
                 Some(json!({
-                    "objectId": owner_object_id,
+                    "objectId": document_object_id,
                     "functionDeclaration": function,
                     "returnByValue": true,
                 })),
@@ -9119,7 +9133,13 @@ async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let count = super::element::get_element_count(&mgr.client, &session_id, selector).await?;
+    let count = super::element::get_element_count(
+        &mgr.client,
+        &session_id,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
     Ok(json!({ "count": count, "selector": selector }))
 }
 
@@ -10958,8 +10978,8 @@ async fn handle_presentational_getbyrole(
 
 /// Evaluate a `(root) => {...}` body against the active frame's document, or the
 /// top document when no frame is selected. Runtime.evaluate cannot target a
-/// same-origin child frame, so that case runs the body against the frame owner's
-/// contentDocument (as element resolution does); an OOPIF has its own session
+/// same-process child frame, so that case runs the body on the frame's document
+/// in the frame's own realm (as element resolution does); an OOPIF has its own session
 /// where `document` is already the frame document.
 async fn eval_body_in_active_frame(
     mgr: &BrowserManager,
@@ -10971,10 +10991,8 @@ async fn eval_body_in_active_frame(
     match frame_id {
         Some(fid) if !iframe_sessions.contains_key(fid) => {
             let owner =
-                super::element::frame_owner_object_id(&mgr.client, top_session, fid).await?;
-            let func = format!(
-                "function() {{ const d = this.contentDocument; if (!d) return null; return ({body})(d); }}"
-            );
+                super::element::frame_document_object_id(&mgr.client, top_session, fid).await?;
+            let func = format!("function() {{ return ({body})(this); }}");
             let res = mgr
                 .client
                 .send_command(

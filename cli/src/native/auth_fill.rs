@@ -30,6 +30,8 @@ struct FillRequest {
     /// Empty means the active tab; see `canonical_target`.
     #[serde(default)]
     target: String,
+    /// Empty means the selected frame (`frame SELECTOR`), else main; see `canonical_frame`.
+    #[serde(default)]
     frame: String,
     format: Option<String>,
 }
@@ -56,7 +58,6 @@ fn request(cmd: &Value) -> Result<FillRequest, String> {
         &req.item,
         &req.field,
         &req.selector,
-        &req.frame,
     ]
     .iter()
     .any(|v| v.trim().is_empty())
@@ -106,9 +107,13 @@ pub(crate) fn canonical_target(state: &DaemonState, target: &str) -> Result<Stri
     if target.trim().is_empty() {
         return Ok(active);
     }
-    let named = TabRef::parse(target)
-        .and_then(|tab| mgr.resolve_tab_ref(&tab))
-        .ok()
+    let named = mgr
+        .find_tab_id_by_target(target)
+        .or_else(|| {
+            TabRef::parse(target)
+                .and_then(|tab| mgr.resolve_tab_ref(&tab))
+                .ok()
+        })
         .and_then(|tab| mgr.target_id_for_tab(tab))
         .ok_or_else(|| {
             format!("{TARGET_NOT_ACTIVE} `{target}` is not an open tab; use the active tab's id from `tab list`, or omit --target")
@@ -119,6 +124,21 @@ pub(crate) fn canonical_target(state: &DaemonState, target: &str) -> Result<Stri
         ));
     }
     Ok(active)
+}
+
+/// `--frame` defaults to the frame the agent selected with `frame SELECTOR`
+/// (main when none). An explicit frame must be the selected one; the error says
+/// which is selected, since agents often select a login iframe and then pass `main`.
+pub(crate) fn canonical_frame(state: &DaemonState, frame: &str) -> Result<String, String> {
+    let selected = state.active_frame_id.as_deref().unwrap_or("main");
+    if frame.trim().is_empty() || frame == selected {
+        return Ok(selected.to_owned());
+    }
+    Err(if selected == "main" {
+        format!("auth_fill_binding_changed: --frame `{frame}` is not selected; select it first with `frame SELECTOR`, then omit --frame")
+    } else {
+        format!("auth_fill_binding_changed: --frame `{frame}` but an iframe is selected; omit --frame to fill inside it, or run `frame main` first")
+    })
 }
 
 async fn bind(state: &DaemonState, req: &FillRequest) -> Result<Binding, String> {
@@ -268,6 +288,7 @@ pub async fn handle_auth_fill(
             .to_string();
     } else {
         req.target = canonical_target(state, &req.target)?;
+        req.frame = canonical_frame(state, &req.frame)?;
     }
     if state.recording_state.active
         || state.tracing_state.active
@@ -1292,6 +1313,11 @@ mod tests {
         for given in ["t1", "T1", "page", ""] {
             assert_eq!(canonical_target(&fixture.state, given).unwrap(), "page");
         }
+        // The fixture has the cross-origin iframe "child" selected.
+        assert_eq!(canonical_frame(&fixture.state, "").unwrap(), "child");
+        assert_eq!(canonical_frame(&fixture.state, "child").unwrap(), "child");
+        let error = canonical_frame(&fixture.state, "main").unwrap_err();
+        assert!(error.starts_with("auth_fill_binding_changed: --frame `main` but an iframe is selected"), "{error}");
         for other in ["t2", "nosuchlabel", "0123456789ABCDEF0123456789ABCDEF"] {
             let error = canonical_target(&fixture.state, other).unwrap_err();
             assert!(error.starts_with("auth_fill_binding_changed: --target"), "{error}");
@@ -1433,6 +1459,156 @@ mod tests {
         assert!(outcome.is_err());
         assert_eq!(fixture.fills.load(Ordering::SeqCst), 0);
         fixture.server.abort();
+    }
+
+    /// Regression (2026-10-31, Alibaba Cloud login): a login iframe on a sibling
+    /// origin (passport. inside account., here another port) shares the page's
+    /// process but is cross-origin, so selectors resolved through the owner's
+    /// contentDocument found nothing. Selected with `frame`, with --frame omitted.
+    #[tokio::test]
+    #[ignore = "requires installed Chrome; run serially"]
+    async fn e2e_fill_inside_same_process_cross_origin_iframe() {
+        use super::super::actions::{close_current_browser, execute_command};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
+        async fn serve(listener: tokio::net::TcpListener, body: String) {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer).await.unwrap();
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        }
+        let inner = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inner_port = inner.local_addr().unwrap().port();
+        let outer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let outer_port = outer.local_addr().unwrap().port();
+        let inner_server = tokio::spawn(serve(inner, "<label for='fm-login-id'>Account</label><input id='fm-login-id'><script>document.querySelector('#fm-login-id').addEventListener('input',e=>{document.body.dataset.received=e.target.value})</script>".into()));
+        let outer_server = tokio::spawn(serve(outer, format!("<iframe id='login' src='http://127.0.0.1:{inner_port}/'></iframe>")));
+        let mut state = DaemonState::new();
+        let launch =
+            execute_command(&json!({"id":"launch", "action":"launch"}), &mut state).await;
+        assert_eq!(launch["success"], true, "{launch}");
+        let navigate = execute_command(&json!({"id":"nav", "action":"navigate", "url":format!("http://127.0.0.1:{outer_port}/"), "waitUntil":"load"}), &mut state).await;
+        assert_eq!(navigate["success"], true, "{navigate}");
+        let select = execute_command(
+            &json!({"id":"frame", "action":"frame", "selector":"#login"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(select["success"], true, "{select}");
+        let frame = state.active_frame_id.clone().unwrap();
+        assert!(
+            !state.iframe_sessions.contains_key(&frame),
+            "fixture must be a same-process frame"
+        );
+        let count = execute_command(
+            &json!({"id":"count", "action":"count", "selector":"input"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(count["data"]["count"], 1, "{count}");
+        let mut req = request(&json!({"credentialProvider":"fixture", "credentialItem":"Synthetic", "field":"email", "selector":"#fm-login-id"})).unwrap();
+        req.target = canonical_target(&state, "").unwrap();
+        req.frame = canonical_frame(&state, "").unwrap();
+        assert_eq!(req.frame, frame);
+        let result = fill_with_resolver(
+            &mut state,
+            &req,
+            Instant::now() + std::time::Duration::from_secs(5),
+            |_| async { Ok("synthetic-account@example.test".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["filled"], true, "{result}");
+        let received = state
+            .browser
+            .as_ref()
+            .unwrap()
+            .evaluate_in_frame(
+                &state.browser.as_ref().unwrap().active_session_id().unwrap().to_string(),
+                &frame,
+                "document.body.dataset.received === 'synthetic-account@example.test'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(received, json!(true));
+        close_current_browser(&mut state).await.unwrap();
+        inner_server.abort();
+        outer_server.abort();
+    }
+
+    /// Regression (2026-10-31): after a private fill, the next site loaded in the
+    /// same tab read "[redacted: credential]" for every name, because controls
+    /// pinned by backend node id outlived their document. Also fills by `t1`.
+    #[tokio::test]
+    #[ignore = "requires installed Chrome; run serially"]
+    async fn e2e_fill_by_tab_id_then_next_site_reads_normally() {
+        use super::super::actions::{close_current_browser, execute_command};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let size = stream.read(&mut buffer).await.unwrap();
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    let body = if request.starts_with("GET /login ") {
+                        "<main><label for='user'>Username</label><input id='user'><label for='pw'>Password</label><input id='pw' type='password'></main>".to_string()
+                    } else {
+                        (0..40).map(|i| format!("<section><h2>Heading {i}</h2><a href='#{i}'>Public link {i}</a><button>Button {i}</button></section>")).collect()
+                    };
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let mut state = DaemonState::new();
+        let launch = execute_command(
+            &json!({"id":"launch", "action":"launch", "args":["--site-per-process"]}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(launch["success"], true, "{launch}");
+        let navigate = execute_command(&json!({"id":"nav", "action":"navigate", "url":format!("http://127.0.0.1:{port}/login"), "waitUntil":"load"}), &mut state).await;
+        assert_eq!(navigate["success"], true, "{navigate}");
+        let mut req = request(&json!({"credentialProvider":"fixture", "credentialItem":"Synthetic", "field":"password", "selector":"#pw", "frame":"main"})).unwrap();
+        req.target = canonical_target(&state, "t1").unwrap();
+        let result = fill_with_resolver(
+            &mut state,
+            &req,
+            Instant::now() + std::time::Duration::from_secs(5),
+            |_| async { Ok("synthetic-private-value".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["filled"], true, "{result}");
+        let session = state.browser.as_ref().unwrap().active_session_id().unwrap().to_string();
+        assert!(state.sensitive_observations[&session].has_sensitive());
+        // A different site, so Chrome swaps renderer processes and node ids restart.
+        let next = execute_command(&json!({"id":"next", "action":"navigate", "url":format!("http://localhost:{port}/next"), "waitUntil":"load"}), &mut state).await;
+        assert_eq!(next["success"], true, "{next}");
+        let snapshot = execute_command(
+            &json!({"id":"snapshot", "action":"snapshot", "interactive":true}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(snapshot["success"], true, "{snapshot}");
+        let text = snapshot["data"]["snapshot"].as_str().unwrap_or_default();
+        assert!(text.contains("Public link 39"), "{snapshot}");
+        assert!(!text.contains("[redacted"), "{snapshot}");
+        assert!(!state.sensitive_observations[&session].has_sensitive());
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -1776,7 +1952,6 @@ mod tests {
             "credentialItem",
             "field",
             "selector",
-            "frame",
         ] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(key);
@@ -1784,7 +1959,9 @@ mod tests {
         }
         let mut active = valid.clone();
         active.as_object_mut().unwrap().remove("target");
-        assert_eq!(request(&active).unwrap().target, "");
+        active.as_object_mut().unwrap().remove("frame");
+        let defaulted = request(&active).unwrap();
+        assert_eq!((defaulted.target.as_str(), defaulted.frame.as_str()), ("", ""));
         let mut formatted = valid;
         formatted["format"] = json!("mm/yy");
         assert!(request(&formatted).is_err());

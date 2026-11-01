@@ -533,6 +533,16 @@ impl Observation {
         self.secrets.dedup_by(|a, b| a.0 == b.0);
     }
 
+    /// The page loaded a new document. Controls and text nodes are pinned by
+    /// backend node id, which a new document reuses (after a cross-process
+    /// navigation ids restart), so keeping them redacted whole unrelated pages
+    /// (2026-10-31: every name on the next site read "[redacted: credential]").
+    /// Remembered values still protect any echo of them on the new page.
+    pub(crate) fn forget_document_controls(&mut self) {
+        self.controls.clear();
+        self.private_text_nodes.clear();
+    }
+
     pub fn merge(&mut self, other: Self) {
         self.frame_sessions = other.frame_sessions.clone();
         self.inherit_private(&other);

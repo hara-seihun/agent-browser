@@ -1326,8 +1326,8 @@ impl BrowserManager {
     /// Such a frame has no dedicated CDP session, so the session id alone
     /// cannot address it. The chain below reaches its realm without
     /// subscribing to execution-context events: resolve the owning <iframe>
-    /// element, take its `contentWindow` (legal because the frame is
-    /// same-origin here), and call a function on that window object —
+    /// element's content document through CDP (legal even when the frame is
+    /// cross-origin, e.g. a sibling subdomain in the same process), and call a function on it —
     /// Runtime.callFunctionOn compiles the function in the realm of the object
     /// it is called on, so the script runs inside the frame.
     pub async fn evaluate_in_frame(
@@ -1336,8 +1336,8 @@ impl BrowserManager {
         frame_id: &str,
         script: &str,
     ) -> Result<Value, String> {
-        let owner_object_id =
-            super::element::frame_owner_object_id(&self.client, session_id, frame_id).await?;
+        let document_object_id =
+            super::element::frame_document_object_id(&self.client, session_id, frame_id).await?;
 
         // `contentWindow.eval(...)` and not a function compiled here: an
         // indirect eval called as a method of the child window runs in THAT
@@ -1345,7 +1345,7 @@ impl BrowserManager {
         // window object instead keeps running in the parent's realm, which is
         // the trap this avoids (measured: it returned the parent's location).
         let declaration = format!(
-            "function() {{ const w = this.contentWindow; if (!w) throw new Error('frame window unavailable'); return w.eval({}); }}",
+            "function() {{ const w = this.defaultView; if (!w) throw new Error('frame window unavailable'); return w.eval({}); }}",
             serde_json::to_string(script).unwrap_or_else(|_| "''".to_string())
         );
         let result = self
@@ -1353,7 +1353,7 @@ impl BrowserManager {
             .send_command(
                 "Runtime.callFunctionOn",
                 Some(json!({
-                    "objectId": owner_object_id,
+                    "objectId": document_object_id,
                     "functionDeclaration": declaration,
                     "returnByValue": true,
                     "awaitPromise": true,
@@ -1686,7 +1686,7 @@ impl BrowserManager {
     }
 
     /// Exact, case-insensitive match of a CDP target id to a stable tab id.
-    fn find_tab_id_by_target(&self, target_id: &str) -> Option<u32> {
+    pub(crate) fn find_tab_id_by_target(&self, target_id: &str) -> Option<u32> {
         self.pages
             .iter()
             .find(|p| p.target_id.eq_ignore_ascii_case(target_id))
