@@ -1308,7 +1308,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("fill") => {
-                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> [--target <tab>] [--frame <frame-id|main>] [--format mm/yy|mm|yy|yyyy] [--timeout <ms>]";
+                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> [--target <tab>] [--frame <frame-id|main>] [--format mm/yy|mm/yyyy|mmyy|mm|yy|yyyy] [--timeout <ms>]";
                     let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
@@ -1386,7 +1386,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     {
                         return Err(ParseError::InvalidValue {
                             message:
-                                "auth fill requires CSS; --format (mm/yy, mm, yy or yyyy) is only for expiration_date"
+                                "auth fill requires CSS; --format (mm/yy, mm/yyyy, mmyy, mm, yy or yyyy) is only for expiration_date"
                                     .into(),
                             usage: USAGE,
                         });

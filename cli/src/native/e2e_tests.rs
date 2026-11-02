@@ -11476,3 +11476,43 @@ async fn e2e_deep_shadow_and_cross_origin_page_stays_observable() {
     assert_success(&resp);
     close_current_browser(&mut state).await.unwrap();
 }
+
+/// Regression (2026-11-02, Oracle signup): a second `fill` on a field whose
+/// framework tracks its value appended to the old text ("onetwo"), because the
+/// clear assigned through the element and the framework restored its model.
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_replaces_text_in_value_tracking_fields() {
+    let mut state = DaemonState::new();
+    let page = concat!(
+        "data:text/html,<input id=t>",
+        "<script>",
+        "const el=document.getElementById('t');",
+        "const native=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');",
+        "let tracked='',model='';",
+        "Object.defineProperty(el,'value',{configurable:true,get(){return native.get.call(this)},set(v){tracked=String(v);native.set.call(this,v)}});",
+        "el.addEventListener('input',()=>{const v=native.get.call(el);",
+        "if(v!==tracked){tracked=v;model=v}else{queueMicrotask(()=>native.set.call(el,model))}});",
+        "</script>"
+    );
+    assert_success(
+        &execute_command(&json!({"id":"open","action":"navigate","url":page}), &mut state).await,
+    );
+    for value in ["one", "two"] {
+        assert_success(
+            &execute_command(
+                &json!({"id":"fill","action":"fill","selector":"#t","value":value}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    let observed = execute_command(
+        &json!({"id":"observe","action":"evaluate","script":"document.getElementById('t').value"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&observed);
+    assert_eq!(get_data(&observed)["result"], json!("two"));
+    assert_success(&execute_command(&json!({"id":"close","action":"close"}), &mut state).await);
+}

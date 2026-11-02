@@ -304,15 +304,17 @@ pub async fn handle_auth_fill(
         }
         None => crate::plugins::plugins_from_env(),
     };
-    fill_with_resolver(state, &req, deadline, |deadline| {
+    let (provider, item, field) = (req.provider.clone(), req.item.clone(), req.field.clone());
+    fill_with_resolver(state, &req, deadline, |deadline, format| async move {
         resolve_credential_field_with_plugins(
-            &req.provider,
+            &provider,
             &plugins,
-            &req.item,
-            &req.field,
-            req.format.as_deref(),
+            &item,
+            &field,
+            format.as_deref(),
             deadline,
         )
+        .await
     })
     .await
 }
@@ -771,7 +773,7 @@ async fn fill_with_resolver<F, Fut>(
     resolve: F,
 ) -> Result<Value, String>
 where
-    F: FnOnce(Instant) -> Fut,
+    F: FnOnce(Instant, Option<String>) -> Fut,
     Fut: Future<Output = Result<String, String>>,
 {
     let bound = bind(state, req).await?;
@@ -808,7 +810,8 @@ where
     }
     let probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId": object,
-        "functionDeclaration": if work_password { WORK_PASSWORD_PROBE } else { "function() { if (!this.isConnected || !['INPUT','TEXTAREA'].includes(this.tagName) || (this.tagName === 'INPUT' && !['text','password','email','tel','url','search','number','date','month'].includes(this.type)) || this.matches(':disabled') || this.readOnly || !this.getClientRects().length) return null; return this.ownerDocument; }" },
+        "functionDeclaration": if work_password { WORK_PASSWORD_PROBE } else { FILL_PROBE },
+        "arguments": [{"value": req.field}],
         "returnByValue": false
     })), Some(&object_session)).await.map_err(|_| PAGE)?;
     if probe.get("exceptionDetails").is_some() {
@@ -834,7 +837,34 @@ where
     if bind(state, req).await? != bound {
         return Err(BINDING.into());
     }
-    let value = resolve(deadline)
+    // An expiry box says how it wants the date (MM/YY, MM / YYYY, MMYY, a month or
+    // year box or select); an explicit --format wins, and `type=month` keeps YYYY-MM.
+    let format = match (&req.format, req.field.as_str()) {
+        (Some(format), _) => Some(format.clone()),
+        (None, "expiration_date") => {
+            let layout = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(json!({"objectId": object, "functionDeclaration": EXPIRY_LAYOUT, "returnByValue": true})),
+                    Some(&object_session),
+                )
+                .await
+                .map_err(|_| PAGE)?;
+            match &layout["result"]["value"] {
+                Value::Null => None,
+                Value::String(format) if crate::plugins::EXPIRY_FORMATS.contains(&format.as_str()) => {
+                    Some(format.clone())
+                }
+                _ => return Err(PAGE.into()),
+            }
+        }
+        _ => None,
+    };
+    if bind(state, req).await? != bound {
+        return Err(BINDING.into());
+    }
+    let value = resolve(deadline, format)
         .await
         .map_err(|_| "auth_fill_lookup_failed: credential field could not be resolved")?;
     if value.is_empty() {
@@ -1061,10 +1091,65 @@ const WORK_PASSWORD_FILL: &str = r##"async function(value,bound,field,segments){
  return {status:'submitted',redactionValue:rendered};
 }"##;
 
+/// Visible editable text input or textarea; an expiry may also be a `<select>`.
+const FILL_PROBE: &str = r#"function(field) {
+    if (!this.isConnected || this.matches(':disabled') || this.readOnly || !this.getClientRects().length) return null;
+    const text = this.tagName === 'TEXTAREA' || (this.tagName === 'INPUT' &&
+        ['text','password','email','tel','url','search','number','date','month'].includes(this.type));
+    if (!text && !(this.tagName === 'SELECT' && !this.multiple && field === 'expiration_date')) return null;
+    return this.ownerDocument;
+}"#;
+
+/// Which `EXPIRY_FORMATS` entry an expiry control wants, from its own metadata only
+/// (autocomplete, placeholder, labels, name, id, maxlength, select options);
+/// null keeps the provider's YYYY-MM for `<input type=month>`.
+const EXPIRY_LAYOUT: &str = r#"function() {
+    const el = this, doc = el.ownerDocument;
+    if (el.tagName === 'INPUT' && el.type === 'month') return null;
+    const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    if (el.tagName === 'SELECT') {
+        const years = Array.from(el.options, o => (o.value || o.text).replace(/\D/g, '')).filter(Boolean).map(Number);
+        if (ac.includes('cc-exp-month') || (years.length && years.every(n => n >= 1 && n <= 12))) return 'mm';
+        return years.some(n => n >= 1000) ? 'yyyy' : 'yy';
+    }
+    const words = [el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('name'), el.id,
+        el.getAttribute('data-placeholder'), el.getAttribute('title'),
+        ...Array.from(el.labels || [], l => l.textContent),
+        ...(el.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => id && doc.getElementById(id) && doc.getElementById(id).textContent)]
+        .filter(Boolean).join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().replace(/[_-]/g, ' ');
+    const month = ac.includes('cc-exp-month') || /month|mois|\bmm\b/.test(words);
+    const year = ac.includes('cc-exp-year') || /year|ann[ée]e|\byy(yy)?\b|\baa(aa)?\b/.test(words);
+    const long = /yyyy|aaaa/.test(words);
+    const max = el.maxLength > 0 ? el.maxLength : 0;
+    if (ac.includes('cc-exp-month') || (month && !year && !ac.includes('cc-exp'))) return 'mm';
+    if (ac.includes('cc-exp-year') || (year && !month && !ac.includes('cc-exp'))) return long || max >= 4 ? 'yyyy' : 'yy';
+    if (long) return 'mm/yyyy';
+    if (max === 4 || /mmyy\b|mmaa\b/.test(words)) return 'mmyy';
+    return 'mm/yy';
+}"#;
+
 const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
     if (this.matches(':disabled') || this.readOnly) return {status:'not_editable'};
     const view = document.defaultView;
+    // Card numbers and expiry dates are compared by their digits: pages add spaces,
+    // dashes, slashes and invisible direction marks as they format them.
+    const presentation = field === 'number' || field === 'expiration_date' ? s => s.replace(/\D/g, '') : s => s;
+    if (this.tagName === 'SELECT') {
+        if (field !== 'expiration_date' || segments || this.multiple) return {status:'not_editable'};
+        const wanted = Number(presentation(value));
+        const matches = o => { const n = presentation(o.value || o.text); return n !== '' &&
+            (Number(n) === wanted || (n.length !== String(value).length && Number(n) % 100 === wanted % 100)); };
+        const index = Array.from(this.options).findIndex(o => !o.disabled && matches(o));
+        if (index < 0) return {status:'invalid_value'};
+        this.selectedIndex = index;
+        this.dispatchEvent(new view.Event('input', {bubbles:true}));
+        this.dispatchEvent(new view.Event('change', {bubbles:true}));
+        await new Promise(resolve => view.setTimeout(resolve, 100));
+        const rendered = this.value;
+        if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
+        return {status: this.selectedIndex === index ? 'filled' : 'not_retained', redactionValue:rendered};
+    }
     const input = this.tagName === 'INPUT';
     if (!input && this.tagName !== 'TEXTAREA') return {status:'not_editable'};
     const probe = document.createElement(input ? 'input' : 'textarea');
@@ -1090,8 +1175,6 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     await new Promise(resolve => view.setTimeout(resolve, 100));
     const rendered = segments ? segments.map(el => el.value).join('') : this.value;
     if (!this.isConnected || this.ownerDocument !== document || !validSegments()) return {status:'detached',redactionValue:rendered};
-    const presentation = field === 'number' ? s => s.replace(/[ -]/g, '')
-        : field === 'expiration_date' ? s => s.replace(/ /g, '') : s => s;
     const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
     return {status:complete && presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
 }"#;
@@ -1244,7 +1327,7 @@ mod tests {
             &mut fixture.state,
             &Fixture::req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { Ok(secret.to_string()) },
+            |_, _| async { Ok(secret.to_string()) },
         )
         .await
         .unwrap();
@@ -1266,7 +1349,7 @@ mod tests {
             &mut fixture.state,
             &Fixture::req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async move {
+            |_, _| async move {
                 resolver_lookups.fetch_add(1, Ordering::SeqCst);
                 generation.store(2, Ordering::SeqCst);
                 Ok("synthetic-private-value".into())
@@ -1293,7 +1376,7 @@ mod tests {
             &mut fixture.state,
             &Fixture::req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { panic!("cached OOPIF belonging to another page must not resolve secrets") },
+            |_, _| async { panic!("cached OOPIF belonging to another page must not resolve secrets") },
         )
         .await
         .unwrap_err();
@@ -1327,7 +1410,7 @@ mod tests {
             &mut fixture.state,
             &req,
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { Ok("synthetic-private-value".to_string()) },
+            |_, _| async { Ok("synthetic-private-value".to_string()) },
         )
         .await
         .unwrap();
@@ -1353,7 +1436,7 @@ mod tests {
                 &mut fixture.state,
                 &req,
                 Instant::now() + std::time::Duration::from_secs(2),
-                |_| async { panic!("lookup must not occur for invalid binding") },
+                |_, _| async { panic!("lookup must not occur for invalid binding") },
             )
             .await
             .unwrap_err();
@@ -1374,7 +1457,7 @@ mod tests {
             &mut fixture.state,
             &work_req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { Ok("synthetic-private-value".into()) },
+            |_, _| async { Ok("synthetic-private-value".into()) },
         )
         .await
         .unwrap();
@@ -1393,7 +1476,7 @@ mod tests {
             &mut fixture.state,
             &work_req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { panic!("foreign origin must never resolve") },
+            |_, _| async { panic!("foreign origin must never resolve") },
         )
         .await
         .unwrap_err();
@@ -1411,7 +1494,7 @@ mod tests {
             &mut fixture.state,
             &work_req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async move {
+            |_, _| async move {
                 generation.store(2, Ordering::SeqCst);
                 Ok("synthetic-private-value".into())
             },
@@ -1431,7 +1514,7 @@ mod tests {
             &mut fixture.state,
             &work_req(),
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { Err("synthetic-private-value".into()) },
+            |_, _| async { Err("synthetic-private-value".into()) },
         )
         .await
         .unwrap_err();
@@ -1451,7 +1534,7 @@ mod tests {
                 &mut fixture.state,
                 &req,
                 Instant::now() + std::time::Duration::from_secs(2),
-                |_| async { std::future::pending::<Result<String, String>>().await },
+                |_, _| async { std::future::pending::<Result<String, String>>().await },
             ),
         )
         .await;
@@ -1520,7 +1603,7 @@ mod tests {
             &mut state,
             &req,
             Instant::now() + std::time::Duration::from_secs(5),
-            |_| async { Ok("synthetic-account@example.test".into()) },
+            |_, _| async { Ok("synthetic-account@example.test".into()) },
         )
         .await
         .unwrap();
@@ -1540,6 +1623,108 @@ mod tests {
         close_current_browser(&mut state).await.unwrap();
         inner_server.abort();
         outer_server.abort();
+    }
+
+    /// Regression (2026-11-02, Google Payments): card inputs reformat what they get.
+    /// The number box shows "#### #### #### ####" with invisible direction marks, and
+    /// an expiry box wants MM/YY while the vault stores YYYY-MM; both failed as
+    /// `auth_fill_not_retained`. Expiry layouts are read from the control itself.
+    #[tokio::test]
+    #[ignore = "requires installed Chrome; run serially"]
+    async fn e2e_card_number_and_expiry_fill_formatted_fields() {
+        use super::super::actions::{close_current_browser, execute_command};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env =
+            crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer).await.unwrap();
+                    let body = concat!(
+                        "<input id='number' aria-label='Card number'>",
+                        "<input id='slashed' placeholder='MM / YY' maxlength='7'>",
+                        "<input id='long' placeholder='MM/YYYY'>",
+                        "<input id='packed' aria-label='Expiry' maxlength='4'>",
+                        "<input id='expirationMM'><input id='expirationYYYY' maxlength='4'>",
+                        "<input id='yy' autocomplete='cc-exp-year' maxlength='2'>",
+                        "<select id='smonth' autocomplete='cc-exp-month'><option value=''>Month</option>",
+                        "<option value='1'>01</option><option value='9'>09</option><option value='12'>12</option></select>",
+                        "<select id='syear'><option value=''>Year</option><option>2029</option><option>2030</option></select>",
+                        "<input id='month' type='month'>",
+                        "<script>",
+                        "document.querySelector('#number').addEventListener('input',e=>{",
+                        "const d=e.target.value.replace(/\\D/g,'');",
+                        "e.target.value=d.replace(/(.{4})/g,'\\u200e$1 ').trim()});",
+                        "document.querySelector('#slashed').addEventListener('input',e=>{",
+                        "const d=e.target.value.replace(/\\D/g,'');",
+                        "e.target.value=d.slice(0,2)+' / '+d.slice(2)});",
+                        "</script>"
+                    );
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let mut state = DaemonState::new();
+        let launch = execute_command(&json!({"id":"launch", "action":"launch"}), &mut state).await;
+        assert_eq!(launch["success"], true, "{launch}");
+        let navigate = execute_command(&json!({"id":"nav", "action":"navigate", "url":format!("http://127.0.0.1:{port}/"), "waitUntil":"load"}), &mut state).await;
+        assert_eq!(navigate["success"], true, "{navigate}");
+        // The synthetic vault card: number 4242424242424242, expiry 2030-09.
+        fn vault(field: &str, format: Option<&str>) -> String {
+            match (field, format) {
+                ("number", None) => "4242424242424242",
+                ("expiration_date", None) => "2030-09",
+                ("expiration_date", Some("mm/yy")) => "09/30",
+                ("expiration_date", Some("mm/yyyy")) => "09/2030",
+                ("expiration_date", Some("mmyy")) => "0930",
+                ("expiration_date", Some("mm")) => "09",
+                ("expiration_date", Some("yy")) => "30",
+                ("expiration_date", Some("yyyy")) => "2030",
+                other => panic!("unexpected request {other:?}"),
+            }
+            .into()
+        }
+        for (field, selector, asked, shown) in [
+            ("number", "#number", None, "\u{200e}4242 \u{200e}4242 \u{200e}4242 \u{200e}4242"),
+            ("expiration_date", "#slashed", Some("mm/yy"), "09 / 30"),
+            ("expiration_date", "#long", Some("mm/yyyy"), "09/2030"),
+            ("expiration_date", "#packed", Some("mmyy"), "0930"),
+            ("expiration_date", "#expirationMM", Some("mm"), "09"),
+            ("expiration_date", "#expirationYYYY", Some("yyyy"), "2030"),
+            ("expiration_date", "#yy", Some("yy"), "30"),
+            ("expiration_date", "#smonth", Some("mm"), "9"),
+            ("expiration_date", "#syear", Some("yyyy"), "2030"),
+            ("expiration_date", "#month", None, "2030-09"),
+        ] {
+            let mut req = request(&json!({"credentialProvider":"fixture", "credentialItem":"Synthetic", "field":field, "selector":selector})).unwrap();
+            req.target = canonical_target(&state, "").unwrap();
+            req.frame = canonical_frame(&state, "").unwrap();
+            let result = fill_with_resolver(
+                &mut state,
+                &req,
+                Instant::now() + std::time::Duration::from_secs(5),
+                move |_, format| async move {
+                    assert_eq!(format.as_deref(), asked, "{selector}");
+                    Ok(vault(field, format.as_deref()))
+                },
+            )
+            .await;
+            assert_eq!(result.as_ref().map(|r| r["filled"].clone()), Ok(json!(true)), "{selector}");
+            let mgr = state.browser.as_ref().unwrap();
+            let sid = mgr.active_session_id().unwrap().to_string();
+            let actual = mgr
+                .evaluate_in_session(&sid, &format!("document.querySelector('{selector}').value === {}", json!(shown)), None)
+                .await
+                .unwrap();
+            assert_eq!(actual, json!(true), "{selector}");
+        }
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
     }
 
     /// Regression (2026-10-31): after a private fill, the next site loaded in the
@@ -1586,7 +1771,7 @@ mod tests {
             &mut state,
             &req,
             Instant::now() + std::time::Duration::from_secs(5),
-            |_| async { Ok("synthetic-private-value".into()) },
+            |_, _| async { Ok("synthetic-private-value".into()) },
         )
         .await
         .unwrap();
@@ -1672,7 +1857,7 @@ mod tests {
             &mut state,
             &req,
             Instant::now() + std::time::Duration::from_secs(2),
-            |_| async { Ok(secret.into()) },
+            |_, _| async { Ok(secret.into()) },
         )
         .await
         .unwrap();
@@ -1717,7 +1902,7 @@ mod tests {
                 &mut state,
                 &masked,
                 Instant::now() + std::time::Duration::from_secs(2),
-                |_| async { Ok(supplied.into()) },
+                |_, _| async { Ok(supplied.into()) },
             )
             .await;
             if field == "password" {
@@ -1745,7 +1930,7 @@ mod tests {
                 &mut state,
                 &drift,
                 Instant::now() + std::time::Duration::from_secs(2),
-                |_| async { panic!("no lookup after target drift") }
+                |_, _| async { panic!("no lookup after target drift") }
             )
             .await
             .unwrap_err(),
@@ -1818,7 +2003,7 @@ mod tests {
             &mut state,
             &req,
             Instant::now() + std::time::Duration::from_secs(5),
-            |_| async { Ok(secret.into()) },
+            |_, _| async { Ok(secret.into()) },
         )
         .await
         .unwrap();
@@ -1910,7 +2095,7 @@ mod tests {
                 &mut state,
                 &req,
                 Instant::now() + std::time::Duration::from_secs(5),
-                |_| async { Ok(secret.into()) },
+                |_, _| async { Ok(secret.into()) },
             )
             .await
             .unwrap_err();

@@ -2776,8 +2776,8 @@ Private Fill Options:
                             omitted: the active tab. Never switches tabs
   --frame <frame-id|main>   Selected frame; omitted: the frame chosen with
                             `frame SELECTOR` (login iframes), else main
-  --format <fmt>           Only expiration_date: mm/yy, or mm, yy, yyyy for separate
-                           month/year boxes; omitted preserves provider format
+  --format <fmt>           Only expiration_date: mm/yy, mm/yyyy, mmyy, or mm, yy, yyyy
+                           for month/year boxes; omitted: read from the field
   --timeout <ms>           Total deadline 1..300000ms; initial 180000ms unless configured
 
 Private fill behavior:
@@ -4063,7 +4063,7 @@ Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth fill --credential-provider <p> --item <title> --field <field>
             --selector <css> [--target <tab>] [--frame <frame-id|main>]
-            [--format mm/yy|mm|yy|yyyy] [--timeout <ms>]
+            [--format mm/yy|mm/yyyy|mmyy|mm|yy|yyyy] [--timeout <ms>]
                              Private pinned fill, metadata only, no submit/retry
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]

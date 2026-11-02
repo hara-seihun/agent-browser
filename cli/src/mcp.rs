@@ -1516,7 +1516,7 @@ fn parity_tools() -> Vec<Value> {
                 "selector": {"type":"string", "minLength":1, "description":"CSS selector in the selected frame; refs are not accepted."},
                 "target": {"type":"string", "minLength":1},
                 "frame": {"type":"string", "minLength":1, "description":"Explicit selected frame ID, or main after frame main."},
-                "format": {"type":"string", "enum":crate::plugins::EXPIRY_FORMATS, "description":"Only valid for expiration_date: mm/yy, or mm, yy, yyyy for separate month and year boxes; omitted preserves provider format."},
+                "format": {"type":"string", "enum":crate::plugins::EXPIRY_FORMATS, "description":"Only valid for expiration_date: mm/yy, mm/yyyy or mmyy for one box, mm, yy or yyyy for separate month and year boxes or selects; omitted reads the layout from the field (placeholder, label, autocomplete, maxlength, options)."},
                 "fillTimeoutMs": {"type":"integer", "minimum":1, "maximum":300000, "description":"One total operation budget; initial 180000ms unless action timeout configured. Outer timeoutMs must include 10 seconds IPC margin."}
             }),
             &["credentialProvider", "item", "field", "selector", "target", "frame"],

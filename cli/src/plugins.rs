@@ -56,7 +56,7 @@ fn bounded_plugin_text(text: &str, limit: usize) -> String {
 pub const PROTOCOL_VERSION: &str = "agent-browser.plugin.v1";
 /// Output formats a credential plugin may be asked for, valid only with `expiration_date`.
 /// `mm`, `yy` and `yyyy` fill checkouts that split the expiry into separate month and year boxes.
-pub const EXPIRY_FORMATS: [&str; 4] = ["mm/yy", "mm", "yy", "yyyy"];
+pub const EXPIRY_FORMATS: [&str; 6] = ["mm/yy", "mm/yyyy", "mmyy", "mm", "yy", "yyyy"];
 
 /// A field/format pair a private fill may request: no format, or an expiry format with `expiration_date`.
 pub fn valid_field_format(field: &str, format: Option<&str>) -> bool {

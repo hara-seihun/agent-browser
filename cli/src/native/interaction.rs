@@ -289,25 +289,43 @@ pub async fn fill(
         )
         .await?;
 
-    // Select all + delete to clear
-    client
+    // Clear through the realm's native setter, not `this.value`: React-style value
+    // trackers treat an assignment through the element as their own render, ignore
+    // the input event and can restore the old text, so the inserted text was
+    // appended (Oracle signup, 2026-11-02). A page that still restores it gets a
+    // real select-all and Backspace, as a person would clear it.
+    let cleared = client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                function_declaration: r#"async function() {
+                    const doc = this.ownerDocument, view = doc.defaultView;
+                    const prototype = this.tagName === 'TEXTAREA' ? view.HTMLTextAreaElement.prototype
+                        : this.tagName === 'INPUT' ? view.HTMLInputElement.prototype : null;
+                    if (prototype) {
+                        this.select && this.select();
+                        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(this, '');
+                        this.dispatchEvent(new view.InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+                    } else if (this.isContentEditable) {
+                        doc.execCommand('selectAll');
+                        doc.execCommand('delete');
+                    }
+                    await new Promise(resolve => view.setTimeout(resolve, 0));
+                    return prototype ? this.value === '' : !this.isContentEditable || this.textContent === '';
                 }"#
                 .to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(&effective_session_id),
         )
         .await?;
+    if cleared["result"]["value"] != Value::Bool(true) {
+        press_key_with_modifiers(client, session_id, "a", Some(2)).await?;
+        press_key_with_modifiers(client, session_id, "Backspace", None).await?;
+    }
 
     // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
