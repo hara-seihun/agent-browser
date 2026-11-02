@@ -364,7 +364,7 @@ Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, 
 ```bash
 agent-browser auth save <name> [opts]    # Save auth profile
 agent-browser auth login <name>          # Login using saved credentials
-agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy] [--timeout <ms>]
+agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> --target <target-id> --frame <frame-id|main> [--format mm/yy|mm|yy|yyyy] [--timeout <ms>]
 agent-browser auth login <name> --no-navigate
                                           # Use active page after origin validation
 agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
@@ -400,7 +400,7 @@ The total timeout accepts 1..300000ms, initially 180000ms unless an action timeo
 <table><thead><tr><th>Option</th><th>Contract</th></tr></thead><tbody>
 <tr><td><code>--credential-provider</code>, <code>--item</code>, <code>--field</code></td><td>Required configured credential provider, item reference and provider field name.</td></tr>
 <tr><td><code>--selector</code>, <code>--target</code>, <code>--frame</code></td><td>Required CSS selector, exact active target ID and exact selected frame ID or <code>main</code>.</td></tr>
-<tr><td><code>--format mm/yy</code></td><td>Only for <code>expiration_date</code>; omitted preserves provider formatting.</td></tr>
+<tr><td><code>--format mm/yy|mm|yy|yyyy</code></td><td>Only for <code>expiration_date</code>: <code>mm/yy</code> for one box; <code>mm</code>, <code>yy</code> or <code>yyyy</code> for separate month and year boxes. Omitted preserves provider formatting.</td></tr>
 <tr><td><code>--timeout</code></td><td>One total operation deadline, 1..300000ms, initial 180000ms unless an action timeout is configured.</td></tr>
 </tbody></table>
 

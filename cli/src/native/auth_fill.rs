@@ -62,8 +62,7 @@ fn request(cmd: &Value) -> Result<FillRequest, String> {
     .iter()
     .any(|v| v.trim().is_empty())
         || req.selector.starts_with('@')
-        || req.format.as_deref().is_some_and(|f| f != "mm/yy")
-        || (req.format.is_some() && req.field != "expiration_date")
+        || !crate::plugins::valid_field_format(&req.field, req.format.as_deref())
     {
         return Err(INVALID.into());
     }
@@ -1967,6 +1966,14 @@ mod tests {
         assert!(request(&formatted).is_err());
         formatted["field"] = json!("expiration_date");
         assert!(request(&formatted).is_ok());
+        for split in ["mm", "yy", "yyyy"] {
+            formatted["format"] = json!(split);
+            assert!(request(&formatted).is_ok(), "{split}");
+        }
+        for unknown in ["MM", "m", "yyyy-mm", ""] {
+            formatted["format"] = json!(unknown);
+            assert!(request(&formatted).is_err(), "{unknown}");
+        }
         formatted["selector"] = json!("@e1");
         assert!(request(&formatted).is_err());
     }

@@ -1308,7 +1308,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("fill") => {
-                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> [--target <tab>] [--frame <frame-id|main>] [--format mm/yy] [--timeout <ms>]";
+                    const USAGE: &str = "agent-browser auth fill --credential-provider <plugin> --item <title> --field <field> --selector <css> [--target <tab>] [--frame <frame-id|main>] [--format mm/yy|mm|yy|yyyy] [--timeout <ms>]";
                     let mut cmd = json!({"id": id, "action": "auth_fill", "timeout": configured_timeout(flags)?.unwrap_or(180_000)});
                     let mut seen = std::collections::HashSet::new();
                     let mut j = 1;
@@ -1376,13 +1376,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         .is_some_and(|ms| ms > 0 && ms <= 300_000)
                         || cmd["selector"].as_str().is_some_and(|s| s.starts_with('@'))
                         || cmd.get("format").is_some_and(|f| {
-                            f.as_str() != Some("mm/yy")
-                                || cmd["field"].as_str() != Some("expiration_date")
+                            !f.as_str().is_some_and(|f| {
+                                crate::plugins::valid_field_format(
+                                    cmd["field"].as_str().unwrap_or_default(),
+                                    Some(f),
+                                )
+                            })
                         })
                     {
                         return Err(ParseError::InvalidValue {
                             message:
-                                "auth fill requires CSS and supports mm/yy only for expiration_date"
+                                "auth fill requires CSS; --format (mm/yy, mm, yy or yyyy) is only for expiration_date"
                                     .into(),
                             usage: USAGE,
                         });
@@ -6963,6 +6967,13 @@ mod tests {
         .unwrap();
         assert_eq!(cmd["format"], "mm/yy");
         assert_eq!(cmd["timeout"], 2000);
+        // Split month/year boxes (#expirationMM, #expirationYYYY) each take one part.
+        for split in ["mm", "yy", "yyyy"] {
+            let cmd = parse_command(&args(&format!("{expiry} --format {split}")), &default_flags())
+                .unwrap();
+            assert_eq!(cmd["format"], split);
+        }
+        assert!(parse_command(&args(&format!("{expiry} --format dd")), &default_flags()).is_err());
         assert!(parse_command(
             &args("auth fill --credential-provider fixture"),
             &default_flags()
