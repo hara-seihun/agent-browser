@@ -1766,13 +1766,16 @@ Use auth fill for passwords, payment credentials and one-time codes.
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Only the pinned input, textarea or contenteditable target is edited; disconnected,
+noneditable, disabled or read-only targets and redirected focus are refused.
 Date/time inputs accept ISO values, including controlled React fields.
 Use YYYY-MM-DD for dates, YYYY-MM-DDTHH:mm for local date-times.
-Empty text clears them. Direct/ref/find fills check retention after a bounded
-two-frame and following-task barrier (at most 100 ms). An unfinished barrier
+Empty text clears them. Direct/ref/find fills check retained values after events.
+Temporal, empty and protected-form edits wait two frames and a task (100 ms bound);
+ordinary text waits a following task. An unfinished barrier
 returns fill_render_timeout with effectDispatched:true and retention:"unknown";
 never replay the fill automatically. Invalid or non-editable inputs fail.
-JSON code: fill_invalid_value, fill_not_editable, fill_value_not_retained,
+JSON code: fill_invalid_value, fill_not_editable, fill_focus_changed, fill_value_not_retained,
            fill_target_detached, fill_render_timeout, fill_page_error.
 
 Global Options:

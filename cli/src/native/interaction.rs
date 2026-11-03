@@ -176,7 +176,7 @@ pub async fn hover(
 #[derive(serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum NativeFillOutcome {
-    KeyboardRequired,
+    FocusChanged,
     Filled,
     InvalidValue,
     NotEditable,
@@ -189,6 +189,7 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
     [
         "fill_invalid_value",
         "fill_not_editable",
+        "fill_focus_changed",
         "fill_value_not_retained",
         "fill_render_timeout",
         "fill_target_detached",
@@ -203,8 +204,8 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
 }
 
 /// Direct, ref and semantic fills share this operation and retained-value check.
-/// Temporal edits and empty clears require two rendered frames and a post-render
-/// task. An incomplete barrier is an explicit error after dispatch, never a replay.
+/// Resolve once and edit the pinned object in its own realm, never the page
+/// keyboard focus. Refuse before editing if focus or editability cannot be bound.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -222,9 +223,8 @@ pub async fn fill(
     )
     .await?;
 
-    // Temporal editors cannot use Input.insertText, and empty insertText cannot
-    // clear React state after assigning through its value tracker. Use the realm's
-    // native setter for both; retain keyboard insertion for ordinary nonempty text.
+    // The page may keep focus in a background composer when a wrapper refuses
+    // focus. All edits stay inside this pinned object; no page-level typing fallback.
     let native = client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
@@ -247,13 +247,15 @@ pub async fn fill(
     let outcome: NativeFillOutcome = serde_json::from_value(native["result"]["value"].clone())
         .map_err(|_| "fill_page_error: Invalid native fill outcome".to_string())?;
     match outcome {
-        NativeFillOutcome::KeyboardRequired => {}
+        NativeFillOutcome::FocusChanged => {
+            return Err("fill_focus_changed: target did not retain focus; no text dispatched".into())
+        }
         NativeFillOutcome::Filled => return Ok(()),
         NativeFillOutcome::InvalidValue => {
             return Err("fill_invalid_value: Invalid value for input".to_string())
         }
         NativeFillOutcome::NotEditable => {
-            return Err("fill_not_editable: Input is disabled or read-only".to_string())
+            return Err("fill_not_editable: Target is not an enabled editable control".to_string())
         }
         NativeFillOutcome::ValueNotRetained => {
             return Err(
@@ -274,71 +276,6 @@ pub async fn fill(
             )
         }
     }
-
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    // Clear through the realm's native setter, not `this.value`: React-style value
-    // trackers treat an assignment through the element as their own render, ignore
-    // the input event and can restore the old text, so the inserted text was
-    // appended (Oracle signup, 2026-11-02). A page that still restores it gets a
-    // real select-all and Backspace, as a person would clear it.
-    let cleared = client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"async function() {
-                    const doc = this.ownerDocument, view = doc.defaultView;
-                    const prototype = this.tagName === 'TEXTAREA' ? view.HTMLTextAreaElement.prototype
-                        : this.tagName === 'INPUT' ? view.HTMLInputElement.prototype : null;
-                    if (prototype) {
-                        this.select && this.select();
-                        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(this, '');
-                        this.dispatchEvent(new view.InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
-                    } else if (this.isContentEditable) {
-                        doc.execCommand('selectAll');
-                        doc.execCommand('delete');
-                    }
-                    await new Promise(resolve => view.setTimeout(resolve, 0));
-                    return prototype ? this.value === '' : !this.isContentEditable || this.textContent === '';
-                }"#
-                .to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-    if cleared["result"]["value"] != Value::Bool(true) {
-        press_key_with_modifiers(client, session_id, "a", Some(2)).await?;
-        press_key_with_modifiers(client, session_id, "Backspace", None).await?;
-    }
-
-    // Insert text (keyboard input dispatched at page level, use parent session_id)
-    client
-        .send_command_typed::<_, Value>(
-            "Input.insertText",
-            &InsertTextParams {
-                text: value.to_string(),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -453,6 +390,9 @@ pub async fn fill_observed(
     match result["result"]["value"]["status"].as_str() {
         Some("filled") => Ok(()),
         Some("sensitive") => Err(unsupported()),
+        Some("focus_changed") => {
+            Err("fill_focus_changed: target did not retain focus; no text dispatched".into())
+        }
         Some("not_editable") => {
             Err("fill_not_editable: target is not an editable form control".into())
         }

@@ -288,6 +288,9 @@ async fn resolve_center_in_same_process_frame(
             Some(session_id),
         )
         .await?;
+    if result.get("exceptionDetails").is_some() {
+        return Err(selector_evaluation_error());
+    }
     let value = result.get("result").and_then(|r| r.get("value"));
     if let Some(blocker) = value
         .and_then(|v| v.get("blocker"))
@@ -355,6 +358,9 @@ async fn resolve_object_in_same_process_frame(
             Some(session_id),
         )
         .await?;
+    if result.get("exceptionDetails").is_some() {
+        return Err(selector_evaluation_error());
+    }
     result
         .get("result")
         .and_then(|r| r.get("objectId"))
@@ -642,6 +648,9 @@ pub async fn resolve_element_object_id(
                     Some(frame_session.as_str()),
                 )
                 .await?;
+            if result.exception_details.is_some() {
+                return Err(selector_evaluation_error());
+            }
             let object_id = result
                 .result
                 .object_id
@@ -667,6 +676,9 @@ pub async fn resolve_element_object_id(
         )
         .await?;
 
+    if result.exception_details.is_some() {
+        return Err(selector_evaluation_error());
+    }
     let object_id = result
         .result
         .object_id
@@ -891,6 +903,9 @@ async fn resolve_by_selector(
         )
         .await?;
 
+    if result.exception_details.is_some() {
+        return Err(selector_evaluation_error());
+    }
     let val = result.result.value.unwrap_or(Value::Null);
     if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
         return Err(intercepted_error(selector, blocker));
@@ -902,6 +917,10 @@ async fn resolve_by_selector(
         (Some(x), Some(y)) => Ok((x, y)),
         _ => Err(format!("Element not found: {}", selector)),
     }
+}
+
+fn selector_evaluation_error() -> String {
+    "selector_invalid: selector evaluation failed; use native CSS or xpath= selectors, or find role/text for text matching (Playwright :text-is is not CSS)".into()
 }
 
 fn intercepted_error(target: &str, blocker: &str) -> String {

@@ -14148,13 +14148,18 @@ fn error_response(id: &str, error: &str) -> Value {
     });
     // Machine-readable code for "the bound tab no longer exists" so scripts
     // using --json can match on it instead of parsing the message.
-    if error.starts_with("click_disabled: ") {
+    if error.starts_with("selector_invalid: ") {
+        resp["code"] = json!("selector_invalid");
+        resp["data"] = json!({"effectDispatched":false});
+    } else if error.starts_with("click_disabled: ") {
         resp["code"] = json!("click_disabled");
         resp["data"] = json!({"effectDispatched":false});
     } else if let Some(code) = interaction::fill_error_code(error) {
         resp["code"] = json!(code);
         if code == "fill_render_timeout" {
             resp["data"] = json!({"effectDispatched":true, "retention":"unknown"});
+        } else if matches!(code, "fill_not_editable" | "fill_invalid_value" | "fill_focus_changed") {
+            resp["data"] = json!({"effectDispatched":false});
         }
     } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
