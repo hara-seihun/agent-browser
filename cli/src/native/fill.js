@@ -77,7 +77,9 @@ async function(value, route) {
         await new Promise(resolve => view.setTimeout(resolve, 0));
     }
     if (!this.isConnected) return { status: 'target_detached' };
-    const actual = contenteditable ? this.innerText : this.value;
+    // Chrome leaves a caret placeholder <br> after deleting an editor's last
+    // character. Its innerText is a newline even though no text remains.
+    const actual = contenteditable ? (expected === '' && this.textContent === '' ? '' : this.innerText) : this.value;
     if (actual !== expected) return { status: 'value_not_retained' };
     return { status: 'filled' };
 }
