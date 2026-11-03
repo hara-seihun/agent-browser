@@ -17742,7 +17742,12 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("sensitive object cleanup unavailable"));
-        assert!(fixture.commands.try_recv().is_err());
+        let mut retried = false;
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_eq!(command["method"], "Runtime.releaseObjectGroup");
+            retried = true;
+        }
+        assert!(retried, "failed cleanup must retry without reading new page data");
         let info = execute_command(
             &json!({"id":"cleanup-error-metadata","action":"session_info"}),
             &mut state,
