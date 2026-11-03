@@ -62,3 +62,9 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# Browser control waits on CDP, not Rust optimization. Keep native iteration
+# fast while dependencies (including image codecs) retain release optimization.
+[profile.ci.package.agent-browser]
+opt-level = 0
+codegen-units = 64
