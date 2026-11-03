@@ -1572,7 +1572,10 @@ you stage state (network routes, cookies, init scripts) before the first
 real navigation — useful for SSR debug, auth setup, and capturing fresh
 `react suspense` / `vitals` state without noise from a prior page.
 
-With a URL, launches and navigates. If no protocol is provided, https://
+With a URL, launches and navigates, waiting for DOMContentLoaded rather than
+all images, ads, or trackers. Use `wait --load load` when full load is required.
+This does not guarantee application-specific readiness.
+If no protocol is provided, https://
 is automatically prepended. WebMCP tools are announced as brief, untrusted
 summaries only on discovery or change. Fetch a selected schema with
 `agent-browser webmcp list <tool> --frame <frame-id> --json`. Pages without

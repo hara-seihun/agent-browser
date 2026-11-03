@@ -33,7 +33,7 @@ For generated credentials that must reach a private file, use native `auth expor
 Open the page, inspect the protected snapshot, and interact through native refs. Arbitrary page-tool result channels are guarded and are not substitutes for protected APIs on sensitive tabs:
 
 ```bash
-agent-browser open <url>        # 1. Open a page
+agent-browser open <url>        # 1. Open a page (native Chrome waits for DOMContentLoaded)
 agent-browser snapshot -i       # 2. See what's on it (interactive elements only)
 agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change

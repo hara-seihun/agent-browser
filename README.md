@@ -469,6 +469,8 @@ agent-browser state clean --older-than <days>  # Delete old states
 
 ### Navigation
 
+Native Chrome `open`, `goto`, and `navigate` finish at DOMContentLoaded, without waiting for images, ads, or trackers to finish loading. This is not application-specific readiness: observe the page or wait for the needed element next. Use `wait --load load` if the full page load event is required. Navigation errors and deadlines keep their uncertain outcome and never replay the request.
+
 ```bash
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
