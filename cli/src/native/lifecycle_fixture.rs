@@ -105,6 +105,7 @@ impl SyntheticCdp {
             stream.set_nodelay(true).unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut replies = FuturesUnordered::new();
+            let mut countdown_pending_owner = false;
             loop {
                 let message = tokio::select! {
                     message = ws.next() => match message {
@@ -134,10 +135,8 @@ impl SyntheticCdp {
                         }
                         // The synthetic countdown represents owners disappearing between
                         // recovery attempts. Real Chrome reports that change as a DOM event.
-                        if method == "Target.getTargets"
-                            && server_observations.load(Ordering::SeqCst) > 0
-                            && server_failures.load(Ordering::SeqCst) > 0
-                        {
+                        if method == "Target.getTargets" && countdown_pending_owner {
+                            countdown_pending_owner = false;
                             ws.send(Message::Text(
                                 json!({"method":"DOM.childNodeCountUpdated",
                                 "sessionId":"synthetic-session", "params":{"nodeId":1}})
@@ -229,6 +228,7 @@ impl SyntheticCdp {
                                                 n.checked_sub(1)
                                             })
                                             .is_ok();
+                                        countdown_pending_owner = missing;
                                         let mut children = if missing {
                                             vec![
                                                 json!({"nodeName":"IFRAME","frameId":"pending-frame"}),

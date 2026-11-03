@@ -3982,9 +3982,11 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
             }
         }
     };
-    if let Some(mgr) = &state.browser {
-        if !mgr.bound_target_is_gone() {
-            mgr.prepare_active_rendering().await?;
+    if established {
+        if let Some(mgr) = &state.browser {
+            if !mgr.bound_target_is_gone() {
+                mgr.prepare_active_rendering().await?;
+            }
         }
     }
     if established {
@@ -4667,7 +4669,14 @@ async fn auto_launch(
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5852,7 +5861,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5869,7 +5885,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -15000,6 +15023,21 @@ mod tests {
         )
         .await;
         assert_eq!(info["success"], true);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_attach_defers_rendering_without_established_binding() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        state.session_id = format!("render-scope-{}", std::process::id());
+        state.browser = Some(fixture.manager);
+        assert!(!apply_tab_binding_on_attach_or_rollback(&mut state).await.unwrap());
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert!(!command["method"].as_str().unwrap().starts_with("Emulation."));
+        }
         client.close().await;
         fixture.server.await.unwrap();
     }
