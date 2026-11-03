@@ -74,10 +74,7 @@ impl Download {
                 Ok(Err(_)) => return Err("Download event stream closed".into()),
                 Err(_) => return Err("Timeout waiting for download; the click was not repeated".into()),
             };
-            if matches!(
-                event.method.as_str(),
-                "Browser.downloadWillBegin" | "Page.downloadWillBegin"
-            ) {
+            if event.method == "Browser.downloadWillBegin" {
                 if !event.params["frameId"]
                     .as_str()
                     .is_some_and(|f| self.frames.contains(f))
@@ -91,10 +88,11 @@ impl Download {
                         .map(str::to_owned);
                 }
             }
-            if !matches!(
-                event.method.as_str(),
-                "Browser.downloadProgress" | "Page.downloadProgress"
-            ) || guid.is_none()
+            // Page.downloadProgress can precede the browser event, without its actual
+            // filePath when a provider overrides the directory. Browser events were
+            // explicitly enabled in prepare; only those describe the completed file.
+            if event.method != "Browser.downloadProgress"
+                || guid.is_none()
                 || event.params["guid"].as_str() != guid.as_deref()
             {
                 continue;
