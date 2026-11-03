@@ -973,17 +973,18 @@ impl InventoryContext {
 /// Collect protected output inside the inventory's document-identity span.
 /// A changed document discards both the output and its control observation.
 /// Capture guards use the one-shot observer instead of admitting older captures.
-pub(crate) async fn observe_with<T, F, Fut>(
+pub(crate) async fn observe_with_continuation<T, F, Fut>(
     client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
-    mut collect: F,
+    continuation: &mut InventoryContinuation,
+    collect: F,
 ) -> Result<(Observation, T), InventoryError>
 where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
-    observe_inventory_with(client, top_session, iframe_sessions, &mut collect).await
+    observe_inventory_with(client, top_session, iframe_sessions, continuation, collect).await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1049,7 +1050,15 @@ fn frame_bindings(tree: &Value) -> Result<FrameBindings, InventoryError> {
     Ok(FrameBindings { root, members })
 }
 
+/// Kept only while one command attaches missing frames. Successful observations,
+/// navigation and other failures drop it; no tree is reused by a later command.
+#[derive(Default)]
+pub(crate) struct InventoryContinuation {
+    documents: HashMap<String, InventoryDocument>,
+}
+
 struct InventoryDocument {
+    revision: u64,
     session: String,
     tree: Value,
     bindings: FrameBindings,
@@ -1192,6 +1201,7 @@ async fn inventory_document(
 ) -> Result<InventoryDocument, InventoryError> {
     // Both reads bind to this exact session. Final binding/backend validation
     // rejects transitions crossing their independent response spans.
+    let revision = client.dom_revision(&session);
     let (live, document) = tokio::join!(
         client.observation_progress.track(
             Phase::InitialFrameTree,
@@ -1226,12 +1236,42 @@ async fn inventory_document(
         return Err(format!("{UNSUPPORTED}: document frame association changed").into());
     }
     Ok(InventoryDocument {
+        revision,
         session,
         tree: live["frameTree"].clone(),
         bindings,
         root: root.clone(),
         backend,
     })
+}
+
+async fn inventory_document_continued(
+    client: &CdpClient,
+    session: String,
+    expected_frame: Option<String>,
+    retained: Option<InventoryDocument>,
+) -> Result<InventoryDocument, InventoryError> {
+    if let Some(document) = retained {
+        if client.dom_revision(&session) == document.revision {
+            // A recovered attachment must still belong to the same live document.
+            // Check again afterwards: DOM mutation events can arrive during validation.
+            client
+                .observation_progress
+                .track(
+                    Phase::FinalValidation,
+                    validate_inventory_document(client, &document),
+                )
+                .await?;
+            if client.dom_revision(&session) == document.revision
+                && expected_frame
+                    .as_deref()
+                    .is_none_or(|frame| frame == document.bindings.root)
+            {
+                return Ok(document);
+            }
+        }
+    }
+    inventory_document(client, session, expected_frame).await
 }
 
 async fn inventory_control(
@@ -1345,21 +1385,45 @@ pub(crate) async fn observe_inventory(
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Observation, InventoryError> {
-    observe_inventory_with(client, top_session, iframe_sessions, |_| async { Ok(()) })
-        .await
-        .map(|(observation, ())| observation)
+    observe_inventory_continued(
+        client,
+        top_session,
+        iframe_sessions,
+        &mut InventoryContinuation::default(),
+    )
+    .await
+}
+
+pub(crate) async fn observe_inventory_continued(
+    client: &Arc<CdpClient>,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    continuation: &mut InventoryContinuation,
+) -> Result<Observation, InventoryError> {
+    observe_inventory_with(
+        client,
+        top_session,
+        iframe_sessions,
+        continuation,
+        |_| async { Ok(()) },
+    )
+    .await
+    .map(|(observation, ())| observation)
 }
 
 async fn observe_inventory_with<T, F, Fut>(
     client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
+    continuation: &mut InventoryContinuation,
     mut collect: F,
 ) -> Result<(Observation, T), InventoryError>
 where
     F: FnMut(InventoryContext) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
+    // Taking ownership empties the continuation on every exit except Coverage.
+    let mut retained = std::mem::take(&mut continuation.documents);
     client.observation_progress.attempt();
     client
         .observation_progress
@@ -1373,7 +1437,12 @@ where
     let mut control_results = Vec::new();
     let mut object_groups = Vec::new();
     let mut sessions = FuturesUnordered::new();
-    sessions.push(inventory_document(client, top_session.to_owned(), None));
+    sessions.push(inventory_document_continued(
+        client,
+        top_session.to_owned(),
+        None,
+        retained.remove(top_session),
+    ));
     let mut documents = Vec::new();
     let mut visited = HashSet::from([top_session.to_owned()]);
     while !sessions.is_empty() {
@@ -1392,7 +1461,12 @@ where
         for frame in frames.keys().chain(owners.iter()) {
             if let Some(sid) = iframe_sessions.get(frame) {
                 if visited.insert(sid.clone()) {
-                    sessions.push(inventory_document(client, sid.clone(), Some(frame.clone())));
+                    sessions.push(inventory_document_continued(
+                        client,
+                        sid.clone(),
+                        Some(frame.clone()),
+                        retained.remove(sid),
+                    ));
                 }
             }
         }
@@ -1430,6 +1504,10 @@ where
     if !missing_owners.is_empty() || !mismatched_frames.is_empty() {
         missing_owners.sort();
         mismatched_frames.sort();
+        continuation.documents = documents
+            .into_iter()
+            .map(|document| (document.session.clone(), document))
+            .collect();
         return Err(InventoryError::Coverage(CoverageGap {
             missing_owners,
             mismatched_frames,

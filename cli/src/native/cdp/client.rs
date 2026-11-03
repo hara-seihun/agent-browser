@@ -69,6 +69,30 @@ type WsTx = Arc<
 /// Sessions whose events go to one private receiver instead of the broadcast.
 type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEvent>>>>;
 
+type DomRevisions = Arc<std::sync::Mutex<HashMap<String, u64>>>;
+
+fn record_dom_event(revisions: &DomRevisions, method: &str, session: Option<&str>) {
+    if method.starts_with("DOM.") && method != "DOM.setChildNodes" {
+        if let Some(session) = session {
+            let mut revisions = revisions.lock().unwrap_or_else(|e| e.into_inner());
+            let revision = revisions.entry(session.to_owned()).or_default();
+            *revision = revision.saturating_add(1);
+        }
+    }
+}
+
+fn broadcast_raw(raw_tx: &broadcast::Sender<RawCdpMessage>, msg: &str) {
+    if raw_tx.receiver_count() > 0 {
+        let session_id = parse_cdp::<serde_json::Value>(msg)
+            .ok()
+            .and_then(|v| v.get("sessionId")?.as_str().map(String::from));
+        let _ = raw_tx.send(RawCdpMessage {
+            text: msg.to_owned(),
+            session_id,
+        });
+    }
+}
+
 /// Events buffered for a private session receiver that has fallen behind.
 /// Newer events are dropped once it is full; a screencast consumer that
 /// cannot keep up should lose frames, not stall the reader.
@@ -209,6 +233,7 @@ pub struct CdpClient {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
+    dom_revisions: DomRevisions,
     object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
     next_object_group: AtomicU64,
     pub(crate) observation_progress: super::super::observation_progress::ObservationProgress,
@@ -309,12 +334,14 @@ impl CdpClient {
         let closed = Arc::new(AtomicBool::new(false));
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let dom_revisions: DomRevisions = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
         let closed_reader = closed.clone();
         let private_clone = private_sessions.clone();
+        let dom_revisions_reader = dom_revisions.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -351,18 +378,6 @@ impl CdpClient {
                     }
                 };
 
-                // Broadcast raw message for inspect proxy subscribers before typed parse,
-                // so messages with negative IDs (used by the inspect proxy) are still delivered.
-                if raw_tx_clone.receiver_count() > 0 {
-                    let session_id = parse_cdp::<serde_json::Value>(&msg)
-                        .ok()
-                        .and_then(|v| v.get("sessionId")?.as_str().map(String::from));
-                    let _ = raw_tx_clone.send(RawCdpMessage {
-                        text: msg.clone(),
-                        session_id,
-                    });
-                }
-
                 let parsed: CdpMessage = match parse_cdp(&msg) {
                     Ok(parsed) => parsed,
                     Err(_) => {
@@ -391,11 +406,24 @@ impl CdpClient {
                                         });
                                     }
                                 }
+                                // Even malformed messages remain visible to the inspect proxy.
+                                broadcast_raw(&raw_tx_clone, &msg);
                                 continue;
                             }
                         }
                     }
                 };
+
+                if parsed.id.is_none() {
+                    if let Some(method) = parsed.method.as_deref() {
+                        record_dom_event(
+                            &dom_revisions_reader,
+                            method,
+                            parsed.session_id.as_deref(),
+                        );
+                    }
+                }
+                broadcast_raw(&raw_tx_clone, &msg);
 
                 if let Some(id) = parsed.id {
                     // Response to a command
@@ -476,11 +504,21 @@ impl CdpClient {
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
+            dom_revisions,
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
             observation_progress: super::super::observation_progress::ObservationProgress::default(
             ),
         })
+    }
+
+    pub(crate) fn dom_revision(&self, session: &str) -> u64 {
+        self.dom_revisions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn ensure_open(&self) -> Result<(), String> {
@@ -918,6 +956,22 @@ mod tests {
 
     const TEST_CERT_DER: &str = "MIIBPDCB46ADAgECAgkA9xwXmIhbzQIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgzMDA1NTU0NFoXDTM2MDgyNzA1NTU0NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQdmPO0sXXFRmVn7+8MViXGom2rYy8aV3Oc0pNZhUmFGaPl4MRFzc1G0yaV/WRBPF/BUh2LGsXCvUsn7NqaYkFaMeMBwwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0gAMEUCIQC32oureGNAupABEmonQPAQBD7OdJjXmUxoVQNr0UB+6AIgb23GMwxTjwHyLG4tZcJST7r3cCW8K/Y+1h618j2f+Uw=";
     const TEST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIVZST8Vhc5f3OW+4kF78f8o1nQCRwjW/Yo8CXQ35Y9uhRANCAARB2Y87SxdcVGZWfv7wxWJcaibatjLxpXc5zSk1mFSYUZo+XgxEXNzUbTJpX9ZEE8X8FSHYsaxcK9Syfs2ppiQV";
+
+    #[test]
+    fn dom_revisions_track_mutations_per_session() {
+        let revisions: DomRevisions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let get = |session: &str| revisions.lock().unwrap().get(session).copied().unwrap_or(0);
+        assert_eq!(get("a"), 0);
+        record_dom_event(&revisions, "DOM.childNodeInserted", Some("a"));
+        record_dom_event(&revisions, "DOM.attributeModified", Some("a"));
+        record_dom_event(&revisions, "DOM.documentUpdated", Some("b"));
+        record_dom_event(&revisions, "DOM.setChildNodes", Some("a"));
+        record_dom_event(&revisions, "Page.frameNavigated", Some("b"));
+        record_dom_event(&revisions, "DOM.documentUpdated", None);
+        assert_eq!(get("a"), 2);
+        assert_eq!(get("b"), 1);
+        assert_eq!(get("c"), 0);
+    }
 
     #[test]
     fn repairs_only_unpaired_surrogate_escapes() {

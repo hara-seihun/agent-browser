@@ -5287,6 +5287,7 @@ async fn reconcile_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
+    let mut continuation = super::sensitive::InventoryContinuation::default();
     loop {
         state
             .observation_progress
@@ -5305,8 +5306,9 @@ async fn reconcile_sensitive_tab(
             ));
         }
         let gap =
-            match super::sensitive::observe_inventory(&mgr.client, session, &state.iframe_sessions)
-                .await
+            match super::sensitive::observe_inventory_continued(
+                &mgr.client, session, &state.iframe_sessions, &mut continuation,
+            ).await
             {
                 Ok(observation) => {
                     state.active_iframe_sessions = observation.frame_sessions.clone();
@@ -6477,6 +6479,7 @@ async fn protected_snapshot_observation(
                     state.drain_cdp_events_background(),
                 )
                 .await?;
+            let mut continuation = super::sensitive::InventoryContinuation::default();
             loop {
                 progress
                     .track(
@@ -6510,6 +6513,7 @@ async fn protected_snapshot_observation(
                     frame,
                     &state.iframe_sessions,
                     &private_observation,
+                    &mut continuation,
                 )
                 .await
                 {
@@ -15772,14 +15776,83 @@ mod tests {
                 attached += 1;
             }
         }
-        // One discarded incomplete inventory and one complete snapshot, with
-        // no duplicate getter inventory before/after the known coverage gap.
-        assert_eq!((deep, attached), (6, 2));
+        // Recovery continues the same read of the unchanged main document and
+        // first child; only the two newly attached child documents need reading.
+        assert_eq!((deep, attached), (4, 2));
         client.settle_object_cleanup().await.unwrap();
         assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         assert_eq!(client.pending_len().await, 0);
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_continuation_rereads_new_or_newly_private_controls() {
+        for inserted in [false, true] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                    if n == 0 { vec![1] } else { vec![] }
+                });
+                if !inserted {
+                    inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"][0]["children"][0]["children"]
+                        .as_array_mut().unwrap().push(json!({"nodeName":"INPUT","backendNodeId":99,"attributes":["type","text"]}));
+                }
+            }
+            state.iframe_sessions.remove("frame-1");
+            let mut continuation = super::super::sensitive::InventoryContinuation::default();
+            let mut refs = RefMap::new();
+            let first = snapshot::take_snapshot_with_observation(
+                &client, &session, &SnapshotOptions::default(), &mut refs, None,
+                &state.iframe_sessions, &super::super::sensitive::Observation::default(),
+                &mut continuation,
+            ).await;
+            assert!(matches!(first, Err(super::super::sensitive::InventoryError::Coverage(_))));
+            assert!(refs.entries_sorted().is_empty());
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                let children = inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"][0]["children"][0]["children"]
+                    .as_array_mut().unwrap();
+                let private = json!({"nodeName":"INPUT","backendNodeId":99,"attributes":["type","password"]});
+                if inserted { children.push(private); }
+                else { *children.iter_mut().find(|n| n["backendNodeId"] == 99).unwrap() = private; }
+                let nodes = inventory.ax_trees.get_mut("synthetic-top").unwrap()["nodes"].as_array_mut().unwrap();
+                nodes[0]["childIds"].as_array_mut().unwrap().push(json!("new-private"));
+                nodes.push(json!({"nodeId":"new-private","ignored":false,
+                    "role":{"type":"role","value":"textbox"},
+                    "name":{"type":"computedString","value":"new-private"},
+                    "value":{"type":"string","value":format!("Synthetic-{session}-99")},
+                    "backendDOMNodeId":99}));
+            }
+            client.send_command("Fixture.emit", Some(json!({"event":{
+                "method": if inserted {"DOM.childNodeInserted"} else {"DOM.attributeModified"},
+                "sessionId":session,"params":{"nodeId":99}
+            }})), None).await.unwrap();
+            assert!(client.dom_revision(&session) > 0);
+            state.iframe_sessions.insert("frame-1".into(), "session-1".into());
+            let (tree, _) = snapshot::take_snapshot_with_observation(
+                &client, &session, &SnapshotOptions::default(), &mut refs, None,
+                &state.iframe_sessions, &super::super::sensitive::Observation::default(),
+                &mut continuation,
+            ).await.unwrap();
+            assert!(tree.contains("new-private"));
+            assert!(tree.contains("[redacted: password]"));
+            assert!(!tree.contains("Synthetic-"));
+            let mut main_reads = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "DOM.getDocument" && command["sessionId"] == session
+                    && command["params"]["depth"] == super::super::sensitive::PIERCE_LAYER_DEPTH {
+                    main_reads += 1;
+                }
+            }
+            assert_eq!(main_reads, 2, "mutated documents must be fetched again");
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[tokio::test]

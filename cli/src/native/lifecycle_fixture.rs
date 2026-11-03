@@ -127,6 +127,25 @@ impl SyntheticCdp {
                             continue;
                         }
                         let method = command["method"].as_str().unwrap();
+                        if method == "Fixture.emit" {
+                            ws.send(Message::Text(command["params"]["event"].to_string()))
+                                .await
+                                .unwrap();
+                        }
+                        // The synthetic countdown represents owners disappearing between
+                        // recovery attempts. Real Chrome reports that change as a DOM event.
+                        if method == "Target.getTargets"
+                            && server_observations.load(Ordering::SeqCst) > 0
+                            && server_failures.load(Ordering::SeqCst) > 0
+                        {
+                            ws.send(Message::Text(
+                                json!({"method":"DOM.childNodeCountUpdated",
+                                "sessionId":"synthetic-session", "params":{"nodeId":1}})
+                                .to_string(),
+                            ))
+                            .await
+                            .unwrap();
+                        }
                         let (response, released, delay) = {
                             let mut inventory = inventory_server.lock().unwrap();
                             let session = command["sessionId"].as_str().unwrap_or("");
