@@ -1761,6 +1761,9 @@ Linux systemd sessions use independent user-service custody; close ends the owne
 
 Usage: agent-browser fill <selector> <text>
 
+Non-secret emails, usernames and addresses are allowed, including beside password fields.
+Use auth fill for passwords, payment credentials and one-time codes.
+
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 Date/time inputs accept ISO values, including controlled React fields.

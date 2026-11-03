@@ -1,5 +1,7 @@
 # Command Reference
 
+Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
+
 ## Always-active native sensitive input protection
 
 Native `snapshot`, `get value`, `get text`, `get html`, and `get attr` return `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]` for protected form values. `cc-name` is public. Live values remain unchanged; shadow DOM and cross-origin out-of-process iframes are covered. This is not general secret detection in arbitrary page text.

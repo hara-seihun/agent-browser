@@ -11496,7 +11496,11 @@ async fn e2e_fill_replaces_text_in_value_tracking_fields() {
         "</script>"
     );
     assert_success(
-        &execute_command(&json!({"id":"open","action":"navigate","url":page}), &mut state).await,
+        &execute_command(
+            &json!({"id":"open","action":"navigate","url":page}),
+            &mut state,
+        )
+        .await,
     );
     for value in ["one", "two"] {
         assert_success(
@@ -11515,4 +11519,59 @@ async fn e2e_fill_replaces_text_in_value_tracking_fields() {
     assert_success(&observed);
     assert_eq!(get_data(&observed)["result"], json!("two"));
     assert_success(&execute_command(&json!({"id":"close","action":"close"}), &mut state).await);
+}
+
+/// Checkout contact fields remain writable even in forms with account/password fields.
+/// The shared CLI/MCP dispatcher still refuses passwords and payment credentials.
+#[tokio::test]
+#[ignore]
+async fn e2e_checkout_plain_fill_beside_secrets() {
+    let mut state = DaemonState::new();
+    assert_success(&sensitive_test_command(&json!({"id":"launch","action":"launch","headless":true,"engine":"chrome","args":["--no-sandbox","--disable-dev-shm-usage"]}), &mut state).await);
+    let html = "<form><label>Email<input id='email' type='email'></label><label>Username<input id='username' autocomplete='username'></label><label>Address<input id='address' autocomplete='street-address'></label><label>Password<input id='password' type='password'></label><label>Card<input id='card' autocomplete='cc-number'></label></form>";
+    assert_success(&sensitive_test_command(&json!({"id":"page","action":"navigate","url":format!("data:text/html,{}", urlencoding::encode(html))}), &mut state).await);
+    for (selector, value) in [
+        ("#email", "checkout@example.test"),
+        ("#username", "ordinary-name"),
+        ("#address", "123 Example Street"),
+    ] {
+        assert_success(
+            &sensitive_test_command(
+                &json!({"id":"fill","action":"fill","selector":selector,"value":value}),
+                &mut state,
+            )
+            .await,
+        );
+        let result = sensitive_test_command(
+            &json!({"id":"read","action":"inputvalue","selector":selector}),
+            &mut state,
+        )
+        .await;
+        assert_success(&result);
+        assert_eq!(get_data(&result)["value"], value);
+    }
+    // Email via the snapshot ref, as used by the browser tool.
+    assert_success(
+        &sensitive_test_command(&json!({"id":"snapshot","action":"snapshot"}), &mut state).await,
+    );
+    let reference = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.name == "Email")
+        .unwrap()
+        .0;
+    assert_success(&sensitive_test_command(&json!({"id":"ref-fill","action":"fill","selector":format!("@{reference}"),"value":"second@example.test"}), &mut state).await);
+    for selector in ["#password", "#card"] {
+        let result = sensitive_test_command(
+            &json!({"id":"secret","action":"fill","selector":selector,"value":"not-a-real-secret"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(serde_json::to_value(&result).unwrap()["success"], false);
+        assert!(result.to_string().contains("SENSITIVE_OUTPUT_UNSUPPORTED"));
+    }
+    assert_success(
+        &sensitive_test_command(&json!({"id":"close","action":"close"}), &mut state).await,
+    );
 }
