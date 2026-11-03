@@ -513,11 +513,12 @@ fn render_snapshot_frame(
             false
         };
 
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
+        if node.backend_node_id.is_some_and(|bid| {
+            cursor_elements.contains_key(&bid)
+                || batch.context.owners.contains_key(&(effective_session_id.clone(), bid))
+        }) {
+            // A represented frame owner can have a role other than Iframe, such
+            // as IframePresentational. Give it an anchor for the child projection.
             should_ref = true;
         }
 
@@ -591,18 +592,24 @@ fn render_snapshot_frame(
     {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
-            if node.role != "Iframe" || !node.has_ref {
+            if !node.has_ref {
                 continue;
             }
             let Some(bid) = node.backend_node_id else {
                 continue;
             };
+            let Some(child_fid) = batch.context.owners.get(&(effective_session_id.clone(), bid)) else {
+                if node.role == "Iframe" || node.role == "IframePresentational" {
+                    return Err("Missing pierced iframe owner binding".into());
+                }
+                continue;
+            };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
-            let child_fid = batch
-                .context
-                .owners
-                .get(&(effective_session_id.clone(), bid))
-                .ok_or("Missing pierced iframe owner binding")?;
+            // A selector or depth limit can omit the owner. Do not render or
+            // allocate child refs unless the owner actually appears in output.
+            if !output.contains(&format!("[ref={}]", ref_id)) {
+                continue;
+            }
             let child_text = render_snapshot_frame(
                 child_fid,
                 Some(child_fid),

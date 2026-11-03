@@ -856,7 +856,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector. Native disabled controls (including inherited disabled and aria-disabled=true) return click_disabled with effectDispatched=false before pointer dispatch or new-tab creation. A dispatched gesture is not provider-effect confirmation; uncertain effects are not replayed.",
+            "Click an element by @ref or CSS selector. Native disabled controls (including inherited disabled and aria-disabled=true) return click_disabled with effectDispatched=false before pointer dispatch or new-tab creation. Input-only acknowledgements skip fresh page inventory and post-action frame setup. A dispatched gesture is not provider-effect confirmation; inspect a new snapshot for the result. Uncertain effects are not replayed.",
             json!({
                 "selector": selector_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." }

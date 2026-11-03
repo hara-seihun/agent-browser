@@ -1605,7 +1605,20 @@ impl DaemonState {
         }
 
         if active_frame_scope_changed {
-            self.refresh_active_iframe_sessions().await;
+            if self.request_tracking || self.har_recording {
+                self.refresh_active_iframe_sessions().await;
+            } else if let Some(top) = self.browser.as_ref()
+                .and_then(|mgr| mgr.active_session_id().ok())
+                .map(str::to_owned)
+            {
+                // Console events need the attached-frame scope too. Known
+                // attachment parents establish it without another renderer read;
+                // complete observations reconcile recovered sessions separately.
+                self.active_iframe_sessions = self.iframe_sessions.values()
+                    .filter(|sid| self.iframe_parent_sessions.contains_key(*sid)
+                        && self.iframe_session_within(sid, &top))
+                    .cloned().collect();
+            }
         }
 
         Ok(())
@@ -3376,8 +3389,16 @@ async fn execute_command_inner(
     // A throwaway preflight/postflight would spend separate budgets and erase its
     // useful incomplete result, while exposing no additional protected content.
     let mut guard_incomplete: Option<String> = None;
+    let input_acknowledgement = super::sensitive::input_acknowledgement(action, cmd);
     let observation_session = if matches!(action, "snapshot" | "dialog") {
         None
+    } else if input_acknowledgement {
+        // These responses contain no page content. Keep remembered redaction,
+        // but do not read the renderer before or after dispatching input.
+        state
+            .browser
+            .as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok().map(str::to_owned))
     } else if let Some(mgr) = state.browser.as_ref() {
         match mgr.active_session_id() {
             Ok(session) if matches!(action, "auth_fill" | "auth_export") => {
@@ -3751,7 +3772,14 @@ async fn execute_command_inner(
     if !matches!(action, "dialog" | "snapshot" | "close" | "session_info")
         && !lifecycle_confirmation
     {
-        if let Err(e) = state.drain_cdp_events_background().await {
+        if input_acknowledgement {
+            // Consume notifications now so native dialogs are reported, but
+            // leave renderer setup and frame-tree reads for the next observer.
+            // Never replace a completed input's result with an unrelated setup
+            // failure, and never replay the input on an observation timeout.
+            let drained = state.drain_cdp_events();
+            state.deferred_dialog_events.push_back(drained);
+        } else if let Err(e) = state.drain_cdp_events_background().await {
             resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
             attach_tab_gone_data(&mut resp, state);
             inject_lifecycle(
@@ -3762,7 +3790,9 @@ async fn execute_command_inner(
                 lifecycle_relaunched_browser,
             );
         }
-        attach_webmcp_availability(&mut resp, action, state).await;
+        if !input_acknowledgement {
+            attach_webmcp_availability(&mut resp, action, state).await;
+        }
     }
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
@@ -3794,6 +3824,7 @@ async fn execute_command_inner(
         // protected before returning JSON, diagnostics or persisted snapshots.
         // A masked screenshot observes after capture itself, before writing.
         if !matches!(action, "auth_fill" | "auth_export")
+            && !input_acknowledgement
             // A successful click may have opened a native dialog. Its response
             // has no page content; protect it with the pre-command inventory
             // rather than reading the now-blocked renderer again.

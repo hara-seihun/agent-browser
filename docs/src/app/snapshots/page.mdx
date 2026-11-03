@@ -2,7 +2,9 @@
 
 Native snapshots and `get value`, `get text`, `get html`, and `get attr` replace protected form values with `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]`. `cc-name` remains public. Live values are unchanged; shadow DOM and cross-origin out-of-process iframes are covered. This is form-input protection, not general secret detection in arbitrary page text. Use these protected APIs on sensitive tabs. Eval and screenshot/PDF channels work on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` when current or remembered sensitive controls exist. Detection stays sticky for the daemon/tab lifetime, including after field removal or navigation. Continuous capture and `addinitscript` are always refused. There is no bypass flag. See [Security](/security#native-sensitive-form-inputs).
 
-The `snapshot` command returns a compact accessibility tree with refs for element interaction.
+The `snapshot` command returns a compact accessibility tree with refs for element interaction. Represented presentational iframes are included alongside ordinary iframes.
+
+Click and other input-only acknowledgements return after input dispatch without a fresh page inventory or post-action frame setup. They do not confirm that the application accepted the action; inspect a new snapshot to learn the outcome, and never replay an uncertain payment or submission automatically.
 
 ## Options
 

@@ -1676,6 +1676,32 @@ pub fn content_free(action: &str, cmd: &Value) -> bool {
     ) || (action == "wait" && cmd.get("expression").is_none())
 }
 
+/// Input acknowledgements contain only caller-supplied selectors/keys and static
+/// status, never page text or control values. They do not need a fresh page
+/// inventory. In particular, a click may navigate away or start a payment POST;
+/// renderer observation must not turn its successful dispatch into a timeout.
+/// A new-tab click also returns a page-derived href, so it still needs protection.
+pub fn input_acknowledgement(action: &str, cmd: &Value) -> bool {
+    matches!(
+        action,
+        "click"
+            | "dblclick"
+            | "press"
+            | "hover"
+            | "scroll"
+            | "scrollintoview"
+            | "check"
+            | "uncheck"
+            | "focus"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
+            | "keydown"
+            | "keyup"
+            | "wheel"
+    ) && !cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false)
+}
+
 /// Plain screenshots paint every identified sensitive control black instead
 /// of refusing. Annotated captures still need a protected snapshot.
 pub fn masked_screenshot(action: &str, cmd: &Value) -> bool {

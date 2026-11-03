@@ -1705,6 +1705,10 @@ agent-browser click - Click an element
 
 Usage: agent-browser click <selector> [--new-tab]
 
+A normal click acknowledges input dispatch without waiting for a fresh page
+inventory. Inspect a new snapshot for the application outcome; do not replay
+an uncertain submission.
+
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
 
