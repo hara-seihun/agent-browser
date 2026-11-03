@@ -21,6 +21,7 @@ pub mod daemon;
 pub mod diff;
 #[cfg(test)]
 mod disabled_click_tests;
+pub(crate) mod downloads;
 #[allow(dead_code)]
 pub mod element;
 #[allow(dead_code)]

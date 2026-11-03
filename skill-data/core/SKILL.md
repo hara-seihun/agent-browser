@@ -31,12 +31,17 @@ No bypass flag exists. MCP, tool profiles, action approval, and `extraArgs` enfo
 
 For generated credentials that must reach a private file, use native `auth export --selector CSS --target TARGET --frame FRAME --output ABSOLUTE_PATH`; it pins one exact unique field and publishes an exclusive own-UID0600 file, returning only path/byteCount. Linux nonroot daemon with an existing nonsymlink own-UID0700 parent is required. Never recover secrets through eval, screenshots, clipboard or normal output. See [Private field export](references/authentication.md#private-field-export).
 
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
+`get attr` exposes only these selector metadata attributes on protected controls: `id`, `class`, `type`, `name`, `autocomplete`, `aria-label`, and `aria-labelledby`. The `value` attribute and other attributes remain redacted; remembered credential values echoed in metadata are still redacted. Use the metadata to construct a CSS selector for `auth fill`.
+
+
 ## The core loop
 
 Open the page, inspect the protected snapshot, and interact through native refs. Arbitrary page-tool result channels are guarded and are not substitutes for protected APIs on sensitive tabs:
 
 ```bash
-agent-browser open <url>        # 1. Open a page
+agent-browser open <url>        # 1. Open a page (native Chrome waits for DOMContentLoaded)
 agent-browser snapshot -i       # 2. See what's on it (interactive elements only)
 agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change

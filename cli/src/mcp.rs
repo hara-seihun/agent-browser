@@ -777,7 +777,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
+            "Launch the browser and optionally navigate to a URL. Running sessions retain their daemon across releases; explicitly close or use a new session to use the installed build. Native Chrome navigation waits for DOMContentLoaded, not full load; use agent_browser_wait_for_load for a stronger milestone and observe the page for application readiness. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -1004,7 +1004,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DOWNLOAD,
             "Download file",
-            "Click an element and save the download.",
+            "Click an element and save the actual download locally, including over remote CDP, without repeating the request.",
             json!({ "selector": selector_schema(), "path": { "type": "string" } }),
             &["selector", "path"],
         ),
@@ -1053,7 +1053,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_GET_ATTR,
             "Get attribute",
-            "Get an element attribute.",
+            "Get an element attribute. Protected controls expose selector metadata only: id, class, type, name, autocomplete, aria-label and aria-labelledby. Values and other attributes stay redacted, including remembered credential echoes in metadata.",
             json!({ "selector": selector_schema(), "name": { "type": "string" } }),
             &["selector", "name"],
         ),

@@ -245,7 +245,16 @@ pub fn classifier_js() -> String {
 /// text uses native innerText as its whitespace/visibility authority and masks
 /// only mapped control spans. An unmappable span returns a typed refusal. Live
 /// DOM, form values and attributes are untouched, including submission fields.
+/// Non-value control metadata used to discover selectors for private fills.
+/// The command still inventories the complete tab and redacts remembered values.
+pub fn selector_metadata_attribute(attribute: &str) -> bool {
+    matches!(attribute, "id" | "class" | "type" | "name" | "autocomplete" | "aria-label" | "aria-labelledby")
+}
+
 pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
+    if operation == "attribute" && attribute.is_some_and(selector_metadata_attribute) {
+        return format!("function() {{ return this.getAttribute({}); }}", json!(attribute.unwrap()));
+    }
     let read = match operation {
         "value" => "return this.value || '';".to_string(),
         "text" => "return safeText(this, true);".to_string(),

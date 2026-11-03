@@ -281,6 +281,15 @@ agent-browser wait "#spinner" --state hidden
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `load` or `domcontentloaded` when the lifecycle event is the milestone. `networkidle` is supported for pages known to become quiet, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+### Downloads
+
+```bash
+agent-browser download @e5 ./report.csv
+agent-browser wait --download ./archive.zip
+```
+
+The destination is local even when connected to a remote browser over CDP. The completed file is transferred without repeating the original request, so POST, blob, and authenticated downloads work. An existing destination is replaced atomically only after a successful transfer. Downloads are matched to the initiating frame, not another tab.
+
 ### Batch Execution
 
 Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows.
@@ -468,6 +477,10 @@ agent-browser state clean --older-than <days>  # Delete old states
 ```
 
 ### Navigation
+
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
+Native Chrome `open`, `goto`, and `navigate` finish at DOMContentLoaded, without waiting for images, ads, or trackers to finish loading. This is not application-specific readiness: observe the page or wait for the needed element next. Use `wait --load load` if the full page load event is required. Navigation errors and deadlines keep their uncertain outcome and never replay the request.
 
 ```bash
 agent-browser back                    # Go back
@@ -939,6 +952,9 @@ Click and other input-only acknowledgements return after input dispatch without 
 Initial frame-tree and pierced DOM requests overlap within each exact represented session. Each fully bound represented document starts its control reads while deeper documents are still being discovered; complete coverage and final identity validation remain mandatory before any result is published. Per-document renderer groups register cancellation cleanup before resolve, without waiting for other active groups in the same batch. Deadline errors append metadata-only JSON after `frame observation deadline elapsed:`. It reports the original `budgetMs`, `elapsedMs`, `attempts`, and `phases` with closed phase names and numeric `started`, `completed`, `cancelled`, `inFlight`, `activeMaxMs`, `totalMs`, and `maxMs` counters. All concurrent in-flight phases are represented; setup, initial document reads, controls, AX/cursor/selector collection, validation, cleanup and recovery remain distinguishable. Controls also report separate `control_resolve`, `control_values`, and `control_release` phases, distinguishing transport/handle waits from renderer callbacks and cleanup. The snapshot is taken before cancellation drops the work. Nested observers and retries retain the original budget; subsequent commands start fresh. No DOM, URLs, target/frame/session IDs or control values enter these diagnostics. CLI and MCP preserve the same refusal and diagnostic.
 
 `snapshot`, `get value`, `get text`, `get html`, and `get attr` replace protected form values with `[redacted: cc-number]`, `[redacted: cc-exp]`, `[redacted: cc-exp-month]`, `[redacted: cc-exp-year]`, `[redacted: cc-csc]`, `[redacted: password]`, or `[redacted: one-time-code]`. `cc-name` remains public. Protection covers native snapshots and getters, including shadow DOM and cross-origin out-of-process iframes. It does not change live form values, so filling and submitting still work.
+
+`get attr` exposes only these selector metadata attributes on protected controls: `id`, `class`, `type`, `name`, `autocomplete`, `aria-label`, and `aria-labelledby`. The `value` attribute and other attributes remain redacted; remembered credential values echoed in metadata are still redacted. Use the metadata to construct a CSS selector for `auth fill`.
+
 
 The native inventory validates the live target frame root and pierced document coverage without creating isolated worlds or executing page JavaScript. Protected observation shares the native command deadline: native observation synchronizes target notifications and re-inventories until coverage is complete, without replaying the surrounding action. Represented sibling and nested frame sessions run concurrently; sensitive control reads start as soon as their bound document arrives, overlapping later document waves. Complete coverage, live frame trees and document identities are checked before success. Binding comparison retains frame IDs, loaders, parents, membership and document backend identity, not volatile metadata or sibling ordering. A changed binding discards the entire observation and re-inventories within the original deadline; unknown or misassociated identities still refuse, and stale observations never succeed. A complete snapshot uses one inventory: all represented frame AX, cursor and selector projections run concurrently with control reads inside that identity span, then validate once. Pierced owner and link/base-URL data are reused without child reinventory or link handles. Children render in deterministic AX order with exact frame-bound refs, committed only on complete success. Cursor collection creates no temporary DOM attributes. Structural element paths from the single cursor evaluation bind directly to positive backend identities in that session's inventoried ordinary DOM children; same-type sibling indices exclude text/comments, and embedded documents and shadow trees are separate from this document-body projection. Missing or ambiguous paths refuse. Cursor binding performs no per-element query/describe round-trips. All collected data are discarded together on a transition. Direct snapshots, ref collection and diffs retain typed coverage gaps through the daemon-owned batch, reconcile only live represented iframe targets, then recollect from scratch within the original command deadline. Post-capture screenshot guards stay one-shot refusals, so retry cannot bless an earlier capture. Renderer handles have observation-unique object groups with connection-owned cancellation cleanup, registered before resolve dispatch. Cleanup is bounded to 500ms; an unresolved cleanup refuses further observation until the connection is closed. Unattached frame owners or incomplete document coverage still fail closed, including debugger-paused or script-disabled payment frames; errors identify only frame/session IDs. Once a tab is known sensitive, automatic restore saving refuses before renderer observation so metadata and close remain responsive.
 

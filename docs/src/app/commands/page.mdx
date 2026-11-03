@@ -1,5 +1,9 @@
 # Commands
 
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
+Native Chrome navigation (`open`, `goto`, `navigate`) waits for DOMContentLoaded, not every image, ad, or tracker. Observe the page or wait for the needed element for application readiness. Use `wait --load load` when the full page load event is required. A navigation error or deadline never replays the request.
+
 Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
 
 Native `snapshot` and `get value/text/html/attr` protect sensitive form inputs with typed `[redacted: …]` markers without changing live values. `cc-name` remains public, including in shadow DOM and cross-origin out-of-process iframes. Expiry hints include ARIA/associated/wrapping labels and MM/YY placeholders on form controls and contenteditable fields. Known combined expiry echoes tolerate whitespace; short month/year text and selected-option descendants stay scoped. Rendered text getters preserve native innerText layout outside mapped protected spans without changing live DOM or controls; unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED. This is not general secret detection in arbitrary page text. Recording/video, trace, profiler, HAR, screencast/stream enable, DevTools inspection/exposure, and `addinitscript` are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED`. Other script, screenshot/PDF, download, active-tab read, and browser-data output channels remain functional on benign tabs but refuse before execution, capture, or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including after field removal or navigation. No bypass flag exists. MCP delegates to the canonical CLI, including `extraArgs`; see [Security](/security#native-sensitive-form-inputs) for the exact marker types and scope.
@@ -72,6 +76,9 @@ agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
+
+`get attr` exposes only these selector metadata attributes on protected controls: `id`, `class`, `type`, `name`, `autocomplete`, `aria-label`, and `aria-labelledby`. The `value` attribute and other attributes remain redacted; remembered credential values echoed in metadata are still redacted. Use the metadata to construct a CSS selector for `auth fill`.
+
 
 ## Read agent-friendly text
 
@@ -154,8 +161,10 @@ After a page change, prefer a selector, text, URL, or JavaScript condition that 
 
 ```bash
 agent-browser download <sel> <path>   # Click element to trigger download
-agent-browser wait --download [path]  # Wait for any download to complete
+agent-browser wait --download [path]  # Wait for a download from the current frame
 ```
+
+With a destination path, the completed file is saved locally even over remote CDP, without repeating the request. An existing destination is replaced atomically only on success.
 
 Use `--download-path <dir>` (or `AGENT_BROWSER_DOWNLOAD_PATH` env) to set a default download directory. Without it, downloads go to a temporary directory that is deleted when the browser closes.
 

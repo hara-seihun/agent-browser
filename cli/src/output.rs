@@ -1572,13 +1572,18 @@ you stage state (network routes, cookies, init scripts) before the first
 real navigation — useful for SSR debug, auth setup, and capturing fresh
 `react suspense` / `vitals` state without noise from a prior page.
 
-With a URL, launches and navigates. If no protocol is provided, https://
+With a URL, launches and navigates, waiting for DOMContentLoaded rather than
+all images, ads, or trackers. Use `wait --load load` when full load is required.
+This does not guarantee application-specific readiness.
+If no protocol is provided, https://
 is automatically prepended. WebMCP tools are announced as brief, untrusted
 summaries only on discovery or change. Fetch a selected schema with
 `agent-browser webmcp list <tool> --frame <frame-id> --json`. Pages without
 tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
+Running sessions keep their existing daemon across releases. Close a session
+explicitly or use a new session name to use the installed build.
 
 Global Options:
   --json               Output as JSON
@@ -1943,7 +1948,9 @@ agent-browser download - Download a file by clicking an element
 
 Usage: agent-browser download <selector> <path>
 
-Clicks an element that triggers a download and saves the file to the specified path.
+Clicks an element that triggers a download and saves the file to the local path,
+even with remote CDP. The completed file is transferred without repeating the
+request; an existing destination is replaced atomically only on success.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2129,6 +2136,10 @@ Modes:
   --fn <expression>    Wait for JavaScript expression to be truthy
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
+
+With a path, the completed download is saved locally, even with remote CDP.
+The request is not repeated, and an existing destination is replaced atomically
+only on success. Downloads are matched to the initiating frame, not another tab.
 
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
@@ -2369,6 +2380,7 @@ Examples:
   agent-browser get html "#content"
   agent-browser get value "#email-input"
   agent-browser get attr "#link" href
+  Protected controls expose id/class/type/name/autocomplete/aria-label/aria-labelledby; values stay redacted.
   agent-browser get title
   agent-browser get url
   agent-browser get count "li.item"
