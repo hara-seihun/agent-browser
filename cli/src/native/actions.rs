@@ -15910,12 +15910,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_snapshot_iframe_setup_failure_uses_validated_live_inventory() {
+        // Resume is deliberately fire-and-forget; only acknowledged domain
+        // failures can leave setup pending. Every case still checks its dispatch.
         for failed in [
             "Page.enable",
+            "Runtime.enable",
+            "Network.enable",
             "DOM.enable",
             "Accessibility.enable",
             "Target.setAutoAttach",
-            "Runtime.runIfWaitingForDebugger",
         ] {
             for unreadable in [false, true] {
                 let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
@@ -15962,7 +15965,7 @@ mod tests {
                         .contains("[redacted: cc-number]"));
                     assert!(!state.ref_map.entries_sorted().is_empty());
                 }
-                assert!(state.pending_iframe_setup.contains("session-1"));
+                assert!(state.pending_iframe_setup.contains("session-1"), "{failed}");
                 let mut resumed = false;
                 while let Ok(command) = fixture.commands.try_recv() {
                     if command["sessionId"] == "session-1"
