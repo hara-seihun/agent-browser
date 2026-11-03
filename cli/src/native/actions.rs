@@ -7331,8 +7331,11 @@ async fn handle_scoped_getter(
     if action == "getattribute" && cmd.get("attribute").and_then(Value::as_str).is_none() {
         return Err("Missing 'attribute' parameter".into());
     }
+    let selector_metadata = action == "getattribute"
+        && cmd.get("attribute").and_then(Value::as_str)
+            .is_some_and(super::sensitive::selector_metadata_attribute);
     if let Some(known) = state.sensitive_observations.get(&session).filter(|known| {
-        known
+        !selector_metadata && known
             .controls
             .values()
             .any(|marker| marker == "[redacted: credential]")
