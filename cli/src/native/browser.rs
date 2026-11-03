@@ -1065,8 +1065,12 @@ impl BrowserManager {
     /// Existing rAF and media-change callbacks may remain suspended.
     /// Optional emulation support must not gate protected DOM observation.
     async fn prepare_automation_rendering(&self, session_id: Option<&str>) {
-        let mut prepared = self.rendering_prepared.lock().await;
-        if !prepared.insert(session_id.unwrap_or_default().to_owned()) {
+        let first_setup = self
+            .rendering_prepared
+            .lock()
+            .await
+            .insert(session_id.unwrap_or_default().to_owned());
+        if !first_setup {
             return;
         }
         let (focus, motion) = tokio::join!(
