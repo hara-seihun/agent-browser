@@ -1053,7 +1053,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_GET_ATTR,
             "Get attribute",
-            "Get an element attribute.",
+            "Get an element attribute. Protected controls expose selector metadata only: id, class, type, name, autocomplete, aria-label and aria-labelledby. Values and other attributes stay redacted, including remembered credential echoes in metadata.",
             json!({ "selector": selector_schema(), "name": { "type": "string" } }),
             &["selector", "name"],
         ),

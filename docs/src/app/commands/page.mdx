@@ -77,6 +77,9 @@ agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
 
+`get attr` exposes only these selector metadata attributes on protected controls: `id`, `class`, `type`, `name`, `autocomplete`, `aria-label`, and `aria-labelledby`. The `value` attribute and other attributes remain redacted; remembered credential values echoed in metadata are still redacted. Use the metadata to construct a CSS selector for `auth fill`.
+
+
 ## Read agent-friendly text
 
 ```bash

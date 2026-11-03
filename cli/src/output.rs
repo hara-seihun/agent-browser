@@ -2376,6 +2376,7 @@ Examples:
   agent-browser get html "#content"
   agent-browser get value "#email-input"
   agent-browser get attr "#link" href
+  Protected controls expose id/class/type/name/autocomplete/aria-label/aria-labelledby; values stay redacted.
   agent-browser get title
   agent-browser get url
   agent-browser get count "li.item"

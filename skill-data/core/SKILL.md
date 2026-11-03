@@ -30,6 +30,9 @@ For generated credentials that must reach a private file, use native `auth expor
 
 Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
 
+`get attr` exposes only these selector metadata attributes on protected controls: `id`, `class`, `type`, `name`, `autocomplete`, `aria-label`, and `aria-labelledby`. The `value` attribute and other attributes remain redacted; remembered credential values echoed in metadata are still redacted. Use the metadata to construct a CSS selector for `auth fill`.
+
+
 ## The core loop
 
 Open the page, inspect the protected snapshot, and interact through native refs. Arbitrary page-tool result channels are guarded and are not substitutes for protected APIs on sensitive tabs:
