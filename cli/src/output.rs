@@ -1582,6 +1582,8 @@ summaries only on discovery or change. Fetch a selected schema with
 tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
+Running sessions keep their existing daemon across releases. Close a session
+explicitly or use a new session name to use the installed build.
 
 Global Options:
   --json               Output as JSON

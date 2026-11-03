@@ -1,5 +1,7 @@
 # Commands
 
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
 Native Chrome navigation (`open`, `goto`, `navigate`) waits for DOMContentLoaded, not every image, ad, or tracker. Observe the page or wait for the needed element for application readiness. Use `wait --load load` when the full page load event is required. A navigation error or deadline never replays the request.
 
 Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.

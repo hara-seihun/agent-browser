@@ -469,6 +469,8 @@ agent-browser state clean --older-than <days>  # Delete old states
 
 ### Navigation
 
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
 Native Chrome `open`, `goto`, and `navigate` finish at DOMContentLoaded, without waiting for images, ads, or trackers to finish loading. This is not application-specific readiness: observe the page or wait for the needed element next. Use `wait --load load` if the full page load event is required. Navigation errors and deadlines keep their uncertain outcome and never replay the request.
 
 ```bash

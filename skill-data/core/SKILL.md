@@ -28,6 +28,8 @@ No bypass flag exists. MCP, tool profiles, action approval, and `extraArgs` enfo
 
 For generated credentials that must reach a private file, use native `auth export --selector CSS --target TARGET --frame FRAME --output ABSOLUTE_PATH`; it pins one exact unique field and publishes an exclusive own-UID0600 file, returning only path/byteCount. Linux nonroot daemon with an existing nonsymlink own-UID0700 parent is required. Never recover secrets through eval, screenshots, clipboard or normal output. See [Private field export](references/authentication.md#private-field-export).
 
+Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
+
 ## The core loop
 
 Open the page, inspect the protected snapshot, and interact through native refs. Arbitrary page-tool result channels are guarded and are not substitutes for protected APIs on sensitive tabs:

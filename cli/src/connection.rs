@@ -722,11 +722,8 @@ fn concurrent_daemon_config_error(session: &str) -> String {
 }
 
 /// Check if the running daemon's version matches this CLI binary.
-/// Returns false when the version file is missing — an unversioned daemon
-/// is most likely a stale leftover from before version tracking was added
-/// (or from the Node.js era), and silently reusing it is the exact bug
-/// this check exists to prevent. The one-time cost of an unnecessary
-/// restart on the first upgrade is preferable to silent failures.
+/// A missing or different version is reported without restarting a live session.
+/// Its owner decides when to close it; fresh sessions use the installed build.
 fn daemon_version_matches(session: &str) -> bool {
     let version_path = get_version_path(session);
     match fs::read_to_string(&version_path) {
@@ -825,23 +822,26 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     // this check is handled at request time: callers respawn via
     // ensure_daemon when the request fails with daemon_unreachable().
     if daemon_ready(session) {
-        // Check version: if the running daemon is from a different CLI
-        // version (e.g. after an upgrade), kill it and start a fresh one.
-        if !daemon_version_matches(session) {
+        // Releases must not destroy active tabs. Keep the running daemon until
+        // its owner closes it; a new session starts the installed build.
+        let same_build = daemon_version_matches(session);
+        if !same_build {
             eprintln!(
-                "{} Daemon version mismatch detected, restarting...",
+                "{} Keeping the active session's daemon from another build; close it explicitly to use the installed build.",
                 crate::color::warning_indicator()
             );
-            stop_existing_daemon_for_restart(session);
-            restarted = true;
-            // Fall through to spawn a new daemon below
-        } else {
-            match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
-                Some(result) => return Ok(result),
-                None => {
-                    stop_existing_daemon_for_restart(session);
-                    restarted = true;
-                }
+        }
+        match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
+            Some(result) => return Ok(result),
+            None if !same_build => {
+                return Err(format!(
+                    "daemon_configuration_mismatch: session '{}' is running another build with different daemon settings. Nothing ran and the session was preserved. Use its existing settings, a new session name, or explicitly close it before changing settings.",
+                    session
+                ));
+            }
+            None => {
+                stop_existing_daemon_for_restart(session);
+                restarted = true;
             }
         }
     }
