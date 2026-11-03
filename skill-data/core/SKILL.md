@@ -41,6 +41,8 @@ agent-browser snapshot -i       # 4. Re-snapshot after any page change
 
 Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become **stale the moment the page changes** — after clicks that navigate, form submits, dynamic re-renders, dialog opens. Always re-snapshot before your next ref interaction.
 
+Automation emulates focus and reduced motion on the selected page without bringing its tab to the foreground. This lets cooperative chat and transition UI finish in background tabs; it does not make arbitrary background animation-frame callbacks run. Explicit media preferences override the reduced-motion default.
+
 ## Always use your own session
 
 Before your first command, set a named session for the whole task:

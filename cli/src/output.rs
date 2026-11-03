@@ -2488,7 +2488,7 @@ Settings:
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
-        [reduced-motion]     Enable reduced motion
+        [reduced-motion]     Reduced motion is enabled by default
 
 Global Options:
   --json               Output as JSON

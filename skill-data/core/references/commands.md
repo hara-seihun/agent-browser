@@ -191,7 +191,7 @@ agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocat
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
 agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
-agent-browser set media dark                  # Emulate color scheme
+agent-browser set media dark                  # Emulate color scheme; reduced motion is the default
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 

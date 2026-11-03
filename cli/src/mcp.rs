@@ -1187,7 +1187,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_MEDIA,
             "Set media",
-            "Set media emulation.",
+            "Set media emulation. Reduced motion defaults to reduce; an explicit no-preference overrides it.",
             json!({ "colorScheme": { "type": "string", "enum": ["dark", "light", "no-preference"] }, "reducedMotion": { "type": "string", "enum": ["reduce", "no-preference"] } }),
             &[],
         ),
