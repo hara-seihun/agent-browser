@@ -1684,7 +1684,8 @@ impl DaemonState {
     /// tabs (including tabs other CDP clients churn) stay pending until their
     /// tab becomes active, so their setup cannot stall or fail this session's
     /// commands. With network controls active every frame is prepared, since
-    /// controls must be installed before a frame runs.
+    /// controls must be installed before a frame runs. Without network controls,
+    /// failed setup stays pending while protected observation validates the live tree.
     async fn prepare_pending_iframes(&mut self) -> Result<(), String> {
         if self.pending_iframe_setup.is_empty() {
             return Ok(());
@@ -1725,18 +1726,27 @@ impl DaemonState {
                             mgr.client
                                 .send_command_no_params("Accessibility.enable", Some(&session)),
                         );
+                        // Without network controls, domain setup is best effort:
+                        // a detached iframe or an unsupported domain must not
+                        // prevent the protected inventory from reading live frames.
+                        // Always release a paused frame before validating it.
+                        if !controls_active {
+                            let resumed = mgr.resume_if_waiting_pub(&session).await;
+                            domains?;
+                            dom?;
+                            accessibility?;
+                            return resumed;
+                        }
                         domains?;
                         dom?;
                         accessibility?;
-                        if controls_active {
-                            install_network_controls_for_session(
-                                &mgr.client,
-                                &session,
-                                filter,
-                                has_proxy_creds,
-                            )
-                            .await?;
-                        }
+                        install_network_controls_for_session(
+                            &mgr.client,
+                            &session,
+                            filter,
+                            has_proxy_creds,
+                        )
+                        .await?;
                         mgr.resume_if_waiting_pub(&session).await
                     })
                     .await;
@@ -1759,10 +1769,9 @@ impl DaemonState {
             if controls_active {
                 return close_after_network_control_failure(self, error).await;
             }
-            return Err(format!(
-                "{}: iframe session setup unavailable",
-                super::sensitive::UNSUPPORTED
-            ));
+            // Keep failed sessions pending for the next command. Observation
+            // still requires a complete, validated inventory of the live tree;
+            // this is not permission to publish an uninspected frame.
         }
         Ok(())
     }
@@ -15769,6 +15778,97 @@ mod tests {
         client.settle_object_cleanup().await.unwrap();
         assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_iframe_setup_failure_uses_validated_live_inventory() {
+        for failed in [
+            "Page.enable",
+            "DOM.enable",
+            "Accessibility.enable",
+            "Target.setAutoAttach",
+            "Runtime.runIfWaitingForDebugger",
+        ] {
+            for unreadable in [false, true] {
+                let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+                let client = fixture.manager.client.clone();
+                let mut state = DaemonState::new();
+                {
+                    let mut inventory = fixture.frame_inventory.lock().unwrap();
+                    configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                        if n == 0 {
+                            vec![1]
+                        } else {
+                            vec![]
+                        }
+                    });
+                    inventory
+                        .failed_session_methods
+                        .insert(("session-1".into(), failed.into()));
+                    if unreadable {
+                        inventory.unreadable.insert("frame-1".into());
+                    }
+                }
+                state.pending_iframe_setup.insert("session-1".into());
+                state.browser = Some(fixture.manager);
+                let response = execute_command_inner(
+                    &json!({"action":"snapshot", "id":"test"}),
+                    &mut state,
+                    None,
+                )
+                .await;
+                assert_eq!(response["success"], true, "{failed}: {response}");
+                let data = &response["data"];
+                if unreadable {
+                    assert_eq!(data["observation"]["status"], "incomplete");
+                    assert!(data["refs"].as_object().unwrap().is_empty());
+                    assert!(!data.to_string().contains("Synthetic-"));
+                } else {
+                    assert_eq!(
+                        data["observation"]["status"], "complete",
+                        "{failed}: {data}"
+                    );
+                    assert!(data["snapshot"]
+                        .as_str()
+                        .unwrap()
+                        .contains("[redacted: cc-number]"));
+                    assert!(!state.ref_map.entries_sorted().is_empty());
+                }
+                assert!(state.pending_iframe_setup.contains("session-1"));
+                let mut resumed = false;
+                while let Ok(command) = fixture.commands.try_recv() {
+                    if command["sessionId"] == "session-1"
+                        && command["method"] == "Runtime.runIfWaitingForDebugger"
+                    {
+                        resumed = true;
+                    }
+                    assert!(!command["method"].as_str().unwrap().starts_with("Input."));
+                }
+                assert!(resumed, "a failed setup must not leave a live frame paused");
+                client.close().await;
+                fixture.server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_iframe_setup_failure_with_network_controls_still_closes_browser() {
+        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        fixture
+            .frame_inventory
+            .lock()
+            .unwrap()
+            .failed_session_methods
+            .insert(("session-1".into(), "DOM.enable".into()));
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        state.pending_iframe_setup.insert("session-1".into());
+        *state.domain_filter.write().await = Some(DomainFilter::new("fixture.invalid"));
+        assert!(state.prepare_pending_iframes().await.is_err());
+        assert!(state.browser.is_none());
         client.close().await;
         fixture.server.await.unwrap();
     }

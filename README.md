@@ -2092,12 +2092,14 @@ Apache-2.0
 
 ### Protected cloud frame admission
 
-Pending iframe domain admissions overlap within each exact session and across frames. All mandatory domains and child auto-attachment must be confirmed, then network controls installed, before any debugger resume. Snapshot coverage recovery uses the already-proven missing-frame gap instead of constructing throwaway getter inventories; it still discards incomplete projections and takes a fresh complete, identity-validated snapshot. Setup, recovery, controls and projections remain inside the same original command deadline. Unknown coverage refuses. Deadline expiry publishes only incomplete metadata for snapshots; it never publishes partial content or grants a second budget to cloud browsers.
+Pending iframe domain admissions overlap within each exact session and across frames. When network controls are active, mandatory domains and child auto-attachment must be confirmed, then network controls installed, before debugger resume. Snapshot coverage recovery uses the already-proven missing-frame gap instead of constructing throwaway getter inventories; it still discards incomplete projections and takes a fresh complete, identity-validated snapshot. Setup, recovery, controls and projections remain inside the same original command deadline. Unknown coverage refuses. Deadline expiry publishes only incomplete metadata for snapshots; it never publishes partial content or grants a second budget to cloud browsers.
 
 CDP WebSocket connections enable TCP_NODELAY so independent small commands are dispatched without Nagle/delayed-ACK batching. Cloud RTT fixtures retain their delays and original admission deadline; every required domain response still precedes frame resume.
 
 
 ### Incomplete protected snapshots
+
+Without network controls, failed iframe domain setup no longer aborts observation: paused frames are resumed and the complete live frame inventory must still validate before content or refs are published. Unreadable live frames return an incomplete snapshot with no content or refs. Network-control setup failures still close the browser.
 
 Snapshot JSON reports `observation.status` as `complete` or `incomplete`. At the native command deadline, unfinished setup, discovery, projection or origin collection returns a typed incomplete result with safe phase counts/timings and no page content, origin, or actionable refs. Unavailable inventory also returns a metadata-only incomplete reason. CLI and MCP text preserve this status and diagnostic; a successful command does not imply complete inventory. Only a fresh complete snapshot supplies actionable refs. Diffs and annotated screenshots require complete inventory; incomplete capture clears old refs and never bypasses protection. Read-only observation can be retried after setup progresses; effects are never retried by this behavior.
 

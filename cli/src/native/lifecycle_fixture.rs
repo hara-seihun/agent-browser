@@ -56,6 +56,7 @@ pub(crate) struct FrameInventory {
     frame_tree_reads: HashMap<String, usize>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
+    pub failed_session_methods: HashSet<(String, String)>,
     pub hold_expression: Option<String>,
     pub held_session_methods: HashSet<(String, String)>,
     pub hold_shallow_document: bool,
@@ -352,8 +353,11 @@ impl SyntheticCdp {
                                 .or_else(|| inventory.reply_delays.get(method))
                                 .copied()
                                 .unwrap_or(std::time::Duration::ZERO);
-                            let response = if (method == "DOM.getDocument"
-                                && inventory.unreadable.contains(&root_frame))
+                            let response = if inventory
+                                .failed_session_methods
+                                .contains(&(session.to_owned(), method.to_owned()))
+                                || (method == "DOM.getDocument"
+                                    && inventory.unreadable.contains(&root_frame))
                                 || (method == "Accessibility.getFullAXTree"
                                     && inventory.unreadable_ax.contains(
                                         command["params"]["frameId"]

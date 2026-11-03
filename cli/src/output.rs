@@ -3873,8 +3873,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   metadata and sibling order are not identity. Changed observations are discarded
   and re-inventoried within that deadline; unknown identities fail closed.
   Initial frame-tree and pierced DOM reads overlap within each exact session.
-  Pending iframe domains share one RTT wave; mandatory replies and network
-  controls complete before debugger resume. Snapshot recovery uses its proven
+  Pending iframe domains share one RTT wave; network-controlled sessions require
+  mandatory replies and installed controls before debugger resume. Snapshot recovery uses its proven
   coverage gap directly, then a fresh complete inventory/projection, avoiding
   throwaway getter inventories within the original command budget.
   Deadline errors append safe JSON: original budget, elapsed time, attempts,
@@ -3883,6 +3883,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Lock expiry: code daemon_busy, executed:false, exit 3; no effects dispatched.
   Started command deadline errors never replay effects. Snapshot expiry includes
   origin projection and clears refs. Diffs/annotated captures require complete data.
+  Failed iframe setup without network controls still attempts validated live inventory;
+  unreadable live frames publish no content or refs. Network setup failures close the browser.
   Snapshot observation.status is complete or incomplete. Incomplete inventory
   returns safe reason/phase metadata only, no page content/origin/refs. CLI/MCP
   text preserves that status. Only a fresh complete snapshot provides refs.
