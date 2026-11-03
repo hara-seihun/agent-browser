@@ -21,6 +21,8 @@ agent-browser wait --download ./archive.zip --timeout 30000
 
 Use `download` when a specific element triggers the download. Use `wait --download` when another action starts the download and you need to wait for completion.
 
+The destination is local even when connected to a remote browser over CDP. The completed browser file is transferred in chunks without repeating the original request, so POST, blob, and authenticated downloads work. A temporary blank tab used for the transfer is closed afterwards. An existing destination is replaced atomically only after a successful transfer. Downloads are matched by their ID and initiating frame, not another tab's event.
+
 Set a default download directory for browser-initiated downloads:
 
 ```bash

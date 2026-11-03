@@ -1004,7 +1004,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DOWNLOAD,
             "Download file",
-            "Click an element and save the download.",
+            "Click an element and save the actual download locally, including over remote CDP, without repeating the request.",
             json!({ "selector": selector_schema(), "path": { "type": "string" } }),
             &["selector", "path"],
         ),

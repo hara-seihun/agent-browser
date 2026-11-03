@@ -1944,7 +1944,9 @@ agent-browser download - Download a file by clicking an element
 
 Usage: agent-browser download <selector> <path>
 
-Clicks an element that triggers a download and saves the file to the specified path.
+Clicks an element that triggers a download and saves the file to the local path,
+even with remote CDP. The completed file is transferred without repeating the
+request; an existing destination is replaced atomically only on success.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2130,6 +2132,10 @@ Modes:
   --fn <expression>    Wait for JavaScript expression to be truthy
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
+
+With a path, the completed download is saved locally, even with remote CDP.
+The request is not repeated, and an existing destination is replaced atomically
+only on success. Downloads are matched to the initiating frame, not another tab.
 
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start

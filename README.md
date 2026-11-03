@@ -281,6 +281,15 @@ agent-browser wait "#spinner" --state hidden
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `load` or `domcontentloaded` when the lifecycle event is the milestone. `networkidle` is supported for pages known to become quiet, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+### Downloads
+
+```bash
+agent-browser download @e5 ./report.csv
+agent-browser wait --download ./archive.zip
+```
+
+The destination is local even when connected to a remote browser over CDP. The completed file is transferred without repeating the original request, so POST, blob, and authenticated downloads work. An existing destination is replaced atomically only after a successful transfer. Downloads are matched to the initiating frame, not another tab.
+
 ### Batch Execution
 
 Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows.

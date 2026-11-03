@@ -158,8 +158,10 @@ After a page change, prefer a selector, text, URL, or JavaScript condition that 
 
 ```bash
 agent-browser download <sel> <path>   # Click element to trigger download
-agent-browser wait --download [path]  # Wait for any download to complete
+agent-browser wait --download [path]  # Wait for a download from the current frame
 ```
+
+With a destination path, the completed file is saved locally even over remote CDP, without repeating the request. An existing destination is replaced atomically only on success.
 
 Use `--download-path <dir>` (or `AGENT_BROWSER_DOWNLOAD_PATH` env) to set a default download directory. Without it, downloads go to a temporary directory that is deleted when the browser closes.
 

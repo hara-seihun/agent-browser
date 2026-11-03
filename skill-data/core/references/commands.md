@@ -157,6 +157,15 @@ agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 
 After a page-changing action, prefer the selector, text, URL, or JavaScript condition that represents the result you need. Use a lifecycle wait when the lifecycle event is the milestone. `networkidle` is also supported, but use it only for pages known to become quiet because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+## Downloads
+
+```bash
+agent-browser download @e1 ./report.csv
+agent-browser wait --download ./archive.zip
+```
+
+Paths are local even with remote CDP. The completed browser file is transferred without repeating the request (including POST, blob, and authenticated downloads); the destination is replaced atomically only on success. Downloads are matched to the initiating frame, not another tab.
+
 ## Mouse Control
 
 ```bash
