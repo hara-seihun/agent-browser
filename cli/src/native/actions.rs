@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -603,6 +603,8 @@ pub struct DaemonState {
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
+    // Dialogs drain notifications without running renderer-dependent setup.
+    deferred_dialog_events: VecDeque<DrainedEvents>,
     pub webmcp: webmcp::RuntimeState,
     /// Whether the active launch opted into Chrome's experimental WebMCP features.
     pub webmcp_enabled: bool,
@@ -759,6 +761,7 @@ impl DaemonState {
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
+            deferred_dialog_events: VecDeque::new(),
             webmcp: webmcp::RuntimeState::default(),
             webmcp_enabled: false,
             screencasting: false,
@@ -868,6 +871,7 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
+        self.deferred_dialog_events.clear();
         if let Some(ref mut browser) = self.browser {
             self.event_rx = Some(browser.take_initial_events());
         }
@@ -1222,6 +1226,13 @@ impl DaemonState {
 
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         let drained = self.drain_cdp_events();
+        if self.pending_dialog.is_some() {
+            self.deferred_dialog_events.push_back(drained);
+            return Ok(());
+        }
+        while let Some(deferred) = self.deferred_dialog_events.pop_front() {
+            self.apply_drained_events(deferred).await?;
+        }
         self.apply_drained_events(drained).await
     }
 
@@ -2629,6 +2640,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
     state.clear_iframe_custody();
+    state.deferred_dialog_events.clear();
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
@@ -2733,7 +2745,7 @@ fn skip_launch_action(action: &str) -> bool {
 fn should_validate_restore_after_action(action: &str) -> bool {
     !matches!(
         action,
-        "launch" | "session_info" | "close" | "auth_fill" | "auth_export"
+        "launch" | "session_info" | "close" | "dialog" | "auth_fill" | "auth_export"
     )
 }
 
@@ -3072,8 +3084,17 @@ async fn execute_command_inner(
         .and_then(|mgr| mgr.active_target_id().ok())
         .map(str::to_owned);
 
+    // Dialogs must run before any renderer-dependent setup or observation.
+    // Keep other notifications for the next ordinary command rather than losing
+    // attached frames, network controls, or target lifecycle changes.
+    if action == "dialog" {
+        let drained = state.drain_cdp_events();
+        state.deferred_dialog_events.push_back(drained);
+    }
     // Lifecycle commands must not wait for renderer or iframe setup events.
-    if !matches!(action, "snapshot" | "session_info" | "close") && !lifecycle_confirmation {
+    if !matches!(action, "dialog" | "snapshot" | "session_info" | "close")
+        && !lifecycle_confirmation
+    {
         if let Err(e) = state.drain_cdp_events_background().await {
             return error_response(&id, &super::browser::to_ai_friendly_error(&e));
         }
@@ -3354,7 +3375,7 @@ async fn execute_command_inner(
     // A throwaway preflight/postflight would spend separate budgets and erase its
     // useful incomplete result, while exposing no additional protected content.
     let mut guard_incomplete: Option<String> = None;
-    let observation_session = if action == "snapshot" {
+    let observation_session = if matches!(action, "snapshot" | "dialog") {
         None
     } else if let Some(mgr) = state.browser.as_ref() {
         match mgr.active_session_id() {
@@ -3723,7 +3744,9 @@ async fn execute_command_inner(
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    if !matches!(action, "snapshot" | "close" | "session_info") && !lifecycle_confirmation {
+    if !matches!(action, "dialog" | "snapshot" | "close" | "session_info")
+        && !lifecycle_confirmation
+    {
         if let Err(e) = state.drain_cdp_events_background().await {
             resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
             attach_tab_gone_data(&mut resp, state);
@@ -3767,6 +3790,10 @@ async fn execute_command_inner(
         // protected before returning JSON, diagnostics or persisted snapshots.
         // A masked screenshot observes after capture itself, before writing.
         if !matches!(action, "auth_fill" | "auth_export")
+            // A successful click may have opened a native dialog. Its response
+            // has no page content; protect it with the pre-command inventory
+            // rather than reading the now-blocked renderer again.
+            && !(state.pending_dialog.is_some() && super::sensitive::content_free(action, cmd))
             && !super::sensitive::masked_screenshot(action, cmd)
             && state.browser.is_some()
         {
@@ -3833,7 +3860,7 @@ async fn execute_command_inner(
         attach_active_tab(&mut resp, state);
     }
 
-    if action == "snapshot" {
+    if matches!(action, "snapshot" | "dialog") {
         if let Some(session) = state
             .browser
             .as_ref()

@@ -305,6 +305,8 @@ agent-browser frame main
 
 ## Dialogs
 
+`dialog status`, `dialog accept`, and `dialog dismiss` run without reading the page, so an open dialog cannot block its own resolution.
+
 By default, `alert` and `beforeunload` dialogs are automatically accepted so they never block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` to disable this behavior.
 
 ```bash

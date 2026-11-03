@@ -2875,6 +2875,7 @@ agent-browser dialog - Handle browser dialogs
 Usage: agent-browser dialog <accept|dismiss|status> [text]
 
 Respond to or check for browser dialogs (alert, confirm, prompt).
+These commands do not read the page and work while a dialog blocks its renderer.
 
 Operations:
   accept [text]        Accept dialog, optionally with prompt text

@@ -37,6 +37,8 @@ agent-browser dialog accept "prompt text"
 agent-browser dialog dismiss
 ```
 
+`dialog status`, `dialog accept`, and `dialog dismiss` run without reading the page, so an open dialog cannot block its own resolution.
+
 By default, `alert` and `beforeunload` dialogs are automatically accepted so they do not block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` or `AGENT_BROWSER_NO_AUTO_DIALOG=1` to disable automatic handling.
 
 When a dialog is pending, command responses include a `warning` field with the dialog type and message so agents can recover with `dialog accept` or `dialog dismiss`.
