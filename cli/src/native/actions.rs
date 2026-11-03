@@ -3982,6 +3982,11 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
             }
         }
     };
+    if let Some(mgr) = &state.browser {
+        if !mgr.bound_target_is_gone() {
+            mgr.prepare_active_rendering().await?;
+        }
+    }
     if established {
         if let Some(err) = maybe_persist_tab_binding(state) {
             // Strict pinning is only as durable as the binding file: fail

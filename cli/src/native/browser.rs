@@ -773,6 +773,7 @@ impl BrowserManager {
             self.active_page_index = 0;
             self.bind_active_target();
             self.enable_domains(&attach_result.session_id).await?;
+            self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
@@ -839,7 +840,14 @@ impl BrowserManager {
         let target_id = self.active_target_id()?.to_string();
         self.ensure_renderer_alive(&session_id, &target_id, None)
             .await?;
-        self.enable_domains(&session_id).await
+        self.enable_domains(&session_id).await?;
+        self.prepare_active_rendering().await
+    }
+
+    pub(crate) async fn prepare_active_rendering(&self) -> Result<(), String> {
+        let session = self.active_session_id()?;
+        self.prepare_automation_rendering(Some(session)).await;
+        Ok(())
     }
 
     pub async fn prepare_domains_pub(&self, session_id: &str) -> Result<(), String> {
@@ -893,7 +901,6 @@ impl BrowserManager {
 
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
         self.prepare_domains(session_id).await?;
-        self.prepare_automation_rendering(Some(session_id)).await;
         self.resume_if_waiting(session_id).await?;
         Ok(())
     }
@@ -1641,6 +1648,7 @@ impl BrowserManager {
         self.active_page_index = 0;
         self.bind_active_target();
         self.enable_domains(&attach_result.session_id).await?;
+        self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
 
         Ok(())
     }
@@ -1800,6 +1808,7 @@ impl BrowserManager {
             .await?;
 
         self.enable_domains(&attach.session_id).await?;
+        self.prepare_automation_rendering(Some(&attach.session_id)).await;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -1855,6 +1864,7 @@ impl BrowserManager {
                 )
             })?;
         self.enable_domains(&session_id).await?;
+        self.prepare_automation_rendering(Some(&session_id)).await;
         self.active_page_index = index;
         // An explicit switch re-binds the session and clears any tab_gone.
         self.bind_active_target();
