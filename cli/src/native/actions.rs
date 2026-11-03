@@ -4010,6 +4010,13 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
         }
     };
     if established {
+        if let Some(mgr) = &state.browser {
+            if !mgr.bound_target_is_gone() {
+                mgr.prepare_active_rendering().await?;
+            }
+        }
+    }
+    if established {
         if let Some(err) = maybe_persist_tab_binding(state) {
             // Strict pinning is only as durable as the binding file: fail
             // the attach instead of pretending the pin is in place.
@@ -4689,7 +4696,14 @@ async fn auto_launch(
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5314,6 +5328,7 @@ async fn reconcile_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
+    let mut continuation = super::sensitive::InventoryContinuation::default();
     loop {
         state
             .observation_progress
@@ -5331,36 +5346,40 @@ async fn reconcile_sensitive_tab(
                 super::sensitive::UNSUPPORTED
             ));
         }
-        let gap =
-            match super::sensitive::observe_inventory(&mgr.client, session, &state.iframe_sessions)
-                .await
-            {
-                Ok(observation) => {
-                    state.active_iframe_sessions = observation.frame_sessions.clone();
-                    return Ok(observation);
-                }
-                Err(super::sensitive::InventoryError::Coverage(gap)) => gap,
-                Err(super::sensitive::InventoryError::Changed(_)) => {
-                    state
-                        .observation_progress
-                        .clone()
-                        .track(
-                            super::observation_progress::Phase::DrainEvents,
-                            state.drain_cdp_events_background(),
-                        )
-                        .await?;
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                Err(error) => return Err(error.into_message()),
-            };
+        let gap = match super::sensitive::observe_inventory_continued(
+            &mgr.client,
+            session,
+            &state.iframe_sessions,
+            &mut continuation,
+        )
+        .await
+        {
+            Ok(observation) => {
+                state.active_iframe_sessions = observation.frame_sessions.clone();
+                return Ok(observation);
+            }
+            Err(super::sensitive::InventoryError::Coverage(gap)) => gap,
+            Err(super::sensitive::InventoryError::Changed(_)) => {
+                state
+                    .observation_progress
+                    .clone()
+                    .track(
+                        super::observation_progress::Phase::DrainEvents,
+                        state.drain_cdp_events_background(),
+                    )
+                    .await?;
+                tokio::task::yield_now().await;
+                continue;
+            }
+            Err(error) => return Err(error.into_message()),
+        };
         recover_sensitive_frames(state, gap).await?;
         tokio::task::yield_now().await;
     }
 }
 
-/// Recover only the already-proven coverage gap. The caller discards its failed
-/// projection and inventories again; no duplicate throwaway observation is needed.
+/// Recover only the already-proven coverage gap. The caller continues its read
+/// after attachment, retaining unchanged documents but rereading control values.
 async fn recover_sensitive_frames(
     state: &mut DaemonState,
     gap: super::sensitive::CoverageGap,
@@ -5869,7 +5888,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5886,7 +5912,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+            state
+                .browser
+                .as_ref()
+                .ok_or("Browser not attached")?
+                .prepare_active_rendering()
+                .await?;
+        }
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -6504,6 +6537,7 @@ async fn protected_snapshot_observation(
                     state.drain_cdp_events_background(),
                 )
                 .await?;
+            let mut continuation = super::sensitive::InventoryContinuation::default();
             loop {
                 progress
                     .track(
@@ -6537,6 +6571,7 @@ async fn protected_snapshot_observation(
                     frame,
                     &state.iframe_sessions,
                     &private_observation,
+                    &mut continuation,
                 )
                 .await
                 {
@@ -15020,6 +15055,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_attach_defers_rendering_without_established_binding() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        state.session_id = format!("render-scope-{}", std::process::id());
+        state.browser = Some(fixture.manager);
+        assert!(!apply_tab_binding_on_attach_or_rollback(&mut state).await.unwrap());
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert!(!command["method"].as_str().unwrap().starts_with("Emulation."));
+        }
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_observation_stabilization_handles_successive_new_frames() {
         let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
         fixture
@@ -15799,14 +15849,133 @@ mod tests {
                 attached += 1;
             }
         }
-        // One discarded incomplete inventory and one complete snapshot, with
-        // no duplicate getter inventory before/after the known coverage gap.
-        assert_eq!((deep, attached), (6, 2));
+        // Recovery continues the same read of the unchanged main document and
+        // first child; only the two newly attached child documents need reading.
+        assert_eq!((deep, attached), (4, 2));
         client.settle_object_cleanup().await.unwrap();
         assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
         assert_eq!(client.pending_len().await, 0);
         client.close().await;
         fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_protected_inventory_continuation_rereads_new_or_newly_private_controls() {
+        for inserted in [false, true] {
+            let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+            let client = fixture.manager.client.clone();
+            let session = fixture.manager.active_session_id().unwrap().to_owned();
+            let mut state = DaemonState::new();
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                configure_snapshot_fixture_graph(&mut inventory, &mut state, 1, |n| {
+                    if n == 0 {
+                        vec![1]
+                    } else {
+                        vec![]
+                    }
+                });
+                if !inserted {
+                    inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"][0]
+                        ["children"][0]["children"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(
+                            json!({"nodeName":"INPUT","backendNodeId":99,"attributes":["type","text"]}),
+                        );
+                }
+            }
+            state.iframe_sessions.remove("frame-1");
+            let mut continuation = super::super::sensitive::InventoryContinuation::default();
+            let mut refs = RefMap::new();
+            let first = snapshot::take_snapshot_with_observation(
+                &client,
+                &session,
+                &SnapshotOptions::default(),
+                &mut refs,
+                None,
+                &state.iframe_sessions,
+                &super::super::sensitive::Observation::default(),
+                &mut continuation,
+            )
+            .await;
+            assert!(matches!(
+                first,
+                Err(super::super::sensitive::InventoryError::Coverage(_))
+            ));
+            assert!(refs.entries_sorted().is_empty());
+            {
+                let mut inventory = fixture.frame_inventory.lock().unwrap();
+                let children = inventory.documents.get_mut("synthetic-top").unwrap()["root"]
+                    ["children"][0]["children"][0]["children"]
+                    .as_array_mut()
+                    .unwrap();
+                let private =
+                    json!({"nodeName":"INPUT","backendNodeId":99,"attributes":["type","password"]});
+                if inserted {
+                    children.push(private);
+                } else {
+                    *children
+                        .iter_mut()
+                        .find(|n| n["backendNodeId"] == 99)
+                        .unwrap() = private;
+                }
+                let nodes = inventory.ax_trees.get_mut("synthetic-top").unwrap()["nodes"]
+                    .as_array_mut()
+                    .unwrap();
+                nodes[0]["childIds"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("new-private"));
+                nodes.push(json!({"nodeId":"new-private","ignored":false,
+                        "role":{"type":"role","value":"textbox"},
+                        "name":{"type":"computedString","value":"new-private"},
+                        "value":{"type":"string","value":format!("Synthetic-{session}-99")},
+                        "backendDOMNodeId":99}));
+            }
+            client
+                .send_command(
+                    "Fixture.emit",
+                    Some(json!({"event":{
+                        "method": if inserted {"DOM.childNodeInserted"} else {"DOM.attributeModified"},
+                        "sessionId":session,"params":{"nodeId":99}
+                    }})),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(client.dom_revision(&session) > 0);
+            state
+                .iframe_sessions
+                .insert("frame-1".into(), "session-1".into());
+            let (tree, _) = snapshot::take_snapshot_with_observation(
+                &client,
+                &session,
+                &SnapshotOptions::default(),
+                &mut refs,
+                None,
+                &state.iframe_sessions,
+                &super::super::sensitive::Observation::default(),
+                &mut continuation,
+            )
+            .await
+            .unwrap();
+            assert!(tree.contains("new-private"));
+            assert!(tree.contains("[redacted: password]"));
+            assert!(!tree.contains("Synthetic-"));
+            let mut main_reads = 0;
+            while let Ok(command) = fixture.commands.try_recv() {
+                if command["method"] == "DOM.getDocument"
+                    && command["sessionId"] == session
+                    && command["params"]["depth"] == super::super::sensitive::PIERCE_LAYER_DEPTH
+                {
+                    main_reads += 1;
+                }
+            }
+            assert_eq!(main_reads, 2, "mutated documents must be fetched again");
+            client.close().await;
+            fixture.server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -17643,7 +17812,12 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("sensitive object cleanup unavailable"));
-        assert!(fixture.commands.try_recv().is_err());
+        let mut retried = false;
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert_eq!(command["method"], "Runtime.releaseObjectGroup");
+            retried = true;
+        }
+        assert!(retried, "failed cleanup must retry without reading new page data");
         let info = execute_command(
             &json!({"id":"cleanup-error-metadata","action":"session_info"}),
             &mut state,

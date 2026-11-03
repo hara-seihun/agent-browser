@@ -245,6 +245,7 @@ pub async fn take_snapshot(
         frame_id,
         iframe_sessions,
         &super::sensitive::Observation::default(),
+        &mut super::sensitive::InventoryContinuation::default(),
     )
     .await
     .map(|(output, _)| output)
@@ -258,12 +259,16 @@ pub(crate) async fn take_snapshot_with_observation(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
     private_observation: &super::sensitive::Observation,
+    continuation: &mut super::sensitive::InventoryContinuation,
 ) -> Result<(String, super::sensitive::Observation), super::sensitive::InventoryError> {
-    let (mut observation, batch) =
-        super::sensitive::observe_with(client, session_id, iframe_sessions, |context| {
-            collect_snapshot_batch(client, options, frame_id, context)
-        })
-        .await?;
+    let (mut observation, batch) = super::sensitive::observe_with_continuation(
+        client,
+        session_id,
+        iframe_sessions,
+        continuation,
+        |context| collect_snapshot_batch(client, options, frame_id, context),
+    )
+    .await?;
     observation.inherit_private(private_observation);
     let root = frame_id.unwrap_or(&batch.context.top_frame);
     let mut candidate_refs = ref_map.clone();

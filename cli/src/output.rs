@@ -2488,7 +2488,8 @@ Settings:
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
-        [reduced-motion]     Enable reduced motion
+        [reduced-motion]     Reduced motion is enabled by default
+        [no-reduced-motion]  Disable reduced motion
 
 Global Options:
   --json               Output as JSON
@@ -3988,7 +3989,7 @@ Mouse:  agent-browser mouse <action> [args]
 Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>
   offline [on|off], headers <json>, credentials <user> <pass>
-  media [dark|light] [reduced-motion]
+  media [dark|light] [reduced-motion|no-reduced-motion]
 
 Network:  agent-browser network <action>
   route <url> [--abort|--body <json>] [--resource-type <csv>]

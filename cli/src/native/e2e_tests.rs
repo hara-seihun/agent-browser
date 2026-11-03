@@ -11575,3 +11575,70 @@ async fn e2e_checkout_plain_fill_beside_secrets() {
         &sensitive_test_command(&json!({"id":"close","action":"close"}), &mut state).await,
     );
 }
+
+/// Cooperative typewriter UI started after binding can skip background rAF
+/// without focusing its real tab or collecting any screenshots. The other tab keeps
+/// actual keyboard focus. Explicit media choices survive later setup.
+#[tokio::test]
+#[ignore]
+async fn e2e_background_tab_rendering_defaults_do_not_steal_foreground() {
+    use super::browser::BrowserManager;
+    use super::cdp::chrome::LaunchOptions;
+
+    let mut host = BrowserManager::launch(
+        LaunchOptions {
+            headless: false,
+            args: vec!["--no-sandbox".into()],
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    async {
+        let a_target = host.active_target_id().unwrap().to_owned();
+        let a_session = host.active_session_id().unwrap().to_owned();
+        host.set_emulated_media(None, Some(vec![("prefers-reduced-motion".into(), "no-preference".into())])).await.unwrap();
+        host.client.send_command("Emulation.setFocusEmulationEnabled", Some(json!({"enabled":false})), Some(&a_session)).await.unwrap();
+        host.evaluate(r#"document.body.innerHTML = '<p aria-live="polite">The complete response</p><p id="visible"></p><button hidden>Continue</button>';
+            window.ticks = 0;
+            const motion = matchMedia('(prefers-reduced-motion: reduce)');
+            const finish = () => { document.querySelector('#visible').textContent = 'The complete response'; document.querySelector('button').hidden = false; };
+            function tick() { ticks++; if (motion.matches) finish(); else requestAnimationFrame(tick); }
+            motion.addEventListener('change', () => { if (motion.matches) finish(); });
+            window.startChat = () => { if (motion.matches) finish(); else requestAnimationFrame(tick); };
+            startChat(); 'ready'"#, None).await.unwrap();
+        host.tab_new(Some("data:text/html,<p>Other worker</p>"), None).await.unwrap();
+        let b_session = host.active_session_id().unwrap().to_owned();
+        host.bring_to_front().await.unwrap();
+        // Inspect real focus rather than the emulated value on the sentinel tab.
+        host.client.send_command("Emulation.setFocusEmulationEnabled", Some(json!({"enabled":false})), Some(&b_session)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let ticks = host.evaluate_in_session(&a_session, "ticks", None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(host.evaluate_in_session(&a_session, "ticks", None).await.unwrap(), ticks, "background rAF should be suspended in the reproducer");
+        assert_eq!(host.evaluate_in_session(&a_session, "document.querySelector('button').hidden", None).await.unwrap(), json!(true));
+        assert_eq!(host.evaluate("document.hasFocus()", None).await.unwrap(), json!(true));
+
+        // A fresh pinned client restores A without an explicit tab switch.
+        let mut observer = BrowserManager::connect_cdp(host.get_cdp_url()).await.unwrap();
+        observer.set_pin_tab(true);
+        assert!(observer.restore_target_binding(&a_target, ""));
+        host.client.send_command("Emulation.setFocusEmulationEnabled", Some(json!({"enabled":false})), Some(&b_session)).await.unwrap();
+        observer.revive_and_enable_active().await.unwrap();
+        assert_eq!(observer.active_target_id().unwrap(), a_target);
+        // The preference is available synchronously to scripts started after
+        // binding/navigation. Existing suspended rAF/media-change callbacks are
+        // intentionally not presented as recovered by focus emulation alone.
+        observer.evaluate("startChat()", None).await.unwrap();
+        assert_eq!(observer.evaluate("document.querySelector('button').hidden", None).await.unwrap(), json!(false));
+        assert_eq!(observer.evaluate("document.querySelector('#visible').textContent", None).await.unwrap(), json!("The complete response"));
+        assert_eq!(observer.evaluate("document.hasFocus()", None).await.unwrap(), json!(true));
+        assert_eq!(host.evaluate("document.hasFocus()", None).await.unwrap(), json!(true), "rendering setup must not foreground A");
+        observer.set_emulated_media(None, Some(vec![("prefers-reduced-motion".into(), "no-preference".into())])).await.unwrap();
+        observer.revive_and_enable_active().await.unwrap();
+        assert_eq!(observer.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches", None).await.unwrap(), json!(false));
+        observer.close().await.unwrap();
+    }.await;
+    host.close().await.unwrap();
+}

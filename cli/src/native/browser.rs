@@ -435,6 +435,9 @@ pub struct BrowserManager {
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
     headless: bool,
+    /// Rendering defaults are applied once per CDP session, never on another
+    /// tab merely because it appears in the target list.
+    rendering_prepared: Mutex<HashSet<String>>,
 }
 
 /// Stable machine-readable prefix for "the bound tab no longer exists"
@@ -458,6 +461,22 @@ const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILED_INITIALIZATION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Media commands retain automation's reduced-motion default unless the caller
+/// explicitly chooses another value, including `no-preference`.
+fn automation_media_features(features: Option<Vec<(String, String)>>) -> Vec<Value> {
+    let mut features = features.unwrap_or_default();
+    if !features
+        .iter()
+        .any(|(name, _)| name == "prefers-reduced-motion")
+    {
+        features.push(("prefers-reduced-motion".into(), "reduce".into()));
+    }
+    features
+        .into_iter()
+        .map(|(name, value)| json!({"name": name, "value": value}))
+        .collect()
+}
 
 impl BrowserManager {
     pub fn take_initial_events(&mut self) -> broadcast::Receiver<CdpEvent> {
@@ -555,6 +574,7 @@ impl BrowserManager {
                 bound_target_id: None,
                 bound_target_gone: None,
                 headless,
+                rendering_prepared: Mutex::new(HashSet::new()),
             };
             if let Err(error) = manager.discover_and_attach_targets().await {
                 let _ = manager
@@ -599,11 +619,9 @@ impl BrowserManager {
 
         if let Some(ref scheme) = color_scheme {
             let _ = manager
-                .client
-                .send_command(
-                    "Emulation.setEmulatedMedia",
-                    Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
-                    Some(&session_id),
+                .set_emulated_media(
+                    None,
+                    Some(vec![("prefers-color-scheme".into(), scheme.clone())]),
                 )
                 .await;
         }
@@ -663,6 +681,7 @@ impl BrowserManager {
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
+            rendering_prepared: Mutex::new(HashSet::new()),
         };
 
         let initialization = if direct_page {
@@ -754,6 +773,7 @@ impl BrowserManager {
             self.active_page_index = 0;
             self.bind_active_target();
             self.enable_domains(&attach_result.session_id).await?;
+            self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
@@ -820,7 +840,14 @@ impl BrowserManager {
         let target_id = self.active_target_id()?.to_string();
         self.ensure_renderer_alive(&session_id, &target_id, None)
             .await?;
-        self.enable_domains(&session_id).await
+        self.enable_domains(&session_id).await?;
+        self.prepare_active_rendering().await
+    }
+
+    pub(crate) async fn prepare_active_rendering(&self) -> Result<(), String> {
+        let session = self.active_session_id()?;
+        self.prepare_automation_rendering(Some(session)).await;
+        Ok(())
     }
 
     pub async fn prepare_domains_pub(&self, session_id: &str) -> Result<(), String> {
@@ -1039,8 +1066,42 @@ impl BrowserManager {
             .await
     }
 
+    /// Keep visibility-sensitive UI usable without activating a browser tab.
+    /// Reduced motion lets cooperative apps skip typewriter/transition UI
+    /// initialized after binding, even when Chrome suspends animation frames.
+    /// Existing rAF and media-change callbacks may remain suspended.
+    /// Optional emulation support must not gate protected DOM observation.
+    async fn prepare_automation_rendering(&self, session_id: Option<&str>) {
+        let first_setup = self
+            .rendering_prepared
+            .lock()
+            .await
+            .insert(session_id.unwrap_or_default().to_owned());
+        if !first_setup {
+            return;
+        }
+        let (focus, motion) = tokio::join!(
+            self.client.send_command(
+                "Emulation.setFocusEmulationEnabled",
+                Some(json!({"enabled": true})),
+                session_id,
+            ),
+            self.client.send_command(
+                "Emulation.setEmulatedMedia",
+                Some(json!({"features": automation_media_features(None)})),
+                session_id,
+            ),
+        );
+        for (name, result) in [("focus", focus), ("reduced motion", motion)] {
+            if let Err(error) = result {
+                eprintln!("Automation {name} emulation unavailable: {error}");
+            }
+        }
+    }
+
     /// Enable domains on a direct page connection (no session_id needed).
     async fn enable_domains_direct(&self) -> Result<(), String> {
+        self.prepare_automation_rendering(None).await;
         self.client
             .send_command_no_params("Page.enable", None)
             .await?;
@@ -1587,6 +1648,7 @@ impl BrowserManager {
         self.active_page_index = 0;
         self.bind_active_target();
         self.enable_domains(&attach_result.session_id).await?;
+        self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
 
         Ok(())
     }
@@ -1746,6 +1808,7 @@ impl BrowserManager {
             .await?;
 
         self.enable_domains(&attach.session_id).await?;
+        self.prepare_automation_rendering(Some(&attach.session_id)).await;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -1801,6 +1864,7 @@ impl BrowserManager {
                 )
             })?;
         self.enable_domains(&session_id).await?;
+        self.prepare_automation_rendering(Some(&session_id)).await;
         self.active_page_index = index;
         // An explicit switch re-binds the session and clears any tab_gone.
         self.bind_active_target();
@@ -2003,13 +2067,7 @@ impl BrowserManager {
         if let Some(m) = media {
             params["media"] = Value::String(m.to_string());
         }
-        if let Some(feats) = features {
-            let features_arr: Vec<Value> = feats
-                .iter()
-                .map(|(name, value)| json!({ "name": name, "value": value }))
-                .collect();
-            params["features"] = Value::Array(features_arr);
-        }
+        params["features"] = Value::Array(automation_media_features(features));
         self.client
             .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
             .await?;
@@ -2506,6 +2564,7 @@ async fn initialize_lightpanda_manager(
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
+            rendering_prepared: Mutex::new(HashSet::new()),
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -2613,6 +2672,71 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_automation_media_defaults_preserve_explicit_motion() {
+        assert_eq!(
+            automation_media_features(None),
+            vec![json!({"name":"prefers-reduced-motion","value":"reduce"})]
+        );
+        let features =
+            automation_media_features(Some(vec![("prefers-color-scheme".into(), "dark".into())]));
+        assert!(features.contains(&json!({"name":"prefers-color-scheme","value":"dark"})));
+        assert!(features.contains(&json!({"name":"prefers-reduced-motion","value":"reduce"})));
+        assert_eq!(
+            automation_media_features(Some(vec![(
+                "prefers-reduced-motion".into(),
+                "no-preference".into()
+            )])),
+            vec![json!({"name":"prefers-reduced-motion","value":"no-preference"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_automation_rendering_optional_rejection_is_scoped_and_once() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                let Some(Ok(Message::Text(text))) = ws.next().await else {
+                    panic!("expected emulation command")
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(command["sessionId"], "session-1");
+                assert!(command["method"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Emulation."));
+                ws.send(Message::Text(
+                    json!({"id":command["id"],"error":{"code":-32601,"message":"unsupported"}})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+                commands.push(command);
+            }
+            commands
+        });
+        let mut manager = test_manager(vec![
+            page(1, "A", "about:blank"),
+            page(2, "B", "about:blank"),
+        ])
+        .await;
+        manager.client = Arc::new(CdpClient::connect(&format!("ws://{}", addr)).await.unwrap());
+        manager
+            .prepare_automation_rendering(Some("session-1"))
+            .await;
+        manager
+            .prepare_automation_rendering(Some("session-1"))
+            .await;
+        assert_eq!(server.await.unwrap().len(), 2);
+        assert_eq!(manager.active_target_id().unwrap(), "A");
+    }
 
     #[test]
     fn test_format_tab_id() {
@@ -3229,6 +3353,7 @@ mod tests {
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
+            rendering_prepared: Mutex::new(HashSet::new()),
         }
     }
 
@@ -3275,6 +3400,7 @@ mod tests {
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
+            rendering_prepared: Mutex::new(HashSet::new()),
         };
 
         manager
@@ -3339,6 +3465,7 @@ mod tests {
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
+            rendering_prepared: Mutex::new(HashSet::new()),
         };
         manager.close().await.unwrap();
 

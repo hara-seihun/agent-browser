@@ -42,6 +42,34 @@ impl Drop for RemoteObjectGroup {
     }
 }
 
+enum CommandError {
+    Transport(String),
+    Protocol { method: String, error: CdpError },
+}
+
+impl From<String> for CommandError {
+    fn from(error: String) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => f.write_str(error),
+            Self::Protocol { method, error } => write!(f, "CDP error ({}): {}", method, error),
+        }
+    }
+}
+
+impl CommandError {
+    fn is_missing_session(&self) -> bool {
+        matches!(self, Self::Protocol { method, error }
+            if method == "Runtime.releaseObjectGroup" && error.code == Some(-32001)
+                && error.message == "Session with given id not found.")
+    }
+}
+
 enum ObjectCleanupState {
     Running(JoinHandle<Result<(), String>>),
     Complete,
@@ -68,6 +96,44 @@ type WsTx = Arc<
 
 /// Sessions whose events go to one private receiver instead of the broadcast.
 type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEvent>>>>;
+
+type DomRevisions = Arc<std::sync::Mutex<HashMap<String, u64>>>;
+
+fn record_dom_event(revisions: &DomRevisions, method: &str, session: Option<&str>) {
+    if method.starts_with("DOM.") && method != "DOM.setChildNodes" {
+        let mut revisions = revisions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = session {
+            let revision = revisions.entry(session.to_owned()).or_default();
+            *revision = revision.saturating_add(1);
+        } else {
+            for revision in revisions.values_mut() {
+                *revision = revision.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn invalidate_dom_revisions(revisions: &DomRevisions) {
+    for revision in revisions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values_mut()
+    {
+        *revision = revision.saturating_add(1);
+    }
+}
+
+fn broadcast_raw(raw_tx: &broadcast::Sender<RawCdpMessage>, msg: &str) {
+    if raw_tx.receiver_count() > 0 {
+        let session_id = parse_cdp::<serde_json::Value>(msg)
+            .ok()
+            .and_then(|v| v.get("sessionId")?.as_str().map(String::from));
+        let _ = raw_tx.send(RawCdpMessage {
+            text: msg.to_owned(),
+            session_id,
+        });
+    }
+}
 
 /// Events buffered for a private session receiver that has fallen behind.
 /// Newer events are dropped once it is full; a screencast consumer that
@@ -209,6 +275,7 @@ pub struct CdpClient {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
+    dom_revisions: DomRevisions,
     object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
     next_object_group: AtomicU64,
     pub(crate) observation_progress: super::super::observation_progress::ObservationProgress,
@@ -309,12 +376,14 @@ impl CdpClient {
         let closed = Arc::new(AtomicBool::new(false));
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let dom_revisions: DomRevisions = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
         let closed_reader = closed.clone();
         let private_clone = private_sessions.clone();
+        let dom_revisions_reader = dom_revisions.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -351,18 +420,6 @@ impl CdpClient {
                     }
                 };
 
-                // Broadcast raw message for inspect proxy subscribers before typed parse,
-                // so messages with negative IDs (used by the inspect proxy) are still delivered.
-                if raw_tx_clone.receiver_count() > 0 {
-                    let session_id = parse_cdp::<serde_json::Value>(&msg)
-                        .ok()
-                        .and_then(|v| v.get("sessionId")?.as_str().map(String::from));
-                    let _ = raw_tx_clone.send(RawCdpMessage {
-                        text: msg.clone(),
-                        session_id,
-                    });
-                }
-
                 let parsed: CdpMessage = match parse_cdp(&msg) {
                     Ok(parsed) => parsed,
                     Err(_) => {
@@ -391,11 +448,25 @@ impl CdpClient {
                                         });
                                     }
                                 }
+                                invalidate_dom_revisions(&dom_revisions_reader);
+                                // Even malformed messages remain visible to the inspect proxy.
+                                broadcast_raw(&raw_tx_clone, &msg);
                                 continue;
                             }
                         }
                     }
                 };
+
+                if parsed.id.is_none() {
+                    if let Some(method) = parsed.method.as_deref() {
+                        record_dom_event(
+                            &dom_revisions_reader,
+                            method,
+                            parsed.session_id.as_deref(),
+                        );
+                    }
+                }
+                broadcast_raw(&raw_tx_clone, &msg);
 
                 if let Some(id) = parsed.id {
                     // Response to a command
@@ -476,11 +547,21 @@ impl CdpClient {
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
+            dom_revisions,
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
             observation_progress: super::super::observation_progress::ObservationProgress::default(
             ),
         })
+    }
+
+    pub(crate) fn dom_revision(&self, session: &str) -> u64 {
+        *self
+            .dom_revisions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(session.to_owned())
+            .or_default()
     }
 
     fn ensure_open(&self) -> Result<(), String> {
@@ -540,9 +621,7 @@ impl CdpClient {
             .values()
             .any(|cleanup| matches!(cleanup.state, ObjectCleanupState::Failed))
         {
-            return Err(
-                "Sensitive object cleanup unavailable; close the browser connection".into(),
-            );
+            return Err("Sensitive object cleanup unavailable; retry the observation".into());
         }
         let client = self.clone();
         let cleanup_group = group.clone();
@@ -591,14 +670,25 @@ impl CdpClient {
                     }
                 }
                 ObjectCleanupState::Complete => complete.push(*id),
-                ObjectCleanupState::Failed => failed = true,
+                ObjectCleanupState::Failed => {
+                    if self
+                        .release_object_group(&cleanup.group, &cleanup.sessions)
+                        .await
+                        .is_ok()
+                    {
+                        cleanup.state = ObjectCleanupState::Complete;
+                        complete.push(*id);
+                    } else {
+                        failed = true;
+                    }
+                }
             }
         }
         for id in complete {
             groups.remove(&id);
         }
         if failed {
-            Err("Sensitive object cleanup unavailable; close the browser connection".into())
+            Err("Sensitive object cleanup unavailable; retry the observation".into())
         } else {
             Ok(())
         }
@@ -615,7 +705,12 @@ impl CdpClient {
                 )
             }))
             .await;
-            if outcomes.iter().all(Result::is_ok) {
+            if outcomes.iter().all(|outcome| {
+                outcome
+                    .as_ref()
+                    .map(|_| true)
+                    .unwrap_or_else(|error| error.is_missing_session())
+            }) {
                 Ok(())
             } else {
                 Err("Sensitive object cleanup unavailable".into())
@@ -661,6 +756,7 @@ impl CdpClient {
     ) -> Result<Value, String> {
         self.send_command_internal(method, params, session_id, false)
             .await
+            .map_err(|error| error.to_string())
     }
 
     async fn send_command_internal(
@@ -669,7 +765,7 @@ impl CdpClient {
         params: Option<Value>,
         session_id: Option<&str>,
         cleanup_while_closing: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let cmd = CdpCommand {
@@ -702,7 +798,7 @@ impl CdpClient {
             if let Err(error) = ws_tx.send(Message::Text(json)).await {
                 self.pending.lock().await.remove(&id);
                 guard.done = true;
-                return Err(format!("Failed to send CDP command: {}", error));
+                return Err(format!("Failed to send CDP command: {}", error).into());
             }
         }
 
@@ -713,17 +809,20 @@ impl CdpClient {
             }
             Ok(Err(_)) => {
                 guard.done = true;
-                return Err("CDP response channel closed".to_string());
+                return Err("CDP response channel closed".to_string().into());
             }
             Err(_) => {
                 guard.done = true;
                 self.pending.lock().await.remove(&id);
-                return Err(format!("CDP command timed out: {}", method));
+                return Err(format!("CDP command timed out: {}", method).into());
             }
         };
 
         if let Some(error) = response.error {
-            return Err(format!("CDP error ({}): {}", method, error));
+            return Err(CommandError::Protocol {
+                method: method.to_owned(),
+                error,
+            });
         }
 
         Ok(response.result.unwrap_or(Value::Null))
@@ -918,6 +1017,69 @@ mod tests {
 
     const TEST_CERT_DER: &str = "MIIBPDCB46ADAgECAgkA9xwXmIhbzQIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgzMDA1NTU0NFoXDTM2MDgyNzA1NTU0NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQdmPO0sXXFRmVn7+8MViXGom2rYy8aV3Oc0pNZhUmFGaPl4MRFzc1G0yaV/WRBPF/BUh2LGsXCvUsn7NqaYkFaMeMBwwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0gAMEUCIQC32oureGNAupABEmonQPAQBD7OdJjXmUxoVQNr0UB+6AIgb23GMwxTjwHyLG4tZcJST7r3cCW8K/Y+1h618j2f+Uw=";
     const TEST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIVZST8Vhc5f3OW+4kF78f8o1nQCRwjW/Yo8CXQ35Y9uhRANCAARB2Y87SxdcVGZWfv7wxWJcaibatjLxpXc5zSk1mFSYUZo+XgxEXNzUbTJpX9ZEE8X8FSHYsaxcK9Syfs2ppiQV";
+
+    #[test]
+    fn dom_revisions_track_mutations_per_session() {
+        let revisions: DomRevisions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let get = |session: &str| revisions.lock().unwrap().get(session).copied().unwrap_or(0);
+        assert_eq!(get("a"), 0);
+        record_dom_event(&revisions, "DOM.childNodeInserted", Some("a"));
+        record_dom_event(&revisions, "DOM.attributeModified", Some("a"));
+        record_dom_event(&revisions, "DOM.documentUpdated", Some("b"));
+        record_dom_event(&revisions, "DOM.setChildNodes", Some("a"));
+        record_dom_event(&revisions, "Page.frameNavigated", Some("b"));
+        record_dom_event(&revisions, "DOM.documentUpdated", None);
+        assert_eq!(get("a"), 3);
+        assert_eq!(get("b"), 2);
+        assert_eq!(get("c"), 0);
+        invalidate_dom_revisions(&revisions);
+        assert_eq!(get("a"), 4);
+        assert_eq!(get("b"), 3);
+    }
+
+    #[tokio::test]
+    async fn object_cleanup_retries_and_only_accepts_proven_missing_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut calls = 0;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let cmd: Value = serde_json::from_str(&text).unwrap();
+                if cmd["method"] != "Runtime.releaseObjectGroup" {
+                    continue;
+                }
+                calls += 1;
+                let response = match calls {
+                    // First group: transient error, then success.
+                    1 => json!({"id":cmd["id"], "error":{"code":-32000,"message":"temporary"}}),
+                    2 => json!({"id":cmd["id"], "result":{}}),
+                    // A detached session is already cleaned by Chrome.
+                    3 => {
+                        json!({"id":cmd["id"], "error":{"code":-32001,"message":"Session with given id not found."}})
+                    }
+                    // Similar text with the wrong code must remain unresolved.
+                    _ => {
+                        json!({"id":cmd["id"], "error":{"code":-32000,"message":"Session with given id not found."}})
+                    }
+                };
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        drop(client.object_group(vec!["live".into()]).await.unwrap());
+        assert!(client.settle_object_cleanup().await.is_err());
+        assert!(client.settle_object_cleanup().await.is_ok());
+        drop(client.object_group(vec!["detached".into()]).await.unwrap());
+        assert!(client.settle_object_cleanup().await.is_ok());
+        drop(client.object_group(vec!["live".into()]).await.unwrap());
+        assert!(client.settle_object_cleanup().await.is_err());
+        assert!(client.settle_object_cleanup().await.is_err());
+        assert!(client.object_group(vec!["live".into()]).await.is_err());
+        client.close().await;
+        server.abort();
+    }
 
     #[test]
     fn repairs_only_unpaired_surrogate_escapes() {

@@ -326,7 +326,7 @@ agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
-agent-browser set media [dark|light]  # Emulate color scheme
+agent-browser set media [dark|light]  # Emulate color scheme; reduced motion is the default (`no-reduced-motion` disables it)
 ```
 
 `set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.

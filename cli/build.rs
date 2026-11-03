@@ -21,7 +21,8 @@ fn ensure_dashboard_dir() {
 /// The daemon identity is the package version plus the source commit, so a
 /// rebuilt binary at the same package version still replaces daemons that
 /// run older code. Builds outside a Git checkout (published npm sources)
-/// are identified by the package version alone.
+/// can pass AGENT_BROWSER_SOURCE_COMMIT; published npm sources otherwise use
+/// the package version alone.
 fn emit_daemon_build_identity() {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -32,7 +33,12 @@ fn emit_daemon_build_identity() {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
     let version = env::var("CARGO_PKG_VERSION").unwrap();
-    let identity = match git(&["rev-parse", "HEAD"]) {
+    println!("cargo:rerun-if-env-changed=AGENT_BROWSER_SOURCE_COMMIT");
+    let commit = env::var("AGENT_BROWSER_SOURCE_COMMIT")
+        .ok()
+        .filter(|commit| !commit.trim().is_empty())
+        .or_else(|| git(&["rev-parse", "HEAD"]));
+    let identity = match commit {
         Some(commit) => {
             for path in ["HEAD", "packed-refs"] {
                 if let Some(file) = git(&["rev-parse", "--git-path", path]) {
