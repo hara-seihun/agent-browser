@@ -11,6 +11,10 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
+    CommandAction,
+    NavigationRequest,
+    NavigationLifecycle,
+    NavigationMetadata,
     AttachmentHarvest,
     FrameSetup,
     InitialFrameTree,
@@ -53,6 +57,13 @@ struct PhaseDiagnostic {
 }
 
 impl DeadlineDiagnostic {
+    pub(crate) fn command_message(&self) -> String {
+        format!(
+            "browser command deadline elapsed: {}",
+            serde_json::to_string(self).expect("numeric command diagnostic serializes")
+        )
+    }
+
     pub(crate) fn into_message(self) -> String {
         format!(
             "{}: frame observation deadline elapsed: {}",

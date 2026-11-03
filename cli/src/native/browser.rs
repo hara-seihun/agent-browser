@@ -1231,17 +1231,18 @@ impl BrowserManager {
         let session_id = self.active_session_id()?.to_string();
         let mut lifecycle_rx = self.client.subscribe();
 
-        let nav_result: PageNavigateResult = self
-            .client
-            .send_command_typed(
+        let progress = self.client.observation_progress.clone();
+        let nav_result: PageNavigateResult = progress.track(
+            super::observation_progress::Phase::NavigationRequest,
+            self.client.send_command_typed(
                 "Page.navigate",
                 &PageNavigateParams {
                     url: url.to_string(),
                     referrer: None,
                 },
                 Some(&session_id),
-            )
-            .await?;
+            ),
+        ).await?;
 
         if let Some(ref error_text) = nav_result.error_text {
             return Err(format!("Navigation failed: {}", error_text));
@@ -1251,12 +1252,20 @@ impl BrowserManager {
         // If loader_id is None, it was a same-document navigation (e.g., hash routing)
         // which does not fire Page.loadEventFired or Page.domContentEventFired.
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
-            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
-                .await?;
+            progress.track(
+                super::observation_progress::Phase::NavigationLifecycle,
+                self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx),
+            ).await?;
         }
 
-        let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
-        let title = self.get_title().await.unwrap_or_default();
+        let (page_url, title) = progress.track(
+            super::observation_progress::Phase::NavigationMetadata,
+            async {
+                let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
+                let title = self.get_title().await.unwrap_or_default();
+                (page_url, title)
+            },
+        ).await;
 
         // Track visited origin for cross-origin localStorage collection in save_state
         if let Ok(parsed) = url::Url::parse(&page_url) {

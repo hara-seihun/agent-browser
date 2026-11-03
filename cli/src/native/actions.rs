@@ -2850,7 +2850,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             }
             let mut response = error_response(id, &format!(
                 "{}; command deadline expired; dispatched effects may still settle; outcome unknown; not replayed",
-                diagnostic.into_message()));
+                diagnostic.command_message()));
+            response["diagnostic"] = json!(diagnostic);
             response["code"] = json!(
                 if matches!(action, "auth_login" | "auth_fill" | "auth_export") {
                     format!("{action}_timeout")
@@ -3458,7 +3459,10 @@ async fn execute_command_inner(
             .and_then(|session| state.sensitive_observations.get(session))
             .is_some_and(|observed| observed.has_sensitive());
 
-    let result = match action {
+    let action_progress = state.protected_observation_progress();
+    let result = action_progress.track(
+        super::observation_progress::Phase::CommandAction,
+        async { match action {
         "launch" => {
             let webmcp_enabled = cmd
                 .get("webmcp")
@@ -3660,7 +3664,7 @@ async fn execute_command_inner(
         "mousedown" => handle_mousedown(cmd, state).await,
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
-    };
+    }}).await;
 
     if action == "auth_fill"
         && cmd["credentialProvider"] == "converge-work-password-v5"
