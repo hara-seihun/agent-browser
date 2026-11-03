@@ -3631,10 +3631,10 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             } else {
                 "no-preference"
             };
-            let reduced = if rest.contains(&"reduced-motion") {
-                "reduce"
-            } else {
+            let reduced = if rest.contains(&"no-reduced-motion") {
                 "no-preference"
+            } else {
+                "reduce"
             };
             Ok(
                 json!({ "id": id, "action": "emulatemedia", "colorScheme": color, "reducedMotion": reduced }),
@@ -5737,7 +5737,17 @@ mod tests {
         let cmd = parse_command(&args("set media dark"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "dark");
+        assert_eq!(cmd["reducedMotion"], "reduce");
+    }
+
+    #[test]
+    fn test_set_media_explicit_motion_override() {
+        let cmd = parse_command(&args("set media dark no-reduced-motion"), &default_flags()).unwrap();
+        assert_eq!(cmd["colorScheme"], "dark");
         assert_eq!(cmd["reducedMotion"], "no-preference");
+        let cmd = parse_command(&args("set media no-preference"), &default_flags()).unwrap();
+        assert_eq!(cmd["colorScheme"], "no-preference");
+        assert_eq!(cmd["reducedMotion"], "reduce");
     }
 
     #[test]

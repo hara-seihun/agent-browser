@@ -3098,7 +3098,7 @@ fn set_media_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if let Some(reduced_motion) = optional_string(arguments, "reducedMotion")? {
         match reduced_motion.as_str() {
             "reduce" => args.push("reduced-motion".to_string()),
-            "no-preference" => args.push("no-preference".to_string()),
+            "no-preference" => args.push("no-reduced-motion".to_string()),
             _ => {
                 return Err(ProtocolError::invalid_params(
                     "reducedMotion must be reduce or no-preference",
@@ -4819,6 +4819,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    #[test]
+    fn set_media_args_keep_color_and_motion_preferences_independent() {
+        let args = set_media_args(&json!({"colorScheme":"no-preference", "reducedMotion":"no-preference"})).unwrap();
+        assert_eq!(args, vec!["set", "media", "no-preference", "no-reduced-motion"]);
+        let args = set_media_args(&json!({"colorScheme":"dark"})).unwrap();
+        assert_eq!(args, vec!["set", "media", "dark"]);
     }
 
     #[test]
