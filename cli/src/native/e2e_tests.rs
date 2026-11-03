@@ -11576,8 +11576,8 @@ async fn e2e_checkout_plain_fill_beside_secrets() {
     );
 }
 
-/// A background-bound chat can finish cooperative typewriter UI without
-/// focusing its real tab or collecting any screenshots. The other tab keeps
+/// Cooperative typewriter UI started after binding can skip background rAF
+/// without focusing its real tab or collecting any screenshots. The other tab keeps
 /// actual keyboard focus. Explicit media choices survive later setup.
 #[tokio::test]
 #[ignore]
@@ -11606,7 +11606,8 @@ async fn e2e_background_tab_rendering_defaults_do_not_steal_foreground() {
             const finish = () => { document.querySelector('#visible').textContent = 'The complete response'; document.querySelector('button').hidden = false; };
             function tick() { ticks++; if (motion.matches) finish(); else requestAnimationFrame(tick); }
             motion.addEventListener('change', () => { if (motion.matches) finish(); });
-            requestAnimationFrame(tick); 'ready'"#, None).await.unwrap();
+            window.startChat = () => { if (motion.matches) finish(); else requestAnimationFrame(tick); };
+            startChat(); 'ready'"#, None).await.unwrap();
         host.tab_new(Some("data:text/html,<p>Other worker</p>"), None).await.unwrap();
         let b_session = host.active_session_id().unwrap().to_owned();
         host.bring_to_front().await.unwrap();
@@ -11626,8 +11627,10 @@ async fn e2e_background_tab_rendering_defaults_do_not_steal_foreground() {
         host.client.send_command("Emulation.setFocusEmulationEnabled", Some(json!({"enabled":false})), Some(&b_session)).await.unwrap();
         observer.revive_and_enable_active().await.unwrap();
         assert_eq!(observer.active_target_id().unwrap(), a_target);
-        // Media change callbacks run asynchronously after CDP emulation.
-        observer.evaluate("new Promise(resolve => setTimeout(resolve, 0))", None).await.unwrap();
+        // The preference is available synchronously to scripts started after
+        // binding/navigation. Existing suspended rAF/media-change callbacks are
+        // intentionally not presented as recovered by focus emulation alone.
+        observer.evaluate("startChat()", None).await.unwrap();
         assert_eq!(observer.evaluate("document.querySelector('button').hidden", None).await.unwrap(), json!(false));
         assert_eq!(observer.evaluate("document.querySelector('#visible').textContent", None).await.unwrap(), json!("The complete response"));
         assert_eq!(observer.evaluate("document.hasFocus()", None).await.unwrap(), json!(true));

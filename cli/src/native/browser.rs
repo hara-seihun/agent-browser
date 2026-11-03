@@ -1060,9 +1060,9 @@ impl BrowserManager {
     }
 
     /// Keep visibility-sensitive UI usable without activating a browser tab.
-    /// Reduced motion lets cooperative apps finish typewriter/transition UI
-    /// even when Chrome suspends background animation frames. This does not
-    /// promise that arbitrary requestAnimationFrame callbacks will run.
+    /// Reduced motion lets cooperative apps skip typewriter/transition UI
+    /// initialized after binding, even when Chrome suspends animation frames.
+    /// Existing rAF and media-change callbacks may remain suspended.
     /// Optional emulation support must not gate protected DOM observation.
     async fn prepare_automation_rendering(&self, session_id: Option<&str>) {
         let mut prepared = self.rendering_prepared.lock().await;
