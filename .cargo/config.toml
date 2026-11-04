@@ -1,0 +1,4 @@
+[env]
+# Native daemon threads already use 64 MiB in main.rs. Debug async browser
+# integration tests need the same stack rather than libtest's 2 MiB default.
+RUST_MIN_STACK = "67108864"
