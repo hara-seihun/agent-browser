@@ -501,9 +501,11 @@ async fn capture_screenshot_base64(
             .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
             .await?;
 
+        // captureScreenshot clips use document CSS pixels, not the deprecated
+        // device-pixel contentSize returned alongside cssContentSize.
         let content_size = metrics
-            .get("contentSize")
-            .or_else(|| metrics.get("cssContentSize"));
+            .get("cssContentSize")
+            .or_else(|| metrics.get("contentSize"));
         if let Some(size) = content_size {
             let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
             let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
@@ -520,10 +522,15 @@ async fn capture_screenshot_base64(
         if let Some(rect) =
             get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
         {
+            let (scroll_x, scroll_y) = get_scroll_offsets(client, session_id).await?;
+            // getBoundingClientRect and sensitive masks are viewport-relative;
+            // CDP's clip is document-relative. Retain the viewport origin for
+            // masking, but translate the capture region into document CSS pixels.
             clip_origin = Some((rect.x, rect.y));
+            params.capture_beyond_viewport = Some(true);
             params.clip = Some(Viewport {
-                x: rect.x,
-                y: rect.y,
+                x: rect.x + scroll_x,
+                y: rect.y + scroll_y,
                 width: rect.width,
                 height: rect.height,
                 scale: 1.0,
