@@ -1004,7 +1004,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DOWNLOAD,
             "Download file",
-            "Click an element and save the actual download locally, including over remote CDP, without repeating the request.",
+            "Click an element and save the actual download locally, including on authenticated sensitive tabs over remote CDP, without exposing form controls or repeating the request.",
             json!({ "selector": selector_schema(), "path": { "type": "string" } }),
             &["selector", "path"],
         ),
@@ -1039,7 +1039,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_WAIT_FOR_DOWNLOAD,
             "Wait for download",
-            "Wait for a browser download.",
+            "Wait for the actual browser download and save it locally, including on sensitive authenticated tabs, without exposing form controls.",
             json!({ "path": { "type": "string", "description": "Optional output path." }, "waitTimeoutMs": wait_timeout_schema() }),
             &[],
         ),
@@ -2128,6 +2128,9 @@ fn sensitive_tool_description(name: &str) -> &'static str {
         }
         if crate::native::sensitive::masked_screenshot(action, &json!({})) {
             return "Never refused for sensitive form controls: every rendered password, card or one-time-code control the guard identifies (current, remembered or appearing during capture, including shadow roots and cross-origin iframes) is painted black before the image is written, reported as guard.maskedControls. Annotated captures still refuse on sensitive tabs. When the protected inventory cannot be taken, controls identified earlier are masked and guard.observation reports status incomplete. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
+        }
+        if matches!(action, "download" | "waitfordownload") {
+            return "Downloads save only the completed browser file, not rendered page or control contents. Sensitive authenticated tabs are supported; remembered credential values remain redacted from response metadata. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";
         }
         if crate::native::sensitive::guarded(action, &json!({})) {
             return "Native output is guarded: functional on benign tabs, but refused with SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including field removal or navigation; incomplete observation fails closed. For read, this guard applies to active-tab DOM output. Deadline errors preserve safe phase diagnostic JSON with numeric counts/timings and no DOM, URLs, IDs or control values. No bypass flag; MCP delegates to the canonical CLI, including extraArgs.";

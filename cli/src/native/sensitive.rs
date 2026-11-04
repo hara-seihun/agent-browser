@@ -1644,7 +1644,9 @@ pub fn always_denied(action: &str) -> bool {
 pub fn content_free(action: &str, cmd: &Value) -> bool {
     matches!(
         action,
-        "navigate"
+        "download"
+            | "waitfordownload"
+            | "navigate"
             | "url"
             | "title"
             | "back"
@@ -1685,15 +1687,19 @@ pub fn content_free(action: &str, cmd: &Value) -> bool {
     ) || (action == "wait" && cmd.get("expression").is_none())
 }
 
-/// Input acknowledgements contain only caller-supplied selectors/keys and static
-/// status, never page text or control values. They do not need a fresh page
-/// inventory. In particular, a click may navigate away or start a payment POST;
+/// Input and download acknowledgements contain selectors/keys, static status or
+/// completed-file metadata, never page text or control values. They do not need
+/// a fresh page inventory. Downloads transfer only the browser-created file,
+/// not a DOM export, and must not fail after saving due to a page observation.
+/// In particular, a click may navigate away or start a payment POST;
 /// renderer observation must not turn its successful dispatch into a timeout.
 /// A new-tab click also returns a page-derived href, so it still needs protection.
 pub fn input_acknowledgement(action: &str, cmd: &Value) -> bool {
     matches!(
         action,
-        "click"
+        "download"
+            | "waitfordownload"
+            | "click"
             | "dblclick"
             | "press"
             | "hover"
@@ -1731,8 +1737,6 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
             | "waitforfunction"
             | "pdf"
             | "diff_screenshot"
-            | "download"
-            | "waitfordownload"
             | "react_tree"
             | "react_inspect"
             | "react_suspense"

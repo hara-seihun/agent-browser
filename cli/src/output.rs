@@ -1953,6 +1953,7 @@ Usage: agent-browser download <selector> <path>
 Clicks an element that triggers a download and saves the file to the local path,
 even with remote CDP. The completed file is transferred without repeating the
 request; an existing destination is replaced atomically only on success.
+Authenticated sensitive tabs are supported without exporting form controls.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -3923,12 +3924,14 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
   inspect/expose, addinitscript.
   Guarded on current or remembered sensitive tabs: eval/evalhandle, addscript,
-  wait --fn, annotated screenshots/PDF/diffs, downloads, active-tab read and
+  wait --fn, annotated screenshots/PDF/diffs, active-tab read and
   browser-data output (logs/network/React/a11y/WebMCP/clipboard/storage/cookies/state).
   Guarded commands stay functional on benign tabs. Detection is sticky for the
   daemon/tab lifetime, including field removal and navigation. Refusals use
   SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes. Use protected
   snapshots/getters on sensitive tabs.
+  Downloads save the completed browser file on sensitive authenticated tabs too;
+  they do not export rendered page or control contents.
   Plain screenshots are never refused: every rendered sensitive control the guard
   identifies (current, remembered, or appearing during capture, in shadow roots and
   cross-origin frames) is painted black before the image is written; the response
