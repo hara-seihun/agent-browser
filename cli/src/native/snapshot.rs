@@ -303,7 +303,7 @@ struct SnapshotBatch {
 }
 
 async fn collect_snapshot_batch(
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     options: &SnapshotOptions,
     frame_id: Option<&str>,
     context: super::sensitive::InventoryContext,
@@ -315,9 +315,10 @@ async fn collect_snapshot_batch(
         .ok_or("Unrepresented snapshot frame")?;
     let frames: Vec<_> = context.frames.iter().collect();
     let sessions: std::collections::HashSet<_> = context.frames.values().collect();
+    let ax_context = &context;
     let ax = async {
         futures_util::future::join_all(frames.iter().map(|(frame, session)| async move {
-            let tree: GetFullAXTreeResult = client
+            let mut tree: GetFullAXTreeResult = client
                 .observation_progress
                 .track(
                     super::observation_progress::Phase::AxTree,
@@ -328,6 +329,7 @@ async fn collect_snapshot_batch(
                     ),
                 )
                 .await?;
+            supplement_visible_dialogs(client, session, frame, ax_context, &mut tree).await?;
             Ok::<_, String>((frame.to_string(), tree))
         }))
         .await
@@ -441,8 +443,9 @@ fn render_snapshot_frame(
     } else {
         None
     };
-    let protected_nodes =
+    let mut protected_nodes =
         protect_private_text_nodes(&ax_tree.nodes, observation, effective_session_id);
+    label_dom_controls(&mut protected_nodes);
     let (mut tree_nodes, root_indices) = build_tree(&protected_nodes);
     for node in &mut tree_nodes {
         node.name = observation.protect_text(&node.name);
@@ -689,6 +692,156 @@ fn render_snapshot_frame(
     }
 
     Ok(observation.protect_text(&trimmed))
+}
+
+// Some sites keep aria-hidden=true on an open, painted dialog. Chrome correctly
+// omits it from AX, but an agent still needs its visible controls. Read that DOM
+// without changing the page, inside the same protected inventory as the AX tree.
+async fn supplement_visible_dialogs(
+    client: &Arc<CdpClient>,
+    session: &str,
+    frame: &str,
+    context: &super::sensitive::InventoryContext,
+    tree: &mut GetFullAXTreeResult,
+) -> Result<(), String> {
+    let Some(roots) = context.dialog_roots.get(frame) else {
+        return Ok(());
+    };
+    if roots.iter().all(|root| {
+        tree.nodes
+            .iter()
+            .any(|node| node.backend_d_o_m_node_id == Some(*root) && !node.ignored.unwrap_or(false))
+    }) {
+        return Ok(());
+    }
+    let group = client.object_group(vec![session.to_owned()]).await?;
+    let result =
+        async {
+            let resolved = client
+                .send_command(
+                    "DOM.resolveNode",
+                    Some(serde_json::json!({
+                        "nodeId": context.frame_node(frame)?, "objectGroup": group.name,
+                    })),
+                    Some(session),
+                )
+                .await?;
+            let object = resolved["object"]["objectId"]
+                .as_str()
+                .ok_or("Visible dialog document unavailable")?;
+            let projection = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+            "objectId": object, "functionDeclaration": include_str!("visible_dialogs.js"),
+            "returnByValue": true,
+        })), Some(session)).await?;
+            if projection.get("exceptionDetails").is_some() {
+                return Err("Visible dialog projection unavailable".to_owned());
+            }
+            let dialogs = projection["result"]["value"]
+                .as_array()
+                .ok_or("Visible dialog projection unavailable")?;
+            let paths = context
+                .frame_paths
+                .get(frame)
+                .ok_or("Visible dialog inventory unavailable")?;
+            for (dialog_idx, dialog) in dialogs.iter().enumerate() {
+                let nodes = dialog
+                    .as_array()
+                    .filter(|nodes| !nodes.is_empty())
+                    .ok_or("Visible dialog nodes unavailable")?;
+                let backend = |node: &Value| -> Result<i64, String> {
+                    paths
+                        .get(
+                            node["selector"]
+                                .as_str()
+                                .ok_or("Visible dialog selector unavailable")?,
+                        )
+                        .copied()
+                        .ok_or_else(|| "Visible dialog identity unavailable".to_owned())
+                };
+                let root = backend(&nodes[0])?;
+                if tree.nodes.iter().any(|node| {
+                    node.backend_d_o_m_node_id == Some(root) && !node.ignored.unwrap_or(false)
+                }) {
+                    continue;
+                }
+                let id = |i| format!("visible-dialog-{dialog_idx}-{i}");
+                for (i, node) in nodes.iter().enumerate() {
+                    let children = nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, child)| child["parent"].as_u64() == Some(i as u64))
+                        .map(|(j, _)| id(j))
+                        .collect();
+                    let ax_string = |value: &str| AXValue {
+                        value_type: "string".into(),
+                        value: Some(Value::String(value.to_owned())),
+                    };
+                    tree.nodes.push(AXNode {
+                        node_id: id(i),
+                        role: Some(ax_string(
+                            node["role"]
+                                .as_str()
+                                .ok_or("Visible dialog role unavailable")?,
+                        )),
+                        name: Some(ax_string(
+                            node["name"]
+                                .as_str()
+                                .ok_or("Visible dialog text unavailable")?,
+                        )),
+                        value: None,
+                        description: None,
+                        properties: Some(
+                            serde_json::from_value(node["properties"].clone())
+                                .map_err(|_| "Visible dialog properties unavailable")?,
+                        ),
+                        child_ids: Some(children),
+                        backend_d_o_m_node_id: Some(backend(node)?),
+                        ignored: Some(false),
+                    });
+                }
+            }
+            Ok::<_, String>(())
+        }
+        .await;
+    group.finish();
+    result
+}
+
+// Derive accessible labels only AFTER scoped redaction. Never collect an
+// ancestor's raw textContent: it could include a private, short control value.
+fn label_dom_controls(nodes: &mut [AXNode]) {
+    let indices: HashMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.node_id.clone(), i))
+        .collect();
+    let mut texts = HashMap::<usize, String>::new();
+    for i in (0..nodes.len()).rev() {
+        if !nodes[i].node_id.starts_with("visible-dialog-") {
+            continue;
+        }
+        let own = extract_ax_string(&nodes[i].name);
+        let children = nodes[i]
+            .child_ids
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| indices.get(id))
+            .filter_map(|idx| texts.get(idx))
+            .filter(|text| !text.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = if own.is_empty() { children } else { own };
+        let role = extract_ax_string(&nodes[i].role);
+        if (INTERACTIVE_ROLES.contains(&role.as_str()) || role == "heading") && !text.is_empty() {
+            nodes[i].name = Some(AXValue {
+                value_type: "string".into(),
+                value: Some(Value::String(text.clone())),
+            });
+        }
+        texts.insert(i, text);
+    }
 }
 
 async fn find_cursor_interactive_elements(
@@ -989,12 +1142,19 @@ fn protect_private_text_nodes(
         .enumerate()
         .map(|(i, node)| {
             let mut node = node.clone();
+            let scoped = node
+                .backend_d_o_m_node_id
+                .and_then(|backend| observation.controls.get(&(session.to_owned(), backend)));
             for value in [&mut node.name, &mut node.value, &mut node.description]
                 .into_iter()
                 .flatten()
             {
                 if let Some(Value::String(text)) = &mut value.value {
-                    *text = observation.protect_text(text);
+                    *text = if let Some(redacted) = scoped {
+                        observation.protect_control_name(text, redacted)
+                    } else {
+                        observation.protect_text(text)
+                    };
                 }
             }
             if let Some(marker) = protected.get(&i) {
@@ -1047,7 +1207,10 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                     .and_then(|p| extract_ax_string_opt(&Some(p.value.clone())))
                     .filter(|value| value != "false")
             }),
-            feedback: matches!(extract_ax_string(&node.role).as_str(), "alert" | "status"),
+            feedback: matches!(
+                extract_ax_string(&node.role).as_str(),
+                "alert" | "status" | "dialog" | "alertdialog"
+            ),
             backend_node_id: node.backend_d_o_m_node_id,
             children: Vec::new(),
             parent_idx: None,
@@ -1324,11 +1487,14 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
             feedback_indent = None;
         }
         let content = line.trim_start();
-        if ["- alert", "- status"].iter().any(|role| {
-            content
-                .strip_prefix(role)
-                .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', ':']))
-        }) {
+        if ["- alert", "- status", "- dialog", "- alertdialog"]
+            .iter()
+            .any(|role| {
+                content
+                    .strip_prefix(role)
+                    .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', ':']))
+            })
+        {
             feedback_indent = Some(indent);
         }
         if feedback_indent.is_some() || line.contains("ref=") || line.contains(": ") {

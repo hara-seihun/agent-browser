@@ -247,7 +247,7 @@ struct DrainedEvents {
     /// Attached non-page targets that still need to be resumed when auto-attach
     /// pauses them, even though agent-browser does not track them as tabs.
     attached_other_sessions: Vec<String>,
-    /// Session IDs from Target.detachedFromTarget.
+    /// Session IDs from Target.detachedFromTarget (pages and iframes).
     detached_iframe_sessions: Vec<String>,
     /// (request_id, event session_id) pairs from `Network.loadingFinished`
     /// while HAR recording; bodies are fetched for these in
@@ -1258,7 +1258,17 @@ impl DaemonState {
                 .unwrap_or_default();
     }
 
-    async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+    async fn apply_drained_events(&mut self, mut drained: DrainedEvents) -> Result<(), String> {
+        // A dialog can defer setup across batches; discard attachments whose
+        // close/detach was already consumed by a later drain.
+        if let Some(mgr) = &self.browser {
+            drained
+                .attached_page_sessions
+                .retain(|(target, sid)| mgr.page_attachment_is_live(&target.target_id, Some(sid)));
+            drained
+                .new_targets
+                .retain(|event| mgr.page_attachment_is_live(&event.target_info.target_id, None));
+        }
         // Popups and externally closed pages can change the active top-level
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
@@ -1607,17 +1617,24 @@ impl DaemonState {
         if active_frame_scope_changed {
             if self.request_tracking || self.har_recording {
                 self.refresh_active_iframe_sessions().await;
-            } else if let Some(top) = self.browser.as_ref()
+            } else if let Some(top) = self
+                .browser
+                .as_ref()
                 .and_then(|mgr| mgr.active_session_id().ok())
                 .map(str::to_owned)
             {
                 // Console events need the attached-frame scope too. Known
                 // attachment parents establish it without another renderer read;
                 // complete observations reconcile recovered sessions separately.
-                self.active_iframe_sessions = self.iframe_sessions.values()
-                    .filter(|sid| self.iframe_parent_sessions.contains_key(*sid)
-                        && self.iframe_session_within(sid, &top))
-                    .cloned().collect();
+                self.active_iframe_sessions = self
+                    .iframe_sessions
+                    .values()
+                    .filter(|sid| {
+                        self.iframe_parent_sessions.contains_key(*sid)
+                            && self.iframe_session_within(sid, &top)
+                    })
+                    .cloned()
+                    .collect();
             }
         }
 
@@ -1808,6 +1825,11 @@ impl DaemonState {
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
+        let previous_session = self
+            .browser
+            .as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok())
+            .map(str::to_owned);
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
             None => return DrainedEvents::default(),
@@ -2391,6 +2413,38 @@ impl DaemonState {
             }
         }
 
+        // Closing a popup is browser metadata, not renderer setup. Apply it
+        // even on URL/dialog commands and before deferred attachment batches.
+        // Nothing here dispatches or retries navigation or input.
+        if let Some(mgr) = &mut self.browser {
+            for target in &destroyed_targets {
+                mgr.remove_page_by_target_id(target);
+            }
+            for sid in &detached_iframe_sessions {
+                mgr.detach_page_session(sid);
+            }
+            attached_page_sessions
+                .retain(|(target, sid)| mgr.page_attachment_is_live(&target.target_id, Some(sid)));
+            new_targets
+                .retain(|event| mgr.page_attachment_is_live(&event.target_info.target_id, None));
+        }
+        if previous_session.as_deref()
+            != self
+                .browser
+                .as_ref()
+                .and_then(|mgr| mgr.active_session_id().ok())
+        {
+            self.ref_map.clear();
+            self.active_frame_id = None;
+            self.active_iframe_sessions.clear();
+            if self
+                .pending_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.session_id.as_deref() == previous_session.as_deref())
+            {
+                self.pending_dialog = None;
+            }
+        }
         if !attached_page_target_ids.is_empty() {
             new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
         }
@@ -3484,211 +3538,216 @@ async fn execute_command_inner(
             .is_some_and(|observed| observed.has_sensitive());
 
     let action_progress = state.protected_observation_progress();
-    let result = action_progress.track(
-        super::observation_progress::Phase::CommandAction,
-        async { match action {
-        "launch" => {
-            let webmcp_enabled = cmd
-                .get("webmcp")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| launch_options_from_env().webmcp);
-            let result = handle_launch(cmd, state).await;
-            if result.is_ok() {
-                state.webmcp_enabled = webmcp_enabled;
+    let result = action_progress
+        .track(super::observation_progress::Phase::CommandAction, async {
+            match action {
+                "launch" => {
+                    let webmcp_enabled = cmd
+                        .get("webmcp")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_else(|| launch_options_from_env().webmcp);
+                    let result = handle_launch(cmd, state).await;
+                    if result.is_ok() {
+                        state.webmcp_enabled = webmcp_enabled;
+                    }
+                    result
+                }
+                "navigate" => handle_navigate(cmd, state).await,
+                "read" => handle_read(cmd, state).await,
+                "url" => handle_url_metadata(state).await,
+                "cdp_url" => handle_cdp_url(state),
+                "inspect" => handle_inspect(state).await,
+                "title" => handle_title(state).await,
+                "content" => handle_content(state).await,
+                "evaluate" => handle_evaluate(cmd, state).await,
+                "close" => handle_close(state).await,
+                "snapshot" => handle_snapshot(cmd, state).await,
+                "screenshot" => handle_screenshot(cmd, state).await,
+                "click" => handle_click(cmd, state).await,
+                "dblclick" => handle_dblclick(cmd, state).await,
+                "fill" => handle_fill(cmd, state).await,
+                "type" => handle_type(cmd, state).await,
+                "press" => handle_press(cmd, state).await,
+                "hover" => handle_hover(cmd, state).await,
+                "scroll" => handle_scroll(cmd, state).await,
+                "select" => handle_select(cmd, state).await,
+                "check" => handle_check(cmd, state).await,
+                "uncheck" => handle_uncheck(cmd, state).await,
+                "wait" => handle_wait(cmd, state).await,
+                "gettext" | "getattribute" => handle_scoped_getter(action, cmd, state).await,
+                "isvisible" => handle_isvisible(cmd, state).await,
+                "isenabled" => handle_isenabled(cmd, state).await,
+                "ischecked" => handle_ischecked(cmd, state).await,
+                "back" => handle_back(state).await,
+                "forward" => handle_forward(state).await,
+                "reload" => handle_reload(state).await,
+                "cookies_get" => handle_cookies_get(cmd, state).await,
+                "cookies_set" => handle_cookies_set(cmd, state).await,
+                "cookies_clear" => handle_cookies_clear(state).await,
+                "storage_get" => handle_storage_get(cmd, state).await,
+                "storage_set" => handle_storage_set(cmd, state).await,
+                "storage_clear" => handle_storage_clear(cmd, state).await,
+                "setcontent" => handle_setcontent(cmd, state).await,
+                "headers" => handle_headers(cmd, state).await,
+                "offline" => handle_offline(cmd, state).await,
+                "console" => handle_console(cmd, state).await,
+                "errors" => handle_errors(state).await,
+                "session_info" => Ok(session_info(state)),
+                "state_save" => handle_state_save(cmd, state).await,
+                "state_load" => handle_state_load(cmd, state).await,
+                "state_save_tab" | "state_load_tab" => handle_tab_state(cmd, state).await,
+                "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
+                    state::dispatch_state_command(cmd).expect(
+                        "dispatch_state_command must handle all state_* actions matched here",
+                    )
+                }
+                "trace_start" => handle_trace_start(state).await,
+                "trace_stop" => handle_trace_stop(cmd, state).await,
+                "profiler_start" => handle_profiler_start(cmd, state).await,
+                "profiler_stop" => handle_profiler_stop(cmd, state).await,
+                "recording_start" => handle_recording_start(cmd, state).await,
+                "recording_stop" => handle_recording_stop(state).await,
+                "recording_restart" => handle_recording_restart(cmd, state).await,
+                "pdf" => handle_pdf(cmd, state).await,
+                "tab_list" => handle_tab_list(state).await,
+                "tab_new" => handle_tab_new(cmd, state).await,
+                "tab_switch" => handle_tab_switch(cmd, state).await,
+                "tab_close" => handle_tab_close(cmd, state).await,
+                "viewport" => handle_viewport(cmd, state).await,
+                "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
+                "set_media" => handle_set_media(cmd, state).await,
+                "download" => handle_download(cmd, state).await,
+                "diff_snapshot" => handle_diff_snapshot(cmd, state).await,
+                "diff_url" => handle_diff_url(cmd, state).await,
+                "credentials_set" => handle_credentials_set(cmd).await,
+                "credentials_get" => handle_credentials_get(cmd).await,
+                "credentials_delete" => handle_credentials_delete(cmd).await,
+                "credentials_list" => handle_credentials_list().await,
+                "mouse" => handle_mouse(cmd, state).await,
+                "keyboard" => handle_keyboard(cmd, state).await,
+                "focus" => handle_focus(cmd, state).await,
+                "clear" => handle_clear(cmd, state).await,
+                "selectall" => handle_selectall(cmd, state).await,
+                "scrollintoview" => handle_scrollintoview(cmd, state).await,
+                "dispatch" => handle_dispatch(cmd, state).await,
+                "highlight" => handle_highlight(cmd, state).await,
+                "tap" => handle_tap(cmd, state).await,
+                "boundingbox" => handle_boundingbox(cmd, state).await,
+                "innertext" | "innerhtml" | "inputvalue" => {
+                    handle_scoped_getter(action, cmd, state).await
+                }
+                "setvalue" => handle_setvalue(cmd, state).await,
+                "count" => handle_count(cmd, state).await,
+                "styles" => handle_styles(cmd, state).await,
+                "bringtofront" => handle_bringtofront(state).await,
+                "timezone" => handle_timezone(cmd, state).await,
+                "locale" => handle_locale(cmd, state).await,
+                "geolocation" => handle_geolocation(cmd, state).await,
+                "permissions" => handle_permissions(cmd, state).await,
+                "dialog" => handle_dialog(cmd, state).await,
+                "upload" => handle_upload(cmd, state).await,
+                "addscript" => handle_addscript(cmd, state).await,
+                "addinitscript" => handle_addinitscript(cmd, state).await,
+                "removeinitscript" => handle_removeinitscript(cmd, state).await,
+                "addstyle" => handle_addstyle(cmd, state).await,
+                "react_tree" => handle_react_tree(cmd, state).await,
+                "react_inspect" => handle_react_inspect(cmd, state).await,
+                "react_renders_start" => handle_react_renders_start(cmd, state).await,
+                "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
+                "react_suspense" => handle_react_suspense(cmd, state).await,
+                "vitals" => handle_vitals(cmd, state).await,
+                "a11y" => handle_a11y(cmd, state).await,
+                "pushstate" => handle_pushstate(cmd, state).await,
+                "clipboard" => handle_clipboard(cmd, state).await,
+                "wheel" => handle_wheel(cmd, state).await,
+                "device" => handle_device(cmd, state).await,
+                "screencast_start" => handle_screencast_start(cmd, state).await,
+                "screencast_stop" => handle_screencast_stop(state).await,
+                "stream_enable" => handle_stream_enable(cmd, state).await,
+                "stream_disable" => handle_stream_disable(state).await,
+                "stream_status" => handle_stream_status(state).await,
+                "webmcp_list" => handle_webmcp_list(cmd, state).await,
+                "webmcp_invoke" => handle_webmcp_invoke(cmd, state).await,
+                "webmcp_result" => handle_webmcp_result(cmd, state).await,
+                "webmcp_cancel" => handle_webmcp_cancel(cmd, state).await,
+                "waitforurl" => handle_waitforurl(cmd, state).await,
+                "waitforloadstate" => handle_waitforloadstate(cmd, state).await,
+                "waitforfunction" => handle_waitforfunction(cmd, state).await,
+                "frame" => handle_frame(cmd, state).await,
+                "mainframe" => handle_mainframe(state).await,
+                "getbyrole" => handle_getbyrole(cmd, state).await,
+                "getbytext" => handle_getbytext(cmd, state).await,
+                "getbylabel" => handle_getbylabel(cmd, state).await,
+                "getbyplaceholder" => handle_getbyplaceholder(cmd, state).await,
+                "getbyalttext" => handle_getbyalttext(cmd, state).await,
+                "getbytitle" => handle_getbytitle(cmd, state).await,
+                "getbytestid" => handle_getbytestid(cmd, state).await,
+                "nth" => handle_nth(cmd, state).await,
+                "find" => handle_find(cmd, state).await,
+                "evalhandle" => handle_evalhandle(cmd, state).await,
+                "drag" => handle_drag(cmd, state).await,
+                "expose" => handle_expose(cmd, state).await,
+                "pause" => handle_pause(state).await,
+                "multiselect" => handle_multiselect(cmd, state).await,
+                "responsebody" => handle_responsebody(cmd, state).await,
+                "waitfordownload" => handle_waitfordownload(cmd, state).await,
+                "window_new" => handle_window_new(cmd, state).await,
+                "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
+                "video_start" => handle_video_start(cmd, state).await,
+                "video_stop" => handle_video_stop(state).await,
+                "har_start" => handle_har_start(cmd, state).await,
+                "har_stop" => handle_har_stop(cmd, state).await,
+                "route" => handle_route(cmd, state).await,
+                "unroute" => handle_unroute(cmd, state).await,
+                "requests" => handle_requests(cmd, state).await,
+                "request_detail" => handle_request_detail(cmd, state).await,
+                "credentials" => handle_http_credentials(cmd, state).await,
+                "emulatemedia" => handle_set_media(cmd, state).await,
+                "auth_save" => handle_auth_save(cmd).await,
+                "auth_fill" => {
+                    super::auth_fill::handle_auth_fill(
+                        cmd,
+                        state,
+                        auth_deadline.expect("private fill deadline established at boundary"),
+                    )
+                    .await
+                }
+                "auth_export" => {
+                    super::auth_export::handle_auth_export(
+                        cmd,
+                        state,
+                        auth_deadline.expect("private export deadline established at boundary"),
+                    )
+                    .await
+                }
+                "auth_login" => {
+                    handle_auth_login(
+                        cmd,
+                        state,
+                        auth_deadline.expect("auth login deadline established at boundary"),
+                    )
+                    .await
+                }
+                "auth_list" => handle_credentials_list().await,
+                "auth_delete" => handle_credentials_delete(cmd).await,
+                "auth_show" => handle_auth_show(cmd).await,
+                "confirm" => handle_confirm(cmd, state).await,
+                "deny" => handle_deny(cmd, state).await,
+                "swipe" => handle_swipe(cmd, state).await,
+                "device_list" => handle_device_list().await,
+                "input_mouse" => handle_input_mouse(cmd, state).await,
+                "input_keyboard" => handle_input_keyboard(cmd, state).await,
+                "input_touch" => handle_input_touch(cmd, state).await,
+                "keydown" => handle_keydown(cmd, state).await,
+                "keyup" => handle_keyup(cmd, state).await,
+                "inserttext" => handle_inserttext(cmd, state).await,
+                "mousemove" => handle_mousemove(cmd, state).await,
+                "mousedown" => handle_mousedown(cmd, state).await,
+                "mouseup" => handle_mouseup(cmd, state).await,
+                _ => Err(format!("Not yet implemented: {}", action)),
             }
-            result
-        }
-        "navigate" => handle_navigate(cmd, state).await,
-        "read" => handle_read(cmd, state).await,
-        "url" => handle_url_metadata(state).await,
-        "cdp_url" => handle_cdp_url(state),
-        "inspect" => handle_inspect(state).await,
-        "title" => handle_title(state).await,
-        "content" => handle_content(state).await,
-        "evaluate" => handle_evaluate(cmd, state).await,
-        "close" => handle_close(state).await,
-        "snapshot" => handle_snapshot(cmd, state).await,
-        "screenshot" => handle_screenshot(cmd, state).await,
-        "click" => handle_click(cmd, state).await,
-        "dblclick" => handle_dblclick(cmd, state).await,
-        "fill" => handle_fill(cmd, state).await,
-        "type" => handle_type(cmd, state).await,
-        "press" => handle_press(cmd, state).await,
-        "hover" => handle_hover(cmd, state).await,
-        "scroll" => handle_scroll(cmd, state).await,
-        "select" => handle_select(cmd, state).await,
-        "check" => handle_check(cmd, state).await,
-        "uncheck" => handle_uncheck(cmd, state).await,
-        "wait" => handle_wait(cmd, state).await,
-        "gettext" | "getattribute" => handle_scoped_getter(action, cmd, state).await,
-        "isvisible" => handle_isvisible(cmd, state).await,
-        "isenabled" => handle_isenabled(cmd, state).await,
-        "ischecked" => handle_ischecked(cmd, state).await,
-        "back" => handle_back(state).await,
-        "forward" => handle_forward(state).await,
-        "reload" => handle_reload(state).await,
-        "cookies_get" => handle_cookies_get(cmd, state).await,
-        "cookies_set" => handle_cookies_set(cmd, state).await,
-        "cookies_clear" => handle_cookies_clear(state).await,
-        "storage_get" => handle_storage_get(cmd, state).await,
-        "storage_set" => handle_storage_set(cmd, state).await,
-        "storage_clear" => handle_storage_clear(cmd, state).await,
-        "setcontent" => handle_setcontent(cmd, state).await,
-        "headers" => handle_headers(cmd, state).await,
-        "offline" => handle_offline(cmd, state).await,
-        "console" => handle_console(cmd, state).await,
-        "errors" => handle_errors(state).await,
-        "session_info" => Ok(session_info(state)),
-        "state_save" => handle_state_save(cmd, state).await,
-        "state_load" => handle_state_load(cmd, state).await,
-        "state_save_tab" | "state_load_tab" => handle_tab_state(cmd, state).await,
-        "state_list" | "state_show" | "state_clear" | "state_clean" | "state_rename" => {
-            state::dispatch_state_command(cmd)
-                .expect("dispatch_state_command must handle all state_* actions matched here")
-        }
-        "trace_start" => handle_trace_start(state).await,
-        "trace_stop" => handle_trace_stop(cmd, state).await,
-        "profiler_start" => handle_profiler_start(cmd, state).await,
-        "profiler_stop" => handle_profiler_stop(cmd, state).await,
-        "recording_start" => handle_recording_start(cmd, state).await,
-        "recording_stop" => handle_recording_stop(state).await,
-        "recording_restart" => handle_recording_restart(cmd, state).await,
-        "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
-        "tab_new" => handle_tab_new(cmd, state).await,
-        "tab_switch" => handle_tab_switch(cmd, state).await,
-        "tab_close" => handle_tab_close(cmd, state).await,
-        "viewport" => handle_viewport(cmd, state).await,
-        "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
-        "set_media" => handle_set_media(cmd, state).await,
-        "download" => handle_download(cmd, state).await,
-        "diff_snapshot" => handle_diff_snapshot(cmd, state).await,
-        "diff_url" => handle_diff_url(cmd, state).await,
-        "credentials_set" => handle_credentials_set(cmd).await,
-        "credentials_get" => handle_credentials_get(cmd).await,
-        "credentials_delete" => handle_credentials_delete(cmd).await,
-        "credentials_list" => handle_credentials_list().await,
-        "mouse" => handle_mouse(cmd, state).await,
-        "keyboard" => handle_keyboard(cmd, state).await,
-        "focus" => handle_focus(cmd, state).await,
-        "clear" => handle_clear(cmd, state).await,
-        "selectall" => handle_selectall(cmd, state).await,
-        "scrollintoview" => handle_scrollintoview(cmd, state).await,
-        "dispatch" => handle_dispatch(cmd, state).await,
-        "highlight" => handle_highlight(cmd, state).await,
-        "tap" => handle_tap(cmd, state).await,
-        "boundingbox" => handle_boundingbox(cmd, state).await,
-        "innertext" | "innerhtml" | "inputvalue" => handle_scoped_getter(action, cmd, state).await,
-        "setvalue" => handle_setvalue(cmd, state).await,
-        "count" => handle_count(cmd, state).await,
-        "styles" => handle_styles(cmd, state).await,
-        "bringtofront" => handle_bringtofront(state).await,
-        "timezone" => handle_timezone(cmd, state).await,
-        "locale" => handle_locale(cmd, state).await,
-        "geolocation" => handle_geolocation(cmd, state).await,
-        "permissions" => handle_permissions(cmd, state).await,
-        "dialog" => handle_dialog(cmd, state).await,
-        "upload" => handle_upload(cmd, state).await,
-        "addscript" => handle_addscript(cmd, state).await,
-        "addinitscript" => handle_addinitscript(cmd, state).await,
-        "removeinitscript" => handle_removeinitscript(cmd, state).await,
-        "addstyle" => handle_addstyle(cmd, state).await,
-        "react_tree" => handle_react_tree(cmd, state).await,
-        "react_inspect" => handle_react_inspect(cmd, state).await,
-        "react_renders_start" => handle_react_renders_start(cmd, state).await,
-        "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
-        "react_suspense" => handle_react_suspense(cmd, state).await,
-        "vitals" => handle_vitals(cmd, state).await,
-        "a11y" => handle_a11y(cmd, state).await,
-        "pushstate" => handle_pushstate(cmd, state).await,
-        "clipboard" => handle_clipboard(cmd, state).await,
-        "wheel" => handle_wheel(cmd, state).await,
-        "device" => handle_device(cmd, state).await,
-        "screencast_start" => handle_screencast_start(cmd, state).await,
-        "screencast_stop" => handle_screencast_stop(state).await,
-        "stream_enable" => handle_stream_enable(cmd, state).await,
-        "stream_disable" => handle_stream_disable(state).await,
-        "stream_status" => handle_stream_status(state).await,
-        "webmcp_list" => handle_webmcp_list(cmd, state).await,
-        "webmcp_invoke" => handle_webmcp_invoke(cmd, state).await,
-        "webmcp_result" => handle_webmcp_result(cmd, state).await,
-        "webmcp_cancel" => handle_webmcp_cancel(cmd, state).await,
-        "waitforurl" => handle_waitforurl(cmd, state).await,
-        "waitforloadstate" => handle_waitforloadstate(cmd, state).await,
-        "waitforfunction" => handle_waitforfunction(cmd, state).await,
-        "frame" => handle_frame(cmd, state).await,
-        "mainframe" => handle_mainframe(state).await,
-        "getbyrole" => handle_getbyrole(cmd, state).await,
-        "getbytext" => handle_getbytext(cmd, state).await,
-        "getbylabel" => handle_getbylabel(cmd, state).await,
-        "getbyplaceholder" => handle_getbyplaceholder(cmd, state).await,
-        "getbyalttext" => handle_getbyalttext(cmd, state).await,
-        "getbytitle" => handle_getbytitle(cmd, state).await,
-        "getbytestid" => handle_getbytestid(cmd, state).await,
-        "nth" => handle_nth(cmd, state).await,
-        "find" => handle_find(cmd, state).await,
-        "evalhandle" => handle_evalhandle(cmd, state).await,
-        "drag" => handle_drag(cmd, state).await,
-        "expose" => handle_expose(cmd, state).await,
-        "pause" => handle_pause(state).await,
-        "multiselect" => handle_multiselect(cmd, state).await,
-        "responsebody" => handle_responsebody(cmd, state).await,
-        "waitfordownload" => handle_waitfordownload(cmd, state).await,
-        "window_new" => handle_window_new(cmd, state).await,
-        "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
-        "video_start" => handle_video_start(cmd, state).await,
-        "video_stop" => handle_video_stop(state).await,
-        "har_start" => handle_har_start(cmd, state).await,
-        "har_stop" => handle_har_stop(cmd, state).await,
-        "route" => handle_route(cmd, state).await,
-        "unroute" => handle_unroute(cmd, state).await,
-        "requests" => handle_requests(cmd, state).await,
-        "request_detail" => handle_request_detail(cmd, state).await,
-        "credentials" => handle_http_credentials(cmd, state).await,
-        "emulatemedia" => handle_set_media(cmd, state).await,
-        "auth_save" => handle_auth_save(cmd).await,
-        "auth_fill" => {
-            super::auth_fill::handle_auth_fill(
-                cmd,
-                state,
-                auth_deadline.expect("private fill deadline established at boundary"),
-            )
-            .await
-        }
-        "auth_export" => {
-            super::auth_export::handle_auth_export(
-                cmd,
-                state,
-                auth_deadline.expect("private export deadline established at boundary"),
-            )
-            .await
-        }
-        "auth_login" => {
-            handle_auth_login(
-                cmd,
-                state,
-                auth_deadline.expect("auth login deadline established at boundary"),
-            )
-            .await
-        }
-        "auth_list" => handle_credentials_list().await,
-        "auth_delete" => handle_credentials_delete(cmd).await,
-        "auth_show" => handle_auth_show(cmd).await,
-        "confirm" => handle_confirm(cmd, state).await,
-        "deny" => handle_deny(cmd, state).await,
-        "swipe" => handle_swipe(cmd, state).await,
-        "device_list" => handle_device_list().await,
-        "input_mouse" => handle_input_mouse(cmd, state).await,
-        "input_keyboard" => handle_input_keyboard(cmd, state).await,
-        "input_touch" => handle_input_touch(cmd, state).await,
-        "keydown" => handle_keydown(cmd, state).await,
-        "keyup" => handle_keyup(cmd, state).await,
-        "inserttext" => handle_inserttext(cmd, state).await,
-        "mousemove" => handle_mousemove(cmd, state).await,
-        "mousedown" => handle_mousedown(cmd, state).await,
-        "mouseup" => handle_mouseup(cmd, state).await,
-        _ => Err(format!("Not yet implemented: {}", action)),
-    }}).await;
+        })
+        .await;
 
     if action == "auth_fill"
         && cmd["credentialProvider"] == "converge-work-password-v5"
@@ -7386,13 +7445,13 @@ async fn handle_scoped_getter(
         return Err("Missing 'attribute' parameter".into());
     }
     let selector_metadata = action == "getattribute"
-        && cmd.get("attribute").and_then(Value::as_str)
+        && cmd
+            .get("attribute")
+            .and_then(Value::as_str)
             .is_some_and(super::sensitive::selector_metadata_attribute);
     if let Some(known) = state.sensitive_observations.get(&session).filter(|known| {
-        !selector_metadata && known
-            .controls
-            .values()
-            .any(|marker| marker == "[redacted: credential]")
+        (!selector_metadata || cmd.get("attribute").and_then(Value::as_str) == Some("aria-label"))
+            && !known.controls.is_empty()
     }) {
         let (object, effective) = super::element::resolve_element_object_id(
             &mgr.client,
@@ -7419,7 +7478,15 @@ async fn handle_scoped_getter(
                 .get("backendNodeId")
                 .and_then(Value::as_i64)
                 .and_then(|id| controls.get(&(session.to_owned(), id)))
-                .filter(|marker| marker.as_str() == "[redacted: credential]")
+                .filter(|marker| {
+                    marker.as_str() == "[redacted: credential]"
+                        || node["nodeName"] == "BUTTON"
+                        || node["attributes"].as_array().is_some_and(|attributes| {
+                            attributes
+                                .chunks_exact(2)
+                                .any(|pair| pair[0] == "role" && pair[1] == "button")
+                        })
+                })
             {
                 return Some(marker.clone());
             }
@@ -14064,7 +14131,10 @@ fn error_response(id: &str, error: &str) -> Value {
         resp["code"] = json!(code);
         if code == "fill_render_timeout" {
             resp["data"] = json!({"effectDispatched":true, "retention":"unknown"});
-        } else if matches!(code, "fill_not_editable" | "fill_invalid_value" | "fill_focus_changed") {
+        } else if matches!(
+            code,
+            "fill_not_editable" | "fill_invalid_value" | "fill_focus_changed"
+        ) {
             resp["data"] = json!({"effectDispatched":false});
         }
     } else if error.starts_with(super::browser::TAB_GONE_PREFIX) {
@@ -14972,9 +15042,14 @@ mod tests {
         let mut state = DaemonState::new();
         state.session_id = format!("render-scope-{}", std::process::id());
         state.browser = Some(fixture.manager);
-        assert!(!apply_tab_binding_on_attach_or_rollback(&mut state).await.unwrap());
+        assert!(!apply_tab_binding_on_attach_or_rollback(&mut state)
+            .await
+            .unwrap());
         while let Ok(command) = fixture.commands.try_recv() {
-            assert!(!command["method"].as_str().unwrap().starts_with("Emulation."));
+            assert!(!command["method"]
+                .as_str()
+                .unwrap()
+                .starts_with("Emulation."));
         }
         client.close().await;
         fixture.server.await.unwrap();
@@ -17728,7 +17803,10 @@ mod tests {
             assert_eq!(command["method"], "Runtime.releaseObjectGroup");
             retried = true;
         }
-        assert!(retried, "failed cleanup must retry without reading new page data");
+        assert!(
+            retried,
+            "failed cleanup must retry without reading new page data"
+        );
         let info = execute_command(
             &json!({"id":"cleanup-error-metadata","action":"session_info"}),
             &mut state,

@@ -484,13 +484,56 @@ pub(super) async fn collect_frame_sessions(
     // background iframe consume the protected observation's whole deadline.
     // Dedicated trees still discover same-process descendants and deeper OOPIFs.
     let mut queried = HashSet::from([top_session_id.to_string()]);
+    let mut checked_owners = HashSet::new();
     loop {
-        let frontier: HashSet<_> = targets
+        let reachable: HashSet<_> = targets
             .values()
             .filter(|target| frame_reaches_top(&target.frame_id, &top_frame_id, &targets))
             .map(|target| target.session_id.clone())
-            .filter(|session| !queried.contains(session))
             .collect();
+        let mut frontier: HashSet<_> = reachable
+            .iter()
+            .filter(|session| !queried.contains(*session))
+            .cloned()
+            .collect();
+
+        // Chrome may omit OOPIFs entirely from Page.getFrameTree. Prove their
+        // live owner in an already reachable renderer before querying the child
+        // session. Never query a retained background renderer just to discover
+        // whether it belongs here. This also finds OOPIFs under same-process
+        // descendants, whose parent frame is present in this renderer's tree.
+        let mut owner_checks = Vec::new();
+        for parent in &reachable {
+            if !queried.contains(parent) || !checked_owners.insert(parent.clone()) {
+                continue;
+            }
+            for (frame, session) in iframe_sessions {
+                if queried.contains(session) || frontier.contains(session) {
+                    continue;
+                }
+                let parent = parent.clone();
+                owner_checks.push(async move {
+                    let owned = client
+                        .send_command(
+                            "DOM.getFrameOwner",
+                            Some(json!({"frameId": frame})),
+                            Some(&parent),
+                        )
+                        .await
+                        .ok()
+                        .is_some_and(|owner| {
+                            owner["backendNodeId"].as_i64().is_some_and(|id| id > 0)
+                        });
+                    owned.then(|| session.clone())
+                });
+            }
+        }
+        frontier.extend(
+            futures_util::future::join_all(owner_checks)
+                .await
+                .into_iter()
+                .flatten(),
+        );
         if frontier.is_empty() {
             break;
         }

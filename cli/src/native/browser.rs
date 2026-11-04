@@ -399,6 +399,13 @@ impl BrowserProcess {
     }
 }
 
+#[derive(Default)]
+struct PageLifecycle {
+    openers: HashMap<String, String>,
+    destroyed_targets: HashSet<String>,
+    detached_sessions: HashSet<String>,
+}
+
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
     // Attach emits child-target events before the daemon receives this manager.
@@ -406,6 +413,7 @@ pub struct BrowserManager {
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
+    page_lifecycle: PageLifecycle,
     active_page_index: usize,
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
@@ -571,6 +579,7 @@ impl BrowserManager {
                 next_tab_id: 1,
                 direct_page: false,
                 pin_tab: false,
+                page_lifecycle: PageLifecycle::default(),
                 bound_target_id: None,
                 bound_target_gone: None,
                 headless,
@@ -678,6 +687,7 @@ impl BrowserManager {
             next_tab_id: 1,
             direct_page,
             pin_tab: false,
+            page_lifecycle: PageLifecycle::default(),
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
@@ -773,7 +783,8 @@ impl BrowserManager {
             self.active_page_index = 0;
             self.bind_active_target();
             self.enable_domains(&attach_result.session_id).await?;
-            self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
+            self.prepare_automation_rendering(Some(&attach_result.session_id))
+                .await;
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
@@ -1232,17 +1243,19 @@ impl BrowserManager {
         let mut lifecycle_rx = self.client.subscribe();
 
         let progress = self.client.observation_progress.clone();
-        let nav_result: PageNavigateResult = progress.track(
-            super::observation_progress::Phase::NavigationRequest,
-            self.client.send_command_typed(
-                "Page.navigate",
-                &PageNavigateParams {
-                    url: url.to_string(),
-                    referrer: None,
-                },
-                Some(&session_id),
-            ),
-        ).await?;
+        let nav_result: PageNavigateResult = progress
+            .track(
+                super::observation_progress::Phase::NavigationRequest,
+                self.client.send_command_typed(
+                    "Page.navigate",
+                    &PageNavigateParams {
+                        url: url.to_string(),
+                        referrer: None,
+                    },
+                    Some(&session_id),
+                ),
+            )
+            .await?;
 
         if let Some(ref error_text) = nav_result.error_text {
             return Err(format!("Navigation failed: {}", error_text));
@@ -1252,20 +1265,24 @@ impl BrowserManager {
         // If loader_id is None, it was a same-document navigation (e.g., hash routing)
         // which does not fire Page.loadEventFired or Page.domContentEventFired.
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
-            progress.track(
-                super::observation_progress::Phase::NavigationLifecycle,
-                self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx),
-            ).await?;
+            progress
+                .track(
+                    super::observation_progress::Phase::NavigationLifecycle,
+                    self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx),
+                )
+                .await?;
         }
 
-        let (page_url, title) = progress.track(
-            super::observation_progress::Phase::NavigationMetadata,
-            async {
-                let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
-                let title = self.get_title().await.unwrap_or_default();
-                (page_url, title)
-            },
-        ).await;
+        let (page_url, title) = progress
+            .track(
+                super::observation_progress::Phase::NavigationMetadata,
+                async {
+                    let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
+                    let title = self.get_title().await.unwrap_or_default();
+                    (page_url, title)
+                },
+            )
+            .await;
 
         // Track visited origin for cross-origin localStorage collection in save_state
         if let Ok(parsed) = url::Url::parse(&page_url) {
@@ -1676,7 +1693,8 @@ impl BrowserManager {
         self.active_page_index = 0;
         self.bind_active_target();
         self.enable_domains(&attach_result.session_id).await?;
-        self.prepare_automation_rendering(Some(&attach_result.session_id)).await;
+        self.prepare_automation_rendering(Some(&attach_result.session_id))
+            .await;
 
         Ok(())
     }
@@ -1836,7 +1854,8 @@ impl BrowserManager {
             .await?;
 
         self.enable_domains(&attach.session_id).await?;
-        self.prepare_automation_rendering(Some(&attach.session_id)).await;
+        self.prepare_automation_rendering(Some(&attach.session_id))
+            .await;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -2344,14 +2363,51 @@ impl BrowserManager {
     }
 
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
+        self.page_lifecycle
+            .destroyed_targets
+            .insert(target_id.to_owned());
+        self.remove_closed_page(target_id);
+    }
+
+    pub fn detach_page_session(&mut self, session_id: &str) {
+        self.page_lifecycle
+            .detached_sessions
+            .insert(session_id.to_owned());
+        if let Some(target) = self
+            .pages
+            .iter()
+            .find(|page| page.session_id == session_id)
+            .map(|page| page.target_id.clone())
+        {
+            self.remove_closed_page(&target);
+        }
+    }
+
+    /// Lifecycle metadata is applied before any renderer work. Deferred
+    /// attachment events must never resurrect a destroyed page or session.
+    pub fn page_attachment_is_live(&self, target: &str, session: Option<&str>) -> bool {
+        !self.page_lifecycle.destroyed_targets.contains(target)
+            && !session.is_some_and(|sid| self.page_lifecycle.detached_sessions.contains(sid))
+    }
+
+    fn remove_closed_page(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
+            let was_active = pos == self.active_page_index;
             let page = self.pages.remove(pos);
             self.update_active_page_after_removal(pos);
-            // If the destroyed target was the bound tab (closed externally,
-            // e.g. by another session sharing this browser), fail loudly
-            // under pin-tab instead of silently pointing at a neighbor.
             self.handle_bound_target_removed(&page.target_id, &page.url);
+            // Legacy popup following returns to its opener, not an unrelated
+            // neighbor. Pinned sessions retain their explicit tab_gone state.
+            if was_active && !self.pin_tab {
+                if let Some(opener) = self.page_lifecycle.openers.get(target_id) {
+                    if let Some(index) = self.pages.iter().position(|p| &p.target_id == opener) {
+                        self.active_page_index = index;
+                    }
+                }
+                self.bind_active_target();
+            }
         }
+        self.page_lifecycle.openers.remove(target_id);
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
@@ -2377,6 +2433,14 @@ impl BrowserManager {
         target_type: String,
         opener_id: Option<&str>,
     ) -> bool {
+        if !self.page_attachment_is_live(target_id, Some(session_id)) {
+            return false;
+        }
+        if let Some(opener) = opener_id {
+            self.page_lifecycle
+                .openers
+                .insert(target_id.to_owned(), opener.to_owned());
+        }
         if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
             p.url = url;
             p.title = title;
@@ -2589,6 +2653,7 @@ async fn initialize_lightpanda_manager(
             next_tab_id: 1,
             direct_page: false,
             pin_tab: false,
+            page_lifecycle: PageLifecycle::default(),
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
@@ -3378,6 +3443,7 @@ mod tests {
             next_tab_id: 100,
             direct_page: false,
             pin_tab: false,
+            page_lifecycle: PageLifecycle::default(),
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
@@ -3425,6 +3491,7 @@ mod tests {
             next_tab_id: 2,
             direct_page: false,
             pin_tab: false,
+            page_lifecycle: PageLifecycle::default(),
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,
@@ -3490,6 +3557,7 @@ mod tests {
             next_tab_id: 1,
             direct_page: false,
             pin_tab: false,
+            page_lifecycle: PageLifecycle::default(),
             bound_target_id: None,
             bound_target_gone: None,
             headless: true,

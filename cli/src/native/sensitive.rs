@@ -79,7 +79,13 @@ const IDENTIFIERS: &[(&str, &[&str])] = &[
     ),
     (
         "one-time-code",
-        &["onetimecode", "otp", "otpcode", "verificationcode", "enteryourcode"],
+        &[
+            "onetimecode",
+            "otp",
+            "otpcode",
+            "verificationcode",
+            "enteryourcode",
+        ],
     ),
     (
         "recovery-code",
@@ -252,12 +258,18 @@ pub fn classifier_js() -> String {
 /// Non-value control metadata used to discover selectors for private fills.
 /// The command still inventories the complete tab and redacts remembered values.
 pub fn selector_metadata_attribute(attribute: &str) -> bool {
-    matches!(attribute, "id" | "class" | "type" | "name" | "autocomplete" | "aria-label" | "aria-labelledby")
+    matches!(
+        attribute,
+        "id" | "class" | "type" | "name" | "autocomplete" | "aria-label" | "aria-labelledby"
+    )
 }
 
 pub fn getter_js(operation: &str, attribute: Option<&str>) -> String {
     if operation == "attribute" && attribute.is_some_and(selector_metadata_attribute) {
-        return format!("function() {{ return this.getAttribute({}); }}", json!(attribute.unwrap()));
+        return format!(
+            "function() {{ return this.getAttribute({}); }}",
+            json!(attribute.unwrap())
+        );
     }
     let read = match operation {
         "value" => "return this.value || '';".to_string(),
@@ -507,6 +519,14 @@ impl Observation {
             {
                 out.push_str(marker);
                 start += length;
+            } else if let Some(length) = text.as_bytes()[start]
+                .is_ascii_digit()
+                .then(|| payment_number_length(&text[start..]))
+                .flatten()
+                .filter(|_| start == 0 || !text.as_bytes()[start - 1].is_ascii_digit())
+            {
+                out.push_str("[redacted: cc-number]");
+                start += length;
             } else {
                 let ch = text[start..].chars().next().unwrap();
                 out.push(ch);
@@ -514,6 +534,26 @@ impl Observation {
             }
         }
         out
+    }
+
+    /// A scoped payment control may expose a short month/year in its name.
+    /// Replace only the value span, preserving its useful action/field label.
+    pub(crate) fn protect_control_name(&self, text: &str, redacted: &str) -> String {
+        let Some(kind) = redacted
+            .strip_prefix("[redacted: ")
+            .and_then(|s| s.strip_suffix(']'))
+        else {
+            return self.protect_text(text);
+        };
+        let mut out = String::new();
+        let mut offset = 0;
+        for (start, end) in display_payment_spans(text, kind) {
+            out.push_str(&text[offset..start]);
+            out.push_str(redacted);
+            offset = end;
+        }
+        out.push_str(&text[offset..]);
+        self.protect_text(&out)
     }
 
     pub fn protect(&self, value: &mut Value) {
@@ -583,10 +623,96 @@ fn expiry_echo_length(text: &str, expiry: &str) -> Option<usize> {
     Some(end)
 }
 
+/// Full payment numbers are private even when a site renders them as ordinary
+/// text or copy-button names rather than form values. Do not require a checksum:
+/// a mistyped or provider-specific number still must not be published.
+fn payment_number_length(text: &str) -> Option<usize> {
+    let mut digits = 0;
+    let mut end = 0;
+    for (offset, ch) in text.char_indices() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+            end = offset + 1;
+        } else if digits > 0 && (ch.is_whitespace() || matches!(ch, '-' | '‐' | '‑' | '–')) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    (digits >= 13).then_some(end)
+}
+
+/// Short payment values need an explicit payment label; unlike full numbers,
+/// arbitrary dates and three-digit public text are not globally secret.
+fn display_payment_spans(text: &str, kind: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let ch = text[start..].chars().next().unwrap();
+        if !ch.is_ascii_digit() {
+            start += ch.len_utf8();
+            continue;
+        }
+        let length = if kind == "cc-number" {
+            payment_number_length(&text[start..])
+        } else {
+            let mut digits = 0;
+            let mut end = 0;
+            let mut slash = false;
+            for (offset, ch) in text[start..].char_indices() {
+                if ch.is_ascii_digit() {
+                    digits += 1;
+                    end = offset + 1;
+                } else if kind == "cc-exp" && (ch.is_whitespace() || ch == '/') {
+                    slash |= ch == '/';
+                } else {
+                    break;
+                }
+            }
+            match kind {
+                "cc-csc" if matches!(digits, 3 | 4) => Some(end),
+                "cc-exp" if slash && matches!(digits, 4 | 6) => Some(end),
+                "cc-exp-month" if matches!(digits, 1 | 2) => Some(end),
+                "cc-exp-year" if matches!(digits, 2 | 4) => Some(end),
+                _ => None,
+            }
+        };
+        if let Some(length) = length {
+            spans.push((start, start + length));
+            start += length;
+        } else {
+            // Consume the whole digit run: never match a private-looking suffix
+            // of a longer public identifier.
+            start += text[start..].bytes().take_while(u8::is_ascii_digit).count();
+        }
+    }
+    spans
+}
+
+fn display_button(node: &Value) -> bool {
+    node["nodeName"] == "BUTTON"
+        || node_attributes(node)
+            .get("role")
+            .is_some_and(|role| role == "button")
+}
+
+fn button_counts(node: &Value, counts: &mut HashMap<usize, usize>) -> usize {
+    let count = usize::from(display_button(node))
+        + node["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|child| button_counts(child, counts))
+            .sum::<usize>();
+    counts.insert(node as *const Value as usize, count);
+    count
+}
+
 struct Control {
     session: String,
     backend: i64,
     kind: &'static str,
+    display: bool,
 }
 
 fn node_attributes(node: &Value) -> HashMap<String, String> {
@@ -646,6 +772,8 @@ fn collect_nodes(
         targets: &HashMap<String, String>,
         inherited: &str,
         parent_editable: bool,
+        payment_label: &str,
+        button_counts: &HashMap<usize, usize>,
     ) {
         let mut attrs = node_attributes(node);
         let editable = match attrs
@@ -673,13 +801,22 @@ fn collect_nodes(
                 }
             }
         }
+        let display = display_button(node);
+        if display {
+            label.push_str(payment_label);
+            label.push_str(&node_text(node));
+            if let Some(title) = attrs.get("title") {
+                label.push_str(title);
+            }
+        }
         attrs.insert("label".into(), label);
         if let Some(backend) = node["backendNodeId"].as_i64() {
             if seen.insert(backend)
-                && ((editable
-                    && node["nodeName"]
-                        .as_str()
-                        .is_some_and(|name| !name.starts_with('#')))
+                && (display
+                    || (editable
+                        && node["nodeName"]
+                            .as_str()
+                            .is_some_and(|name| !name.starts_with('#')))
                     || matches!(
                         node["nodeName"].as_str(),
                         Some("INPUT" | "TEXTAREA" | "SELECT")
@@ -688,19 +825,60 @@ fn collect_nodes(
                 if let Some(name) = node["nodeName"].as_str() {
                     attrs.insert("tagname".into(), name.to_owned());
                 }
-                if let Some(kind) = classify(&attrs) {
+                if let Some(kind) = classify(&attrs)
+                    .or_else(|| {
+                        (display
+                            && !display_payment_spans(&node_text(node), "cc-number").is_empty())
+                        .then_some("cc-number")
+                    })
+                    .filter(|kind| {
+                        !display
+                            || !display_payment_spans(
+                                &format!(
+                                    "{} {}",
+                                    node_text(node),
+                                    attrs.get("aria-label").map(String::as_str).unwrap_or("")
+                                ),
+                                kind,
+                            )
+                            .is_empty()
+                    })
+                {
                     controls.push(Control {
                         session: session.to_owned(),
                         backend,
                         kind,
+                        display,
                     });
                 }
             }
         }
+        // A single copy button's surrounding field text supplies its label.
+        // Never borrow labels from a container holding several payment fields.
+        let field_label =
+            if !display && button_counts.get(&(node as *const Value as usize)) == Some(&1) {
+                let local = node_text(node);
+                if classify(&HashMap::from([("label".into(), local.clone())])).is_some() {
+                    local
+                } else {
+                    payment_label.to_owned()
+                }
+            } else {
+                payment_label.to_owned()
+            };
         for key in ["children", "pseudoElements"] {
             for child in node[key].as_array().into_iter().flatten() {
                 walk(
-                    child, session, controls, seen, ids, targets, &wrapping, editable,
+                    child,
+                    session,
+                    controls,
+                    seen,
+                    ids,
+                    targets,
+                    &wrapping,
+                    editable,
+                    &field_label,
+                    button_counts,
                 );
             }
         }
@@ -716,7 +894,11 @@ fn collect_nodes(
     let mut ids = HashMap::new();
     let mut targets = HashMap::new();
     labels(node, &mut ids, &mut targets);
-    walk(node, session, controls, seen, &ids, &targets, "", false);
+    let mut counts = HashMap::new();
+    button_counts(node, &mut counts);
+    walk(
+        node, session, controls, seen, &ids, &targets, "", false, "", &counts,
+    );
 }
 
 fn collect_document_frames(
@@ -854,6 +1036,8 @@ pub async fn observe(
 
 pub(crate) struct InventoryContext {
     pub(crate) cursor_nodes: HashMap<String, HashMap<String, i64>>,
+    pub(crate) frame_paths: HashMap<String, HashMap<String, i64>>,
+    pub(crate) dialog_roots: HashMap<String, HashSet<i64>>,
     pub(crate) top_frame: String,
     frame_roots: HashMap<String, Option<i64>>,
     pub(crate) frames: HashMap<String, String>,
@@ -866,7 +1050,8 @@ fn collect_snapshot_context(
     session: &str,
     context: &mut InventoryContext,
     inherited_base: Option<&url::Url>,
-) {
+    document_frame: Option<&str>,
+) -> Result<(), String> {
     let document_base = if node["nodeName"] == "#document" {
         node["baseURL"]
             .as_str()
@@ -877,7 +1062,14 @@ fn collect_snapshot_context(
     };
     let base = document_base.as_ref().or(inherited_base);
     if node["nodeName"] == "#document" {
-        if let Some(frame) = node["frameId"].as_str() {
+        if let Some(frame) = node["frameId"].as_str().or(document_frame) {
+            let dialogs = dialog_roots(node);
+            if !dialogs.is_empty() {
+                context
+                    .frame_paths
+                    .insert(frame.to_owned(), cursor_node_paths(node)?);
+                context.dialog_roots.insert(frame.to_owned(), dialogs);
+            }
             context.frame_roots.insert(
                 frame.to_owned(),
                 node["nodeId"].as_i64().filter(|id| *id > 0),
@@ -917,13 +1109,38 @@ fn collect_snapshot_context(
     for key in ["children", "shadowRoots", "pseudoElements"] {
         if let Some(children) = node[key].as_array() {
             for child in children {
-                collect_snapshot_context(child, session, context, base);
+                collect_snapshot_context(child, session, context, base, None)?;
             }
         }
     }
     if let Some(document) = node.get("contentDocument") {
-        collect_snapshot_context(document, session, context, None);
+        collect_snapshot_context(document, session, context, None, node["frameId"].as_str())?;
     }
+    Ok(())
+}
+
+fn dialog_roots(root: &Value) -> HashSet<i64> {
+    fn walk(node: &Value, found: &mut HashSet<i64>) {
+        let attributes = node_attributes(node);
+        if matches!(
+            attributes.get("role").map(String::as_str),
+            Some("dialog" | "alertdialog")
+        ) || attributes
+            .get("aria-modal")
+            .is_some_and(|value| value == "true")
+            || node["nodeName"] == "DIALOG"
+        {
+            if let Some(backend) = node["backendNodeId"].as_i64() {
+                found.insert(backend);
+            }
+        }
+        for child in node["children"].as_array().into_iter().flatten() {
+            walk(child, found);
+        }
+    }
+    let mut found = HashSet::new();
+    walk(root, &mut found);
+    found
 }
 
 fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
@@ -1311,7 +1528,11 @@ async fn inventory_control(
         let values = client.observation_progress.track(Phase::ControlValues,
             client.send_command("Runtime.callFunctionOn", Some(json!({
                 "objectId": object,
-                "functionDeclaration": "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }",
+                "functionDeclaration": if control.display {
+                    "function() { return [this.textContent || '', this.getAttribute('aria-label') || '']; }"
+                } else {
+                    "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }"
+                },
                 "returnByValue": true,
             })), Some(&control.session)),
         ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
@@ -1536,6 +1757,8 @@ where
         ..Observation::default()
     };
     let mut context = InventoryContext {
+        frame_paths: HashMap::new(),
+        dialog_roots: HashMap::new(),
         cursor_nodes: documents
             .iter()
             .map(|document| {
@@ -1563,7 +1786,13 @@ where
         hrefs: HashMap::new(),
     };
     for document in &documents {
-        collect_snapshot_context(&document.root, &document.session, &mut context, None);
+        collect_snapshot_context(
+            &document.root,
+            &document.session,
+            &mut context,
+            None,
+            Some(&document.bindings.root),
+        )?;
     }
     let (values, collected) = tokio::join!(control_reads.collect::<Vec<_>>(), collect(context),);
     control_results.extend(values);
@@ -1573,12 +1802,23 @@ where
             .controls
             .insert((control.session.clone(), control.backend), redacted.clone());
         for value in values? {
-            observation.remember_private_value(
-                &control.session,
-                control.backend,
-                control.kind,
-                &value,
-            );
+            if control.display {
+                for (start, end) in display_payment_spans(&value, control.kind) {
+                    observation.remember_private_value(
+                        &control.session,
+                        control.backend,
+                        control.kind,
+                        &value[start..end],
+                    );
+                }
+            } else {
+                observation.remember_private_value(
+                    &control.session,
+                    control.backend,
+                    control.kind,
+                    &value,
+                );
+            }
         }
     }
 
