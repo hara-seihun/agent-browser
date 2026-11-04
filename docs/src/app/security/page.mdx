@@ -34,7 +34,7 @@ Classification uses password input type, sensitive autocomplete tokens, and reco
 
 `download` and `wait --download` save the actual completed browser file even on sensitive authenticated tabs. They do not export page or control contents, rescan the page after saving, or repeat the request. Remembered credentials remain redacted from response metadata.
 
-Refusal returns an error prefixed `SENSITIVE_OUTPUT_UNSUPPORTED` before execution, capture, or file writes. Incomplete observation fails closed. Sensitive-tab detection is sticky for the daemon/tab lifetime: removing fields or navigating the same tab does not reset it. Use protected snapshots and getters on sensitive tabs. There is no bypass flag, environment variable, or configuration switch. Action approval does not override a refusal.
+Refusal returns an error prefixed `SENSITIVE_OUTPUT_UNSUPPORTED` before execution, capture, or file writes. Incomplete observation fails closed. A complete live inventory retires protection for detached controls; remembered secret values remain redacted for the daemon/tab lifetime. Use protected snapshots and getters on sensitive tabs. There is no bypass flag, environment variable, or configuration switch. Action approval does not override a refusal.
 
 MCP delegates to the canonical CLI. Tool profiles and `extraArgs` preserve the same protection rather than providing alternate access.
 

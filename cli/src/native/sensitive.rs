@@ -409,6 +409,9 @@ pub struct Observation {
     pub(crate) frame_sessions: HashSet<String>,
     pub controls: HashMap<(String, i64), String>,
     pub(crate) private_text_nodes: HashSet<(String, i64)>,
+    // Complete current DOM membership, not just classified controls. Private-fill
+    // controls retain protection while alive even if their attributes change.
+    live_nodes: Option<HashSet<(String, i64)>>,
     secrets: Vec<(String, String)>,
     expiry_echoes: Vec<(String, String)>,
 }
@@ -571,11 +574,23 @@ impl Observation {
         }
     }
 
-    /// Import sticky protection without replacing the current inventory's frame coverage.
+    /// Retain protection for live nodes and remembered values. Detached login
+    /// fields in a single-page app must not make its later inbox sensitive.
     pub(crate) fn inherit_private(&mut self, known: &Self) {
-        self.controls.extend(known.controls.clone());
+        let live = |key: &&(String, i64)| {
+            self.live_nodes
+                .as_ref()
+                .is_none_or(|nodes| nodes.contains(*key))
+        };
+        self.controls.extend(
+            known
+                .controls
+                .iter()
+                .filter(|(key, _)| live(key))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         self.private_text_nodes
-            .extend(known.private_text_nodes.clone());
+            .extend(known.private_text_nodes.iter().filter(live).cloned());
         self.secrets.extend(known.secrets.clone());
         self.expiry_echoes.extend(known.expiry_echoes.clone());
         self.expiry_echoes.sort();
@@ -596,9 +611,9 @@ impl Observation {
         self.private_text_nodes.clear();
     }
 
-    pub fn merge(&mut self, other: Self) {
-        self.frame_sessions = other.frame_sessions.clone();
-        self.inherit_private(&other);
+    pub fn merge(&mut self, mut other: Self) {
+        other.inherit_private(self);
+        *self = other;
     }
 }
 
@@ -1749,7 +1764,27 @@ where
             attached: iframe_sessions.clone(),
         }));
     }
+    fn collect_live_nodes(node: &Value, session: &str, nodes: &mut HashSet<(String, i64)>) {
+        if let Some(backend) = node["backendNodeId"].as_i64() {
+            nodes.insert((session.to_owned(), backend));
+        }
+        for key in ["children", "shadowRoots", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                collect_live_nodes(child, session, nodes);
+            }
+        }
+        for key in ["contentDocument", "templateContent"] {
+            if let Some(child) = node.get(key) {
+                collect_live_nodes(child, session, nodes);
+            }
+        }
+    }
+    let mut live_nodes = HashSet::new();
+    for document in &documents {
+        collect_live_nodes(&document.root, &document.session, &mut live_nodes);
+    }
     let mut observation = Observation {
+        live_nodes: Some(live_nodes),
         frame_sessions: visited
             .into_iter()
             .filter(|session| session != top_session)

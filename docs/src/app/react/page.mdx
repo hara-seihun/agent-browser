@@ -1,6 +1,6 @@
 # React & Web Vitals
 
-Native React tree, component, and Suspense inspection remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` before collecting output on current or remembered sensitive tabs. Detection is sticky for the daemon/tab lifetime, including navigation. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
+Native React tree, component, and Suspense inspection remain functional on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` before collecting output on current or remembered sensitive tabs. A complete live inventory retires protection for detached controls; remembered secret values remain redacted for the daemon/tab lifetime. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Enable React inspection
 

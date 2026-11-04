@@ -1,6 +1,6 @@
 # Quick Start
 
-Native form inspection protects card, password, and one-time-code values without changing live fields; `cc-name` remains public. Eval and screenshot/PDF channels work on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` on current or remembered sensitive tabs; detection is sticky for the daemon/tab lifetime, including navigation. Continuous capture and `addinitscript` are always refused. There is no bypass flag. See [Security](/security#native-sensitive-form-inputs) for the exact protected API scope and markers.
+Native form inspection protects card, password, and one-time-code values without changing live fields; `cc-name` remains public. Eval and screenshot/PDF channels work on benign tabs but return `SENSITIVE_OUTPUT_UNSUPPORTED` on current or remembered sensitive tabs; A complete live inventory retires protection for detached controls; remembered secret values remain redacted for the daemon/tab lifetime. Continuous capture and `addinitscript` are always refused. There is no bypass flag. See [Security](/security#native-sensitive-form-inputs) for the exact protected API scope and markers.
 
 ## Core workflow
 

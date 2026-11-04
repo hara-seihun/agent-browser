@@ -3929,8 +3929,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Guarded on current or remembered sensitive tabs: eval/evalhandle, addscript,
   wait --fn, annotated screenshots/PDF/diffs, active-tab read and
   browser-data output (logs/network/React/a11y/WebMCP/clipboard/storage/cookies/state).
-  Guarded commands stay functional on benign tabs. Detection is sticky for the
-  daemon/tab lifetime, including field removal and navigation. Refusals use
+  Guarded commands stay functional on benign tabs. A complete live inventory
+  retires detached controls; remembered secret values remain redacted. Refusals use
   SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes. Use protected
   snapshots/getters on sensitive tabs.
   get url reads browser target metadata without DOM/frame inventory or evaluation.
