@@ -74,6 +74,25 @@ impl Download {
                 Ok(Err(_)) => return Err("Download event stream closed".into()),
                 Err(_) => return Err("Timeout waiting for download; the click was not repeated".into()),
             };
+            // Statements and exports may open a new tab which immediately becomes
+            // a download. Its main frame is the new target, not the initiating
+            // tab's frame. Follow only popups opened by this download's frames;
+            // another tab's concurrent download must not be saved here.
+            if matches!(
+                event.method.as_str(),
+                "Target.targetCreated" | "Target.targetInfoChanged" | "Target.attachedToTarget"
+            ) {
+                let info = &event.params["targetInfo"];
+                if ["openerFrameId", "openerId"].iter().any(|key| {
+                    info[*key]
+                        .as_str()
+                        .is_some_and(|id| self.frames.contains(id))
+                }) {
+                    if let Some(id) = info["targetId"].as_str() {
+                        self.frames.insert(id.to_owned());
+                    }
+                }
+            }
             if event.method == "Browser.downloadWillBegin" {
                 if !event.params["frameId"]
                     .as_str()
