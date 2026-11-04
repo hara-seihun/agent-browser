@@ -83,6 +83,7 @@ const TOOL_SET_CREDENTIALS: &str = "agent_browser_set_credentials";
 const TOOL_SET_MEDIA: &str = "agent_browser_set_media";
 const TOOL_NETWORK_ROUTE: &str = "agent_browser_network_route";
 const TOOL_NETWORK_UNROUTE: &str = "agent_browser_network_unroute";
+const TOOL_PAYMENT_ERRORS: &str = "agent_browser_payment_errors";
 const TOOL_NETWORK_REQUESTS: &str = "agent_browser_network_requests";
 const TOOL_NETWORK_REQUEST: &str = "agent_browser_network_request";
 const TOOL_NETWORK_HAR_START: &str = "agent_browser_network_har_start";
@@ -1203,6 +1204,13 @@ fn parity_tools() -> Vec<Value> {
             "Network unroute",
             "Remove network routes.",
             json!({ "url": { "type": "string" } }),
+            &[],
+        ),
+        tool(
+            TOOL_PAYMENT_ERRORS,
+            "Payment errors",
+            "Read safe Stripe payment error codes and nonsecret identifiers, including on protected tabs. Never returns raw network data.",
+            json!({ "clear": { "type": "boolean" } }),
             &[],
         ),
         tool(
@@ -2388,6 +2396,13 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_MEDIA => call_set_media(arguments),
         TOOL_NETWORK_ROUTE => call_network_route(arguments),
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
+        TOOL_PAYMENT_ERRORS => {
+            let mut args = vec!["network".to_string(), "payment-errors".to_string()];
+            if optional_bool(arguments, "clear")?.unwrap_or(false) {
+                args.push("--clear".to_string());
+            }
+            call_cli_tool(arguments, args, None)
+        }
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
         TOOL_NETWORK_HAR_START => {
@@ -4826,8 +4841,14 @@ mod tests {
 
     #[test]
     fn set_media_args_keep_color_and_motion_preferences_independent() {
-        let args = set_media_args(&json!({"colorScheme":"no-preference", "reducedMotion":"no-preference"})).unwrap();
-        assert_eq!(args, vec!["set", "media", "no-preference", "no-reduced-motion"]);
+        let args = set_media_args(
+            &json!({"colorScheme":"no-preference", "reducedMotion":"no-preference"}),
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec!["set", "media", "no-preference", "no-reduced-motion"]
+        );
         let args = set_media_args(&json!({"colorScheme":"dark"})).unwrap();
         assert_eq!(args, vec!["set", "media", "dark"]);
     }

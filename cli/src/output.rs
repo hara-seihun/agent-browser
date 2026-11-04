@@ -2556,15 +2556,29 @@ Subcommands:
     --type <types>           Filter by resource type (comma-separated: xhr,fetch,document)
     --method <method>        Filter by HTTP method (GET, POST, etc.)
     --status <code>          Filter by status (200, 2xx, 400-499)
+  payment-errors [--clear]   Safe Stripe error diagnostics, including on sensitive tabs
+    --clear                  Clear active-tab payment diagnostics
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
     --content <mode>         Response bodies to embed on start: text (default), all, none
+
+Payment diagnostics:
+  Captured prospectively while the daemon runs; earlier traffic is not recovered.
+  Reads only trusted https://api.stripe.com/v1/ payment_intents, setup_intents,
+  and payment_methods endpoints. No arbitrary endpoint option.
+  Safe fields: processor="stripe", http_status, fixed allowlisted error_type,
+  code, decline_code, request_id (req_), intent_id (pi_/seti_, no secrets).
+  Unrecognized values are omitted. body_status explains unavailable, non-JSON,
+  or oversized bodies. Never exposes raw responses, card fields, client secrets,
+  billing data, or URLs.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
+  agent-browser network payment-errors
+  agent-browser network payment-errors --clear
   agent-browser network route "**/api/*" --abort
   agent-browser network route "**/data.json" --body '{"mock": true}'
   agent-browser network unroute
@@ -4029,6 +4043,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  payment-errors [--clear]   Safe Stripe diagnostics on sensitive tabs
   har <start|stop> [path]
 
 Storage:

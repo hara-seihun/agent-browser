@@ -1,6 +1,6 @@
 # Network
 
-Native HAR commands are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or file writes. Requests and response-detail output remain functional on benign tabs but refuse on current or remembered sensitive tabs. A complete live inventory retires protection for detached controls; remembered secret values remain redacted for the daemon/tab lifetime. Use protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
+Native HAR commands are always refused with `SENSITIVE_OUTPUT_UNSUPPORTED` before capture or file writes. Requests and response-detail output remain functional on benign tabs but refuse on current or remembered sensitive tabs. A complete live inventory retires protection for detached controls; remembered secret values remain redacted for the daemon/tab lifetime. Use `network payment-errors` for safe Stripe diagnostics, or protected snapshots and getters on sensitive tabs. There is no bypass flag; see [sensitive form input protection](/security#native-sensitive-form-inputs).
 
 ## Request routing
 
@@ -54,6 +54,17 @@ agent-browser network requests --clear
 </table>
 
 Use `network request <requestId>` to inspect one request and response in detail after finding its ID in `network requests`.
+
+## Safe payment errors
+
+```bash
+agent-browser network payment-errors
+agent-browser network payment-errors --clear
+```
+
+`network payment-errors [--clear]` reads safe Stripe error diagnostics even on sensitive tabs. Diagnostics are captured prospectively while the daemon runs; earlier traffic is not recovered. `--clear` clears the active tab's diagnostics.
+
+Only trusted `https://api.stripe.com/v1/` payment_intents, setup_intents, and payment_methods endpoints are read. There is no option for arbitrary endpoints. Output contains only `processor="stripe"`, `http_status`, fixed allowlisted `error_type`, `code`, and `decline_code`, `request_id` (`req_`), and `intent_id` (`pi_` or `seti_`, without secrets). Unrecognized values are omitted. `body_status` explains unavailable, non-JSON, or oversized bodies. Raw responses, card fields, client secrets, billing data, and URLs are never exposed.
 
 ## HAR export
 

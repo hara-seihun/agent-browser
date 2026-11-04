@@ -31,6 +31,7 @@ pub mod interaction;
 #[allow(dead_code)]
 pub mod network;
 pub(crate) mod observation_progress;
+pub(crate) mod payment_errors;
 #[allow(dead_code)]
 pub mod policy;
 #[allow(dead_code)]

@@ -1357,14 +1357,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                         j += 2;
                     }
-                    if [
-                        "credentialProvider",
-                        "credentialItem",
-                        "field",
-                        "selector",
-                    ]
-                    .iter()
-                    .any(|key| cmd.get(*key).is_none())
+                    if ["credentialProvider", "credentialItem", "field", "selector"]
+                        .iter()
+                        .any(|key| cmd.get(*key).is_none())
                     {
                         return Err(ParseError::MissingArguments {
                             context: "auth fill".into(),
@@ -3653,7 +3648,14 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
+    const VALID: &[&str] = &[
+        "route",
+        "unroute",
+        "requests",
+        "request",
+        "payment-errors",
+        "har",
+    ];
 
     match rest.first().copied() {
         Some("route") => {
@@ -3709,6 +3711,15 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             Ok(cmd)
         }
+        Some("payment-errors") => {
+            if rest.iter().skip(1).any(|arg| *arg != "--clear") {
+                return Err(ParseError::InvalidValue {
+                    message: "payment-errors accepts only --clear".into(),
+                    usage: "network payment-errors [--clear]",
+                });
+            }
+            Ok(json!({"id": id, "action": "payment_errors", "clear": rest.contains(&"--clear")}))
+        }
         Some("request") => {
             let request_id = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network request".to_string(),
@@ -3761,7 +3772,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|har> [args...]",
+            usage: "network <route|unroute|requests|request|payment-errors|har> [args...]",
         }),
     }
 }
@@ -5742,7 +5753,8 @@ mod tests {
 
     #[test]
     fn test_set_media_explicit_motion_override() {
-        let cmd = parse_command(&args("set media dark no-reduced-motion"), &default_flags()).unwrap();
+        let cmd =
+            parse_command(&args("set media dark no-reduced-motion"), &default_flags()).unwrap();
         assert_eq!(cmd["colorScheme"], "dark");
         assert_eq!(cmd["reducedMotion"], "no-preference");
         let cmd = parse_command(&args("set media no-preference"), &default_flags()).unwrap();
@@ -6979,8 +6991,11 @@ mod tests {
         assert_eq!(cmd["timeout"], 2000);
         // Split month/year boxes (#expirationMM, #expirationYYYY) each take one part.
         for split in ["mm", "yy", "yyyy"] {
-            let cmd = parse_command(&args(&format!("{expiry} --format {split}")), &default_flags())
-                .unwrap();
+            let cmd = parse_command(
+                &args(&format!("{expiry} --format {split}")),
+                &default_flags(),
+            )
+            .unwrap();
             assert_eq!(cmd["format"], split);
         }
         assert!(parse_command(&args(&format!("{expiry} --format dd")), &default_flags()).is_err());
@@ -6992,13 +7007,20 @@ mod tests {
         // The target defaults to the active tab and may be a tab id such as `t1`;
         // the daemon resolves it (see native auth_fill::canonical_target).
         let active = parse_command(
-            &args(&base.replace(" --target page", "").replace(" --frame main", "")),
+            &args(
+                &base
+                    .replace(" --target page", "")
+                    .replace(" --frame main", ""),
+            ),
             &default_flags(),
         )
         .unwrap();
         assert!(active.get("target").is_none() && active.get("frame").is_none());
-        let tab = parse_command(&args(&base.replace("--target page", "--target t1")), &default_flags())
-            .unwrap();
+        let tab = parse_command(
+            &args(&base.replace("--target page", "--target t1")),
+            &default_flags(),
+        )
+        .unwrap();
         assert_eq!(tab["target"], "t1");
     }
 

@@ -621,6 +621,7 @@ pub struct DaemonState {
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
     pub tracked_requests: Vec<TrackedRequest>,
+    pub payment_errors: Vec<super::payment_errors::Candidate>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
@@ -775,6 +776,7 @@ impl DaemonState {
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
             tracked_requests: Vec::new(),
+            payment_errors: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
@@ -1997,6 +1999,34 @@ impl DaemonState {
                         _ => {}
                     }
 
+                    // Independently retain only trusted Stripe error metadata; raw network
+                    // inspection stays disabled on sensitive pages. Scope to the active
+                    // tab and its known frames, never background pages.
+                    if event.method == "Network.responseReceived" {
+                        if let Some(owner) = self
+                            .browser
+                            .as_ref()
+                            .and_then(|b| b.active_session_id().ok())
+                        {
+                            if event.session_id.as_deref() == Some(owner)
+                                || event
+                                    .session_id
+                                    .as_ref()
+                                    .is_some_and(|sid| self.active_iframe_sessions.contains(sid))
+                            {
+                                if let Some(mut candidate) = super::payment_errors::candidate(
+                                    &event.params,
+                                    event.session_id.as_deref(),
+                                ) {
+                                    candidate.owner_session = owner.to_owned();
+                                    if self.payment_errors.len() >= 128 {
+                                        self.payment_errors.remove(0);
+                                    }
+                                    self.payment_errors.push(candidate);
+                                }
+                            }
+                        }
+                    }
                     let session_matches = if let Some(ref browser) = self.browser {
                         event.session_id.as_deref() == browser.active_session_id().ok()
                     } else {
@@ -3152,7 +3182,7 @@ async fn execute_command_inner(
         .and_then(|mgr| mgr.active_target_id().ok())
         .map(str::to_owned);
 
-    let browser_metadata_only = action == "url";
+    let browser_metadata_only = matches!(action, "url" | "payment_errors");
 
     // Dialogs and URL metadata must run before renderer-dependent setup or observation.
     // Keep other notifications for the next ordinary command rather than losing
@@ -3701,6 +3731,7 @@ async fn execute_command_inner(
                 "unroute" => handle_unroute(cmd, state).await,
                 "requests" => handle_requests(cmd, state).await,
                 "request_detail" => handle_request_detail(cmd, state).await,
+                "payment_errors" => handle_payment_errors(cmd, state).await,
                 "credentials" => handle_http_credentials(cmd, state).await,
                 "emulatemedia" => handle_set_media(cmd, state).await,
                 "auth_save" => handle_auth_save(cmd).await,
@@ -11714,6 +11745,64 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
     }
     let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
     Ok(json!({ "selected": selected }))
+}
+
+/// Safe typed projection, available even with protected card controls. CDP
+/// failures are converted to fixed statuses, never passed through as raw text.
+async fn handle_payment_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state
+        .browser
+        .as_ref()
+        .ok_or("PAYMENT_ERRORS_UNAVAILABLE: Chrome is required")?;
+    let active = mgr.active_session_id()?.to_owned();
+    if cmd.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+        state
+            .payment_errors
+            .retain(|entry| entry.owner_session != active);
+        return Ok(json!({"payment_errors": [], "cleared": true}));
+    }
+    let mut errors = Vec::new();
+    for candidate in state
+        .payment_errors
+        .iter()
+        .filter(|entry| entry.owner_session == active)
+    {
+        let response = mgr
+            .client
+            .send_command(
+                "Network.getResponseBody",
+                Some(json!({"requestId": candidate.cdp_id})),
+                Some(&candidate.session),
+            )
+            .await
+            .ok();
+        let decoded = response.as_ref().and_then(|response| {
+            let body = response.get("body")?.as_str()?;
+            if body.len() > 349528 {
+                return None;
+            }
+            if response
+                .get("base64Encoded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                use base64::Engine;
+                String::from_utf8(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(body)
+                        .ok()?,
+                )
+                .ok()
+            } else {
+                Some(body.to_owned())
+            }
+        });
+        errors.push(super::payment_errors::project(
+            candidate,
+            decoded.as_deref(),
+        ));
+    }
+    Ok(json!({"payment_errors": errors}))
 }
 
 async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, String> {

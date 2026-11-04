@@ -376,12 +376,18 @@ agent-browser network requests --filter api    # Filter requests
 agent-browser network requests --type xhr,fetch  # Filter by resource type
 agent-browser network requests --method POST   # Filter by HTTP method
 agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
+agent-browser network payment-errors           # Safe Stripe diagnostics on sensitive tabs
+agent-browser network payment-errors --clear   # Clear active-tab diagnostics
 agent-browser network request <requestId>      # View full request/response detail
 agent-browser network har start                # Start HAR recording (embeds text response bodies)
 agent-browser network har start --content all  # Embed all response bodies (binary as base64)
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
+
+`network payment-errors [--clear]` reads safe Stripe error diagnostics even on sensitive tabs. Diagnostics are captured prospectively while the daemon runs; earlier traffic is not recovered. `--clear` clears the active tab's diagnostics.
+
+Only trusted `https://api.stripe.com/v1/` payment_intents, setup_intents, and payment_methods endpoints are read. There is no option for arbitrary endpoints. Output contains only `processor="stripe"`, `http_status`, fixed allowlisted `error_type`, `code`, and `decline_code`, `request_id` (`req_`), and `intent_id` (`pi_` or `seti_`, without secrets). Unrecognized values are omitted. `body_status` explains unavailable, non-JSON, or oversized bodies. Raw responses, card fields, client secrets, billing data, and URLs are never exposed.
 
 ### Tabs & Windows
 
