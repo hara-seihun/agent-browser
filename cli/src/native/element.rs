@@ -468,6 +468,65 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
+/// Native checkboxes often have a clipped, offscreen input and a painted label.
+/// Pick an actually hit-testable part of the input or its associated label before
+/// any pointer event. Never activate with JavaScript or retry a dispatched click.
+pub(super) async fn resolve_checkbox_point(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    ref_map: &RefMap,
+    selector: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<(f64, f64)>, String> {
+    let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object_id,
+        "functionDeclaration": include_str!("checkbox_point.js"),
+        "returnByValue": true,
+    })), Some(session_id)).await?;
+    if result.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: checkbox hit testing failed before dispatch".into());
+    }
+    let value = &result["result"]["value"];
+    if value.is_null() { return Ok(None); }
+    let (Some(mut x), Some(mut y)) = (value["x"].as_f64(), value["y"].as_f64()) else {
+        return Err("click_not_hittable: checkbox and associated labels have no unobstructed activation point; no pointer events dispatched".into());
+    };
+    // A same-process frame shares the page's CDP input session, but its DOM
+    // rectangles are frame-local. Resolve the owner from CDP, including when
+    // cross-origin access to window.frameElement is unavailable.
+    let frame_id = parse_ref(selector)
+        .and_then(|r| ref_map.get(&r).and_then(|e| e.frame_id.clone()))
+        .or_else(active_frame);
+    if let Some(frame_id) = frame_id.filter(|id| !iframe_sessions.contains_key(id)) {
+        let owner = frame_owner_object_id(client, session_id, &frame_id).await?;
+        let offset = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+            "objectId": owner,
+            "functionDeclaration": r#"function() {
+                let x=0, y=0, owner=this;
+                while (owner) {
+                    const r=owner.getBoundingClientRect();
+                    x += r.x + owner.clientLeft; y += r.y + owner.clientTop;
+                    owner=owner.ownerDocument.defaultView.frameElement;
+                }
+                return {x, y};
+            }"#,
+            "returnByValue":true,
+        })), Some(session_id)).await?;
+        let (Some(dx), Some(dy)) = (offset["result"]["value"]["x"].as_f64(), offset["result"]["value"]["y"].as_f64()) else {
+            return Err("click_state_unavailable: checkbox frame coordinates unavailable before dispatch".into());
+        };
+        x += dx; y += dy;
+    }
+    let described = client.send_command("DOM.describeNode", Some(serde_json::json!({
+        "objectId":object_id, "depth":0,
+    })), Some(session_id)).await?;
+    let backend_id = described["node"]["backendNodeId"].as_i64()
+        .ok_or("click_state_unavailable: checkbox node unavailable before dispatch")?;
+    check_node_interception(client, session_id, backend_id, selector, x, y).await?;
+    Ok(Some((x, y)))
+}
+
 /// Hit-test a ref-resolved node at its computed click point and error if an
 /// unrelated element (overlay, banner, sticky header) would receive the input
 /// instead. Best effort: resolution failures skip the check rather than block
@@ -822,7 +881,7 @@ fn build_count_elements_js(selector: &str) -> String {
 /// description of the element that would actually receive a click at (x, y)
 /// when that element is unrelated to `el`, or null when the click would land
 /// on `el` (or something that activates it). Relations that count as "lands
-/// on el": shadow-including ancestors/descendants in either direction, and
+/// on el": shadow-including descendants, and
 /// label/control association (custom checkboxes hide the input under a styled
 /// sibling inside the same label).
 const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
@@ -837,10 +896,10 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
         d = hit.contentDocument;
         hit = d.elementFromPoint(lx, ly);
     }
-    if (!hit || hit === el) return null;
+    if (!hit) return "no element in viewport";
+    if (hit === el) return null;
     const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
     for (let n = hit; n; n = up(n)) { if (n === el) return null; }
-    for (let n = el; n; n = up(n)) { if (n === hit) return null; }
     const hitLabel = hit.closest ? hit.closest('label') : null;
     if (hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
     const elLabel = el.closest ? el.closest('label') : null;
