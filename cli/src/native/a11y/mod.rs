@@ -479,22 +479,37 @@ pub(super) async fn collect_frame_sessions(
         collect_frame_targets(tree, top_session_id, iframe_sessions, &mut targets);
     }
 
-    // Query every attached iframe target. The top target's frame tree can
-    // omit descendants below an OOPIF, while the OOPIF's own tree exposes
-    // those same-process descendants with the correct execution session.
-    let mut session_entries: Vec<_> = iframe_sessions.values().collect();
-    session_entries.sort_unstable();
-    session_entries.dedup();
-    for session_id in session_entries {
-        let Some(tree) = client
-            .send_command_no_params("Page.getFrameTree", Some(session_id))
-            .await
-            .ok()
-            .and_then(|result| result.get("frameTree").cloned())
-        else {
-            continue;
-        };
-        collect_frame_targets(&tree, session_id, iframe_sessions, &mut targets);
+    // Walk only sessions proven reachable from this page, in parallel by
+    // frontier. Querying every retained session first made an unrelated slow
+    // background iframe consume the protected observation's whole deadline.
+    // Dedicated trees still discover same-process descendants and deeper OOPIFs.
+    let mut queried = HashSet::from([top_session_id.to_string()]);
+    loop {
+        let frontier: HashSet<_> = targets
+            .values()
+            .filter(|target| frame_reaches_top(&target.frame_id, &top_frame_id, &targets))
+            .map(|target| target.session_id.clone())
+            .filter(|session| !queried.contains(session))
+            .collect();
+        if frontier.is_empty() {
+            break;
+        }
+        queried.extend(frontier.iter().cloned());
+        let trees =
+            futures_util::future::join_all(frontier.into_iter().map(|session| async move {
+                let tree = client
+                    .send_command_no_params("Page.getFrameTree", Some(&session))
+                    .await
+                    .ok()
+                    .and_then(|result| result.get("frameTree").cloned());
+                (session, tree)
+            }))
+            .await;
+        for (session, tree) in trees {
+            if let Some(tree) = tree {
+                collect_frame_targets(&tree, &session, iframe_sessions, &mut targets);
+            }
+        }
     }
 
     // The daemon retains sessions for background tabs. Keep only frames whose
@@ -900,6 +915,108 @@ mod tests {
 
         assert!(frame_reaches_top("active-child", "top", &targets));
         assert!(!frame_reaches_top("background-child", "top", &targets));
+    }
+
+    /// A stalled background target must never be queried by an event drain.
+    /// Sibling reads overlap, and a nested target omitted from the top tree
+    /// remains covered when its owning OOPIF exposes it.
+    #[tokio::test]
+    async fn active_frame_scope_skips_background_and_walks_parallel_frontiers() {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut sibling_requests = Vec::new();
+            let mut seen = HashSet::new();
+            while let Some(Ok(message)) = socket.next().await {
+                if !message.is_text() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "Page.getFrameTree");
+                let session = request["sessionId"].as_str().unwrap().to_string();
+                seen.insert(session.clone());
+                // Like a suspended foreign renderer: it never answers.
+                if session == "background-session" {
+                    continue;
+                }
+                let tree = match session.as_str() {
+                    "top-session" => json!({"frame":{"id":"top"},"childFrames":[
+                        {"frame":{"id":"left","parentId":"top"}},
+                        {"frame":{"id":"right","parentId":"top"}}
+                    ]}),
+                    "left-session" => json!({"frame":{"id":"left"},"childFrames":[
+                        {"frame":{"id":"nested","parentId":"left"}}
+                    ]}),
+                    "right-session" => json!({"frame":{"id":"right"}}),
+                    "nested-session" => json!({"frame":{"id":"nested"},"childFrames":[
+                        {"frame":{"id":"local-child","parentId":"nested"}}
+                    ]}),
+                    other => panic!("unexpected session {other}"),
+                };
+                let reply = json!({"id":request["id"],"result":{"frameTree":tree}});
+                if session == "left-session" || session == "right-session" {
+                    sibling_requests.push(reply);
+                    if sibling_requests.len() != 2 {
+                        continue;
+                    }
+                    for reply in sibling_requests.drain(..) {
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                reply.to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                } else {
+                    socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            reply.to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                if session == "nested-session" {
+                    return seen;
+                }
+            }
+            seen
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let sessions = HashMap::from([
+            ("left".into(), "left-session".into()),
+            ("right".into(), "right-session".into()),
+            ("nested".into(), "nested-session".into()),
+            ("background".into(), "background-session".into()),
+        ]);
+        let active = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            active_iframe_session_ids(&client, "top-session", &sessions),
+        )
+        .await
+        .expect("frame scope must not wait for a foreign renderer or serial siblings")
+        .unwrap();
+        assert_eq!(
+            active,
+            HashSet::from([
+                "left-session".into(),
+                "right-session".into(),
+                "nested-session".into()
+            ])
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            HashSet::from([
+                "top-session".into(),
+                "left-session".into(),
+                "right-session".into(),
+                "nested-session".into()
+            ])
+        );
     }
 
     #[test]
