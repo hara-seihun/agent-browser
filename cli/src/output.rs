@@ -646,6 +646,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             }
             return;
         }
+        if action == Some("url") && data["sanitized"] == true {
+            eprintln!("URL sanitized: userinfo, query and fragment omitted; opaque URLs redacted.");
+        }
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
@@ -3930,6 +3933,10 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   daemon/tab lifetime, including field removal and navigation. Refusals use
   SENSITIVE_OUTPUT_UNSUPPORTED before execution, capture or writes. Use protected
   snapshots/getters on sensitive tabs.
+  get url reads browser target metadata without DOM/frame inventory or evaluation.
+  URL userinfo/query/fragment are omitted; opaque URLs are redacted. JSON reports
+  sanitized:true when components were omitted; text output prints a notice.
+  Remembered credential fragments remain redacted.
   Downloads save the completed browser file on sensitive authenticated tabs too;
   they do not export rendered page or control contents.
   Plain screenshots are never refused: every rendered sensitive control the guard
@@ -3937,7 +3944,7 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   cross-origin frames) is painted black before the image is written; the response
   reports guard.maskedControls.
   When the inventory cannot be taken, commands with no page content in their output
-  (open, url, title, click, type, press, scroll, waits, tab list, frame switches...)
+  (open, title, click, type, press, scroll, waits, tab list, frame switches...)
   and plain screenshots still run, protected by what earlier observations identified,
   and report guard.observation {status: incomplete, reason}. Other observation errors
   fail closed.

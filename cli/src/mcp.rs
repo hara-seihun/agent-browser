@@ -949,7 +949,7 @@ fn tools() -> Vec<Value> {
         tool(TOOL_GET_TEXT, "Get text", "Get visible text from an element.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_GET_HTML, "Get HTML", "Get innerHTML from an element.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_GET_VALUE, "Get value", "Get an input value.", json!({ "selector": selector_schema() }), &["selector"]),
-        tool(TOOL_GET_URL, "Get URL", "Get the current page URL.", json!({}), &[]),
+        tool(TOOL_GET_URL, "Get URL", "Get the selected target URL from browser metadata without DOM/frame inventory or evaluation. Userinfo, query and fragment are omitted; opaque URLs and remembered credential fragments are redacted. JSON sanitized:true and a text notice identify omitted components.", json!({}), &[]),
         tool(TOOL_GET_TITLE, "Get title", "Get the current page title.", json!({}), &[]),
         tool(TOOL_GET_CDP_URL, "Get CDP URL", "Get the current browser CDP URL.", json!({}), &[]),
         tool(

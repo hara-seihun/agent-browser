@@ -1,5 +1,7 @@
 # agent-browser
 
+`get url` reads the selected target’s browser metadata without DOM/frame inventory or page evaluation. It omits URL userinfo, query and fragment, redacts opaque URLs, and still masks remembered credential fragments. JSON includes `sanitized: true` when URL components were omitted; text output also prints a sanitization notice. Use the result to identify the page, not to reconstruct query-dependent application state.
+
 Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
 
 Browser automation CLI for AI agents. Fast native Rust CLI.

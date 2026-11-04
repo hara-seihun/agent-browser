@@ -1331,6 +1331,25 @@ impl BrowserManager {
         poll_network_idle(session_id, rx, timeout).await
     }
 
+    /// Read the explicitly bound target's current URL without touching the
+    /// renderer. This remains usable during dialogs and stalled frame setup.
+    pub async fn get_url_metadata(&self) -> Result<String, String> {
+        let target = self.active_target_id()?;
+        let result = self
+            .client
+            .send_command(
+                "Target.getTargetInfo",
+                Some(json!({ "targetId": target })),
+                None,
+            )
+            .await?;
+        result["targetInfo"]["url"]
+            .as_str()
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| "Browser target metadata returned no URL string".into())
+    }
+
     pub async fn get_url(&self) -> Result<String, String> {
         let result = self.evaluate_simple("location.href").await?;
         match result.as_str() {

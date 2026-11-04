@@ -2758,7 +2758,7 @@ fn skip_launch_action(action: &str) -> bool {
 fn should_validate_restore_after_action(action: &str) -> bool {
     !matches!(
         action,
-        "launch" | "session_info" | "close" | "dialog" | "auth_fill" | "auth_export"
+        "launch" | "session_info" | "close" | "dialog" | "url" | "auth_fill" | "auth_export"
     )
 }
 
@@ -3098,15 +3098,18 @@ async fn execute_command_inner(
         .and_then(|mgr| mgr.active_target_id().ok())
         .map(str::to_owned);
 
-    // Dialogs must run before any renderer-dependent setup or observation.
+    let browser_metadata_only = action == "url";
+
+    // Dialogs and URL metadata must run before renderer-dependent setup or observation.
     // Keep other notifications for the next ordinary command rather than losing
     // attached frames, network controls, or target lifecycle changes.
-    if action == "dialog" {
+    if action == "dialog" || browser_metadata_only {
         let drained = state.drain_cdp_events();
         state.deferred_dialog_events.push_back(drained);
     }
     // Lifecycle commands must not wait for renderer or iframe setup events.
     if !matches!(action, "dialog" | "snapshot" | "session_info" | "close")
+        && !browser_metadata_only
         && !lifecycle_confirmation
     {
         if let Err(e) = state.drain_cdp_events_background().await {
@@ -3392,7 +3395,7 @@ async fn execute_command_inner(
     let input_acknowledgement = super::sensitive::input_acknowledgement(action, cmd);
     let observation_session = if matches!(action, "snapshot" | "dialog") {
         None
-    } else if input_acknowledgement {
+    } else if input_acknowledgement || browser_metadata_only {
         // These responses contain no page content. Keep remembered redaction,
         // but do not read the renderer before or after dispatching input.
         state
@@ -3497,7 +3500,7 @@ async fn execute_command_inner(
         }
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
-        "url" => handle_url(state).await,
+        "url" => handle_url_metadata(state).await,
         "cdp_url" => handle_cdp_url(state),
         "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
@@ -3770,6 +3773,7 @@ async fn execute_command_inner(
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
     if !matches!(action, "dialog" | "snapshot" | "close" | "session_info")
+        && !browser_metadata_only
         && !lifecycle_confirmation
     {
         if input_acknowledgement {
@@ -3825,6 +3829,7 @@ async fn execute_command_inner(
         // A masked screenshot observes after capture itself, before writing.
         if !matches!(action, "auth_fill" | "auth_export")
             && !input_acknowledgement
+            && !browser_metadata_only
             // A successful click may have opened a native dialog. Its response
             // has no page content; protect it with the pre-command inventory
             // rather than reading the now-blocked renderer again.
@@ -6322,6 +6327,24 @@ async fn navigate_active_page(
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
+}
+
+/// URL output is browser metadata, not a document observation. Strip opaque
+/// payloads and credential-bearing URL components without reading form values;
+/// the common response boundary still applies remembered secret redaction.
+async fn handle_url_metadata(state: &DaemonState) -> Result<Value, String> {
+    let raw = if let Some(mgr) = state.browser.as_ref() {
+        mgr.get_url_metadata().await?
+    } else if let Some(wb) = state.webdriver_backend.as_ref() {
+        wb.get_url().await?
+    } else {
+        return Err("Browser not launched".into());
+    };
+    let safe = tab_binding::sanitize_url(&raw);
+    Ok(json!({
+        "url": if safe.is_empty() { "[redacted: credential]" } else { &safe },
+        "sanitized": safe != raw,
+    }))
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
