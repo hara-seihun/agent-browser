@@ -951,6 +951,8 @@ agent-browser --session secure --restore open example.com
 
 Native sensitive form input protection is always active. Other security controls below are opt-in.
 
+Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric post IDs; known secrets and protected payment controls remain redacted.
+
 ### Native sensitive form inputs
 
 Click and other input-only acknowledgements return after input dispatch without a fresh page inventory or post-action frame setup. They do not confirm that the application accepted the action; inspect a new snapshot to learn the outcome, and never replay an uncertain payment or submission automatically. Snapshots include represented presentational iframes as well as ordinary iframes, with the same protected-value handling.

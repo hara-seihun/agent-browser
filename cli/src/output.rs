@@ -1775,6 +1775,7 @@ Usage: agent-browser fill <selector> <text>
 
 Non-secret emails, usernames and addresses are allowed, including beside password fields.
 Use auth fill for passwords, payment credentials and one-time codes.
+Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric post IDs; known secrets and protected payment controls remain redacted.
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
