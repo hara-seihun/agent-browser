@@ -70,36 +70,55 @@ async function(value, route) {
         this.dispatchEvent(new view.Event('change', { bubbles: true }));
     }
     const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
-    // Temporal and protected form edits retain their rendering barrier. Ordinary
-    // text waits a task for application validators, including in background tabs.
-    if (temporal || route === 'bound-form' || value === '') {
-        const rendering = await new Promise(resolve => {
-            let frame, secondFrame, task;
-            let settled = false;
-            const finish = status => {
-                if (settled) return;
-                settled = true;
-                if (frame !== undefined) view.cancelAnimationFrame(frame);
-                if (secondFrame !== undefined) view.cancelAnimationFrame(secondFrame);
-                if (task !== undefined) view.clearTimeout(task);
-                view.clearTimeout(deadline);
-                resolve(status);
-            };
-            const deadline = view.setTimeout(() => finish('render_timeout'), 100);
-            frame = view.requestAnimationFrame(() => {
-                secondFrame = view.requestAnimationFrame(() => {
-                    task = view.setTimeout(() => finish('rendered'), 0);
-                });
-            });
-        });
-        if (rendering !== 'rendered') return { status: rendering };
+    // Ordinary edits (including clearing a rich editor) need application tasks,
+    // not painted frames, which Chrome may suspend in background tabs. Keep the
+    // existing two-frame barrier for temporal/protected form validators. The
+    // command's deadline owns that wait; a second 100 ms deadline falsely fails
+    // healthy but delayed frames. No edit is retried when the command expires.
+    if (temporal || route === 'bound-form') {
+        await new Promise(resolve => view.requestAnimationFrame(() => {
+            view.requestAnimationFrame(() => view.setTimeout(resolve, 0));
+        }));
     } else {
         await new Promise(resolve => view.setTimeout(resolve, 0));
     }
     if (!this.isConnected) return { status: 'target_detached' };
-    // Chrome leaves a caret placeholder <br> after deleting an editor's last
-    // character. Its innerText is a newline even though no text remains.
-    const actual = contenteditable ? (expected === '' && this.textContent === '' ? '' : this.innerText) : this.value;
-    if (actual !== expected) return { status: 'value_not_retained' };
+    // innerText is presentation text: adjacent <p> elements add two newlines,
+    // while Quill/DraftJS plain text has one block separator. Serialize the DOM
+    // blocks instead, preserving actual spaces, empty blocks and explicit breaks.
+    // A final <br> in each block is Chrome's caret placeholder, not another line.
+    const editorText = (container, block = true) => {
+        const parts = [];
+        let inline = '', hasInline = false, finalBreak = false;
+        const flush = () => {
+            if (hasInline) parts.push(finalBreak && block ? inline.slice(0, -1) : inline);
+            inline = ''; hasInline = false; finalBreak = false;
+        };
+        for (const node of container.childNodes) {
+            if (node.nodeType === view.Node.TEXT_NODE) {
+                if (node.data) { inline += node.data; hasInline = true; finalBreak = false; }
+            } else if (node.nodeType === view.Node.ELEMENT_NODE) {
+                const display = view.getComputedStyle(node).display;
+                if (display === 'none') continue;
+                if (node.tagName === 'BR') {
+                    inline += '\n'; hasInline = true; finalBreak = true;
+                } else if (['block', 'flow-root', 'list-item', 'flex', 'grid', 'table', 'table-row'].includes(display)) {
+                    flush();
+                    parts.push(editorText(node));
+                } else {
+                    const text = editorText(node, false);
+                    if (text) { inline += text; hasInline = true; finalBreak = false; }
+                }
+            }
+        }
+        flush();
+        return parts.join('\n');
+    };
+    const actual = contenteditable ? editorText(this) : this.value;
+    // Chrome encodes edge spaces as NBSP to keep them visible. Accept that
+    // encoding only where a space was requested; never trim or collapse text.
+    const logical = contenteditable ? actual.split('').map((char, index) =>
+        char === '\u00a0' && expected[index] === ' ' ? ' ' : char).join('') : actual;
+    if (logical !== expected) return { status: 'value_not_retained' };
     return { status: 'filled' };
 }

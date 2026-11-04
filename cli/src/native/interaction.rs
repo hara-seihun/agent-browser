@@ -265,7 +265,7 @@ pub async fn fill(
         }
         NativeFillOutcome::RenderTimeout => {
             return Err(
-                "fill_render_timeout: Fill dispatched but rendering did not complete within 100 ms; retention is unknown; do not replay"
+                "fill_render_timeout: Fill dispatched but rendering did not complete; retention is unknown; do not replay"
                     .to_string(),
             )
         }
