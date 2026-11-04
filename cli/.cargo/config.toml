@@ -1,3 +1,0 @@
-# Debug-build e2e futures (execute_command) exceed the 2 MiB default test-thread stack.
-[env]
-RUST_MIN_STACK = "16777216"
