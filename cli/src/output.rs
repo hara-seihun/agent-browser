@@ -2808,7 +2808,7 @@ Private fill behavior:
   Existing native browser required; no launch, restore, navigation or submit.
   Stop recording, tracing, streaming and network capture first.
   Metadata-only results/errors; private values registered for later redaction.
-  First box of a complete2..32 visible same-type maxlength1 input group:
+  First box of a complete2..32 visible same-type maxlength1 input group (including visual subgroups):
     Pin every segment, dispatch once, require exact collective retention.
   Global redaction minimum:3 Unicode characters; short control markers remain.
   Scoped getters/snapshots honor private control IDs; bulk content/read refuse.

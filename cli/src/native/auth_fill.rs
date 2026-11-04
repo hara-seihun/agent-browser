@@ -1024,7 +1024,9 @@ const SEGMENT_GROUP: &str = r#"function(count) {
         !el.matches(':disabled') && !el.readOnly && el.getClientRects().length;
     for (let parent = this.parentElement; parent; parent = parent.parentElement) {
         const fields = Array.from(parent.querySelectorAll('input')).filter(eligible);
-        if (fields.length < 2) continue;
+        // A code may have visual subgroups (for example four boxes, then five).
+        // Keep walking until the complete value fits, not just the first subgroup.
+        if (fields.length < count) continue;
         if (fields.length !== count || fields[0] !== this) return null;
         const editables = Array.from(parent.querySelectorAll('input,textarea,select')).filter(el =>
             el.getClientRects().length && !el.matches(':disabled') && !el.readOnly);
