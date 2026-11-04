@@ -198,7 +198,8 @@ impl HiddenInputKind {
 struct CursorElementInfo {
     kind: String, // "clickable", "focusable", "editable"
     hints: Vec<String>,
-    text: String, // textContent from the DOM element (fallback when ARIA name is empty)
+    text: String, // Protected DOM text fallback when the ARIA name is empty.
+    text_nodes: Vec<(Vec<i64>, String)>,
     hidden_input_kind: Option<HiddenInputKind>,
     hidden_input_checked: Option<String>, // "true", "false", or "mixed" (tristate)
 }
@@ -507,6 +508,13 @@ fn render_snapshot_frame(
         .ok_or("Missing cursor projection")?
         .clone();
     for info in cursor_elements.values_mut() {
+        if !info.text_nodes.is_empty() {
+            info.text = info.text_nodes.iter().map(|(ancestors, text)| {
+                ancestors.iter().find_map(|backend| observation.controls.get(
+                    &(effective_session_id.to_owned(), *backend)
+                )).cloned().unwrap_or_else(|| text.clone())
+            }).collect::<String>().trim().chars().take(100).collect();
+        }
         info.text = observation.protect_text(&info.text);
         info.hints
             .iter_mut()
@@ -730,7 +738,8 @@ async fn supplement_visible_dialogs(
                 .as_str()
                 .ok_or("Visible dialog document unavailable")?;
             let projection = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-            "objectId": object, "functionDeclaration": include_str!("visible_dialogs.js"),
+            "objectId": object, "functionDeclaration": include_str!("visible_dialogs.js").replace(
+                "/* SHADOW_DOM_HELPERS */", include_str!("shadow_dom.js")),
             "returnByValue": true,
         })), Some(session)).await?;
             if projection.get("exceptionDetails").is_some() {
@@ -850,7 +859,7 @@ async fn find_cursor_interactive_elements(
     inventoried_nodes: &HashMap<String, i64>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
-    // - Uses querySelectorAll('*') to walk all elements
+    // - Walks all elements, including nested open shadow roots
     // - Checks getComputedStyle(el).cursor === 'pointer'
     // - Checks onclick attribute/handler and tabindex
     // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
@@ -860,6 +869,7 @@ async fn find_cursor_interactive_elements(
     // - Returns structural selectors without mutating fields or temporary attributes
     let js = r#"
 (function() {
+    /* SHADOW_DOM_HELPERS */
     var results = [];
     if (!document.body) return results;
 
@@ -872,11 +882,12 @@ async fn find_cursor_interactive_elements(
         'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
     };
 
-    var allElements = document.body.querySelectorAll('*');
-    for (var i = 0; i < allElements.length; i++) {
-        var el = allElements[i];
-
-        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
+    for (const el of shadowElements(document.body)) {
+        let hidden = false;
+        for (let parent = el; parent; parent = shadowParent(parent)) {
+            if (parent.matches('[hidden], [aria-hidden="true"]')) { hidden = true; break; }
+        }
+        if (hidden) continue;
 
         var tagName = el.tagName.toLowerCase();
         if (interactiveTags[tagName]) continue;
@@ -896,11 +907,21 @@ async fn find_cursor_interactive_elements(
 
         // Skip elements that only inherit cursor:pointer from an ancestor
         if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
-            var parent = el.parentElement;
+            var parent = shadowParent(el);
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
 
-        var text = (el.textContent || '').trim().slice(0, 100);
+        // Retain each text node's ancestors so even short protected values are
+        // masked before constructing a cursor label, including across hosts.
+        const textNodes = [];
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let node; (node = walker.nextNode());) {
+            if (!node.textContent) continue;
+            const ancestors = [];
+            for (let parent = node.parentElement; parent; parent = shadowParent(parent))
+                ancestors.push(shadowPath(parent));
+            textNodes.push({ancestors, text: node.textContent});
+        }
 
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
@@ -922,19 +943,9 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        var path = [], current = el;
-        while (current) {
-            var index = 1, sibling = current.previousElementSibling;
-            while (sibling) {
-                index++;
-                sibling = sibling.previousElementSibling;
-            }
-            path.unshift('*:nth-child(' + index + ')');
-            current = current.parentElement;
-        }
         results.push({
-            selector: path.join(' > '),
-            text: text,
+            selector: shadowPath(el),
+            textNodes: textNodes,
             tagName: tagName,
             hasOnClick: hasOnClick,
             hasCursorPointer: hasCursorPointer,
@@ -952,7 +963,7 @@ async fn find_cursor_interactive_elements(
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: js.to_string(),
+                expression: js.replace("/* SHADOW_DOM_HELPERS */", include_str!("shadow_dom.js")),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -1030,12 +1041,16 @@ async fn find_cursor_interactive_elements(
             hints.push("contenteditable".to_string());
         }
 
-        let text = elem
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let text_nodes = elem["textNodes"].as_array().ok_or("Cursor text unavailable")?
+            .iter().map(|node| {
+                let ancestors = node["ancestors"].as_array().ok_or("Cursor text ancestry unavailable")?
+                    .iter().map(|path| {
+                        path.as_str().and_then(|path| inventoried_nodes.get(path)).copied()
+                            .ok_or("Cursor text identity unavailable")
+                    }).collect::<Result<Vec<_>, _>>()?;
+                let text = node["text"].as_str().ok_or("Cursor text unavailable")?.to_owned();
+                Ok::<_, &str>((ancestors, text))
+            }).collect::<Result<Vec<_>, _>>()?;
 
         let hidden_input_kind = elem
             .get("hiddenInputType")
@@ -1052,7 +1067,8 @@ async fn find_cursor_interactive_elements(
                 CursorElementInfo {
                     kind: kind.to_string(),
                     hints,
-                    text,
+                    text: String::new(),
+                    text_nodes,
                     hidden_input_kind,
                     hidden_input_checked,
                 },
@@ -1892,6 +1908,7 @@ mod tests {
             kind: "clickable".to_string(),
             hints: vec!["cursor:pointer".to_string()],
             text: text.to_string(),
+            text_nodes: Vec::new(),
             hidden_input_kind: hidden_kind,
             hidden_input_checked: hidden_checked.map(|s| s.to_string()),
         }

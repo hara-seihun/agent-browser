@@ -1149,8 +1149,10 @@ fn dialog_roots(root: &Value) -> HashSet<i64> {
                 found.insert(backend);
             }
         }
-        for child in node["children"].as_array().into_iter().flatten() {
-            walk(child, found);
+        for key in ["children", "shadowRoots"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                walk(child, found);
+            }
         }
     }
     let mut found = HashSet::new();
@@ -1160,6 +1162,13 @@ fn dialog_roots(root: &Value) -> HashSet<i64> {
 
 fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
     fn walk(node: &Value, parent: &str, paths: &mut HashMap<String, i64>) -> Result<(), String> {
+        // Renderer projections can enter open roots only. The privacy inventory
+        // separately includes closed and user-agent roots as well.
+        for shadow in node["shadowRoots"].as_array().into_iter().flatten() {
+            if shadow["shadowRootType"] == "open" {
+                walk(shadow, &format!("{parent} >>> "), paths)?;
+            }
+        }
         let Some(children) = node["children"].as_array() else {
             return Ok(());
         };
@@ -1180,8 +1189,8 @@ fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
             }
             index += 1;
             let component = format!("*:nth-child({index})");
-            let path = if parent.is_empty() {
-                component
+            let path = if parent.is_empty() || parent.ends_with(" >>> ") {
+                format!("{parent}{component}")
             } else {
                 format!("{parent} > {component}")
             };

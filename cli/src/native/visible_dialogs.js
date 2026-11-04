@@ -2,16 +2,8 @@ function() {
     const doc = this;
     const win = doc.defaultView;
     const modalSelector = '[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]';
-    const path = el => {
-        const parts = [];
-        for (; el; el = el.parentElement) {
-            let n = 1;
-            for (let p = el.previousElementSibling; p; p = p.previousElementSibling)
-                n++;
-            parts.unshift('*:nth-child(' + n + ')');
-        }
-        return parts.join(' > ');
-    };
+    /* SHADOW_DOM_HELPERS */
+    const path = shadowPath;
     const visible = el => {
         if (['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT'].includes(el.tagName)) return false;
         const css = win.getComputedStyle(el);
@@ -21,7 +13,7 @@ function() {
         return css.display === 'contents' || Array.from(el.getClientRects()).some(r => r.width > 0 && r.height > 0);
     };
     const rendered = el => {
-        for (let p = el; p; p = p.parentElement) {
+        for (let p = el; p; p = shadowParent(p)) {
             const css = win.getComputedStyle(p);
             if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) === 0
                 || css.contentVisibility === 'hidden') return false;
@@ -49,7 +41,8 @@ function() {
         return 'generic';
     };
     const dialogs = [];
-    for (const root of doc.querySelectorAll(modalSelector)) {
+    for (const root of shadowElements(doc)) {
+        if (!root.matches(modalSelector)) continue;
         if (!rendered(root)) continue;
         // Each dialog is independent; Rust skips those already represented in AX.
         const nodes = [];
@@ -73,6 +66,9 @@ function() {
                     // and exported-text protection still applies before aggregation.
                     nodes.push({selector:path(el), parent:index, role:'StaticText', name:child.textContent, properties:[]});
                 }
+            }
+            if (el.shadowRoot) {
+                for (const child of el.shadowRoot.children) walk(child, index);
             }
         };
         walk(root, null);
