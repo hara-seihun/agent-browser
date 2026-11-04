@@ -44,9 +44,29 @@ async function(value, route) {
             return { status: 'value_not_retained' };
         }
     } else {
-        const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
-        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(this, expected);
-        this.dispatchEvent(new view.Event('input', { bubbles: true }));
+        const nativeText = textarea || ['text', 'search', 'email', 'url', 'tel', 'password'].includes(this.type);
+        if (nativeText) {
+            // The value setter plus a synthetic Event('input') leaves the DOM
+            // changed without a browser edit. Phone/masked controls can ignore
+            // it even while the value remains visible. Select only this control
+            // and edit synchronously so Chrome emits its real InputEvent and
+            // updates framework value tracking, just as for contenteditable.
+            this.select();
+            if (!this.isConnected) return { status: 'target_detached' };
+            if (this.getRootNode().activeElement !== this) return { status: 'focus_changed' };
+            // No CDP keyboard fallback: selection/focus and the actual edit must
+            // stay in one call, or a different field could receive the text.
+            if (!doc.execCommand(expected === '' ? 'delete' : 'insertText', false, expected)) {
+                return { status: 'value_not_retained' };
+            }
+        } else {
+            // Number and temporal controls do not expose a text selection.
+            const prototype = view.HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(prototype, 'value').set.call(this, expected);
+            this.dispatchEvent(new view.InputEvent('input', { bubbles: true, composed: true,
+                inputType: expected === '' ? 'deleteContentBackward' : 'insertReplacementText',
+                data: expected === '' ? null : expected }));
+        }
         this.dispatchEvent(new view.Event('change', { bubbles: true }));
     }
     const temporal = input && ['date', 'datetime-local', 'time', 'month', 'week'].includes(this.type);
