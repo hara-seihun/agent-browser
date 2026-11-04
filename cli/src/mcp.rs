@@ -1512,7 +1512,7 @@ fn parity_tools() -> Vec<Value> {
             json!({
                 "credentialProvider": {"type":"string", "minLength":1},
                 "item": {"type":"string", "minLength":1},
-                "field": {"type":"string", "minLength":1},
+                "field": {"type":"string", "minLength":1, "description":"Provider field name; proton-pass recovery_code privately resolves the exact 2FA Recovery custom text field."},
                 "selector": {"type":"string", "minLength":1, "description":"CSS selector in the selected frame; refs are not accepted."},
                 "target": {"type":"string", "minLength":1},
                 "frame": {"type":"string", "minLength":1, "description":"Explicit selected frame ID, or main after frame main."},

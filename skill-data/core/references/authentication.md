@@ -259,6 +259,8 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Private single-field fill
 
+Recovery codes are private credentials too. With the machine's `proton-pass` provider, use `auth fill --credential-provider proton-pass --item "EXACT ITEM TITLE" --field recovery_code --selector "#recovery"`. The provider resolves only the exact `2FA Recovery` custom text field; absent, duplicated, empty or differently typed fields fail without guessing. The resolved value and filled control are registered for native redaction, including ordinary textboxes labelled “Enter your code”. Never read or paste the code through evaluation, CDP, plain `fill`, command arguments or page snapshots.
+
 ```bash
 agent-browser frame "iframe.payment"
 agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID

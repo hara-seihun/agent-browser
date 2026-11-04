@@ -191,6 +191,8 @@ Plugins may declare custom capabilities such as `captcha.solve`. `plugin run` ca
 
 ## Private field resolution
 
+Recovery codes are private credentials too. With the machine's `proton-pass` provider, use `auth fill --credential-provider proton-pass --item "EXACT ITEM TITLE" --field recovery_code --selector "#recovery"`. The provider resolves only the exact `2FA Recovery` custom text field; absent, duplicated, empty or differently typed fields fail without guessing. The resolved value and filled control are registered for native redaction, including ordinary textboxes labelled “Enter your code”. Never read or paste the code through evaluation, CDP, plain `fill`, command arguments or page snapshots.
+
 `auth fill` uses `credential.read` with the core request type `credential.field.resolve`. The daemon verifies and pins the exact active target, selected frame and input before lookup, then rechecks the live document before filling once. No submit or navigation occurs. This entrypoint cannot be invoked through `plugin run`.
 
 ```json

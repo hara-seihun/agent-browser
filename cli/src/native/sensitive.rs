@@ -79,7 +79,11 @@ const IDENTIFIERS: &[(&str, &[&str])] = &[
     ),
     (
         "one-time-code",
-        &["onetimecode", "otp", "otpcode", "verificationcode"],
+        &["onetimecode", "otp", "otpcode", "verificationcode", "enteryourcode"],
+    ),
+    (
+        "recovery-code",
+        &["recoverycode", "backupcode", "2farecovery"],
     ),
 ];
 

@@ -708,6 +708,8 @@ Provider credentials are still resolved directly by the daemon and remain out of
 
 ### Private field fill
 
+Recovery codes are private credentials too. With the machine's `proton-pass` provider, use `auth fill --credential-provider proton-pass --item "EXACT ITEM TITLE" --field recovery_code --selector "#recovery"`. The provider resolves only the exact `2FA Recovery` custom text field; absent, duplicated, empty or differently typed fields fail without guessing. The resolved value and filled control are registered for native redaction, including ordinary textboxes labelled “Enter your code”. Never read or paste the code through evaluation, CDP, plain `fill`, command arguments or page snapshots.
+
 Use `auth fill` for one vault field, including a payment field in a selected iframe. Select the intended tab and frame first, then use their returned target/frame IDs. The `main` frame must be selected explicitly with `frame main` when filling the top document.
 
 ```bash

@@ -2797,7 +2797,7 @@ Login Options:
 Private Fill Options:
   --credential-provider <p> Configured credential.read provider
   --item <title>            Provider item reference
-  --field <field>           Provider field name
+  --field <field>           Provider field name (proton-pass: recovery_code reads 2FA Recovery)
   --selector <css>          CSS selector in selected frame (no refs)
   --target <tab>            Active tab as `tab list` names it (t1, label or target ID);
                             omitted: the active tab. Never switches tabs
