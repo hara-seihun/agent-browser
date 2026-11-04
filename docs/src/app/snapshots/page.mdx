@@ -8,11 +8,13 @@ Click and other input-only acknowledgements return after input dispatch without 
 
 ## Options
 
+Interactive snapshots retain alert and status text, including their noninteractive children. Field descriptions (such as `aria-describedby` validation messages) and invalid state appear beside controls. Descriptions use the same remembered-value redaction as other snapshot text; protected field values remain masked. Compact output retains this feedback too.
+
 Filter output to reduce size:
 
 ```bash
 agent-browser snapshot                    # Full accessibility tree
-agent-browser snapshot -i                 # Interactive elements only (recommended)
+agent-browser snapshot -i                 # Interactive elements plus feedback (recommended)
 agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
@@ -24,7 +26,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
     <tr><th>Option</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>-i, --interactive</code></td><td>Only interactive elements (buttons, links, inputs)</td></tr>
+    <tr><td><code>-i, --interactive</code></td><td>Interactive elements plus alerts and status messages</td></tr>
     <tr><td><code>-u, --urls</code></td><td>Include href URLs for link elements</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>

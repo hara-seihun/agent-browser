@@ -30,6 +30,8 @@ Compact snapshot → @refs assigned → Direct interaction (~200-400 tokens)
 
 ## The Snapshot Command
 
+Interactive snapshots retain alert and status text, including their noninteractive children. Field descriptions (such as `aria-describedby` validation messages) and invalid state appear beside controls. Descriptions use the same remembered-value redaction as other snapshot text; protected field values remain masked. Compact output retains this feedback too.
+
 ```bash
 # Basic snapshot (shows page structure)
 agent-browser snapshot

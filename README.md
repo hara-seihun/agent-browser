@@ -1093,11 +1093,13 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Snapshot Options
 
+Interactive snapshots retain alert and status text, including their noninteractive children. Field descriptions (such as `aria-describedby` validation messages) and invalid state appear beside controls. Descriptions use the same remembered-value redaction as other snapshot text; protected field values remain masked. Compact output retains this feedback too.
+
 The `snapshot` command supports filtering to reduce output size:
 
 ```bash
 agent-browser snapshot                    # Full accessibility tree
-agent-browser snapshot -i                 # Interactive elements only (buttons, inputs, links)
+agent-browser snapshot -i                 # Interactive elements plus alerts and status messages
 agent-browser snapshot -i --urls          # Interactive elements with link URLs
 agent-browser snapshot -c                 # Compact (remove empty structural elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
@@ -1107,7 +1109,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 
 | Option                 | Description                                                             |
 | ---------------------- | ----------------------------------------------------------------------- |
-| `-i, --interactive`    | Only show interactive elements (buttons, links, inputs)                 |
+| `-i, --interactive`    | Show interactive elements plus alerts and status messages                 |
 | `-u, --urls`           | Include href URLs for link elements                                     |
 | `-c, --compact`        | Remove empty structural elements                                        |
 | `-d, --depth <n>`      | Limit tree depth                                                        |

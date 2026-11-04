@@ -44,7 +44,7 @@ Open the page, inspect the protected snapshot, and interact through native refs.
 
 ```bash
 agent-browser open <url>        # 1. Open a page (native Chrome waits for DOMContentLoaded)
-agent-browser snapshot -i       # 2. See what's on it (interactive elements only)
+agent-browser snapshot -i       # 2. See what's on it (interactive elements plus alerts/status messages)
 agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
@@ -116,7 +116,7 @@ For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing
 
 ```bash
 agent-browser snapshot                    # full tree (verbose)
-agent-browser snapshot -i                 # interactive elements only (preferred)
+agent-browser snapshot -i                 # interactive elements plus alerts/status messages (preferred)
 agent-browser snapshot -i -u              # include href urls on links
 agent-browser snapshot -i -c              # compact (no empty structural nodes)
 agent-browser snapshot -i -d 3            # cap depth at 3 levels

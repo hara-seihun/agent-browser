@@ -105,6 +105,9 @@ struct TreeNode {
     disabled: Option<bool>,
     required: Option<bool>,
     value_text: Option<String>,
+    description: Option<String>,
+    invalid: Option<String>,
+    feedback: bool,
     backend_node_id: Option<i64>,
     children: Vec<usize>,
     parent_idx: Option<usize>,
@@ -128,6 +131,9 @@ impl TreeNode {
             disabled: None,
             required: None,
             value_text: None,
+            description: None,
+            invalid: None,
+            feedback: false,
             backend_node_id: None,
             children: Vec::new(),
             parent_idx: None,
@@ -149,6 +155,9 @@ impl TreeNode {
         self.disabled = None;
         self.required = None;
         self.value_text = None;
+        self.description = None;
+        self.invalid = None;
+        self.feedback = false;
         self.backend_node_id = None;
         self.children.clear();
         self.parent_idx = None;
@@ -515,7 +524,10 @@ fn render_snapshot_frame(
 
         if node.backend_node_id.is_some_and(|bid| {
             cursor_elements.contains_key(&bid)
-                || batch.context.owners.contains_key(&(effective_session_id.clone(), bid))
+                || batch
+                    .context
+                    .owners
+                    .contains_key(&(effective_session_id.clone(), bid))
         }) {
             // A represented frame owner can have a role other than Iframe, such
             // as IframePresentational. Give it an anchor for the child projection.
@@ -598,7 +610,11 @@ fn render_snapshot_frame(
             let Some(bid) = node.backend_node_id else {
                 continue;
             };
-            let Some(child_fid) = batch.context.owners.get(&(effective_session_id.clone(), bid)) else {
+            let Some(child_fid) = batch
+                .context
+                .owners
+                .get(&(effective_session_id.clone(), bid))
+            else {
                 if node.role == "Iframe" || node.role == "IframePresentational" {
                     return Err("Missing pierced iframe owner binding".into());
                 }
@@ -987,7 +1003,8 @@ fn protect_private_text_nodes(
                     value: Some(Value::String(marker.clone())),
                 };
                 node.name = Some(redacted.clone());
-                node.value = Some(redacted);
+                node.value = Some(redacted.clone());
+                node.description = Some(redacted);
             }
             node
         })
@@ -1022,6 +1039,15 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             disabled,
             required,
             value_text,
+            description: extract_ax_string_opt(&node.description),
+            invalid: node.properties.as_ref().and_then(|properties| {
+                properties
+                    .iter()
+                    .find(|p| p.name == "invalid")
+                    .and_then(|p| extract_ax_string_opt(&Some(p.value.clone())))
+                    .filter(|value| value != "false")
+            }),
+            feedback: matches!(extract_ax_string(&node.role).as_str(), "alert" | "status"),
             backend_node_id: node.backend_d_o_m_node_id,
             children: Vec::new(),
             parent_idx: None,
@@ -1044,6 +1070,18 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                 }
             }
         }
+    }
+
+    // Feedback remains visible in interactive snapshots, including unnamed alert
+    // containers whose useful text lives in otherwise noninteractive children.
+    let mut feedback: Vec<_> = tree_nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| node.feedback.then_some(i))
+        .collect();
+    while let Some(i) = feedback.pop() {
+        tree_nodes[i].feedback = true;
+        feedback.extend(tree_nodes[i].children.iter().copied());
     }
 
     // Process StaticText aggregation
@@ -1165,7 +1203,7 @@ fn render_tree(
         return;
     }
 
-    if options.interactive && !node.has_ref {
+    if options.interactive && !node.has_ref && !node.feedback {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
             render_tree(nodes, child, indent, output, options);
@@ -1224,6 +1262,17 @@ fn render_tree(
         }
     }
 
+    if let Some(ref invalid) = node.invalid {
+        attrs.push(format!("invalid={}", invalid));
+    }
+    if let Some(ref description) = node.description {
+        if description != &node.name {
+            if let Ok(text) = serde_json::to_string(&normalize_snapshot_name(description)) {
+                attrs.push(format!("description={}", text));
+            }
+        }
+    }
+
     if let Some(ref ref_id) = node.ref_id {
         attrs.push(format!("ref={}", ref_id));
     }
@@ -1268,8 +1317,21 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
 
     let mut keep = vec![false; lines.len()];
 
+    let mut feedback_indent = None;
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("ref=") || line.contains(": ") {
+        let indent = count_indent(line);
+        if feedback_indent.is_some_and(|parent| indent <= parent) {
+            feedback_indent = None;
+        }
+        let content = line.trim_start();
+        if ["- alert", "- status"].iter().any(|role| {
+            content
+                .strip_prefix(role)
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with([' ', ':']))
+        }) {
+            feedback_indent = Some(indent);
+        }
+        if feedback_indent.is_some() || line.contains("ref=") || line.contains(": ") {
             keep[i] = true;
             // Mark ancestors
             let my_indent = count_indent(line);
