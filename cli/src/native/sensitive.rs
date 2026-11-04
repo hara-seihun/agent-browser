@@ -495,7 +495,8 @@ impl Observation {
     pub fn protect_text(&self, text: &str) -> String {
         // Single pass over the ORIGINAL string: replacement markers are never
         // themselves re-redacted (important for short expiry and CVC values).
-        let public_ids = public_social_id_spans(text);
+        let mut public_ids = public_social_id_spans(text);
+        public_ids.extend(cdp_browser_id_spans(text));
         let mut out = String::new();
         let mut start = 0;
         while start < text.len() {
@@ -689,6 +690,59 @@ fn public_social_id_spans(text: &str) -> Vec<(usize, usize)> {
         if let Some(span) = public_numeric_id_span(text, &text[offset + "urn:li:activity:".len()..])
         {
             spans.push(span);
+        }
+    }
+    spans
+}
+
+/// Chrome's browser UUID is connection metadata, not a payment number. Exempt
+/// only its canonical UUID path component, never URL credentials or query data.
+/// Known secrets are still matched before this generic-number exception.
+fn cdp_browser_id_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for scheme in ["ws://", "wss://"] {
+        for (offset, _) in text.match_indices(scheme) {
+            if text[..offset].chars().next_back().is_some_and(|ch| {
+                !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '(' | '[' | '{' | '<' | '=' | ':')
+            }) {
+                continue;
+            }
+            let candidate = &text[offset..];
+            let end = candidate
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || matches!(ch, '\'' | '"' | ')' | ']' | '}' | '<' | '>' | ',' | ';')
+                })
+                .unwrap_or(candidate.len());
+            let Ok(url) = url::Url::parse(&candidate[..end]) else {
+                continue;
+            };
+            if url.host_str().is_none() {
+                continue;
+            }
+            let Some(id) = url.path().strip_prefix("/devtools/browser/") else {
+                continue;
+            };
+            if id.len() != 36
+                || !id.bytes().enumerate().all(|(i, b)| {
+                    if matches!(i, 8 | 13 | 18 | 23) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                })
+            {
+                continue;
+            }
+            // Locate the literal path, not an occurrence in userinfo or query.
+            let authority_end = scheme.len()
+                + candidate[scheme.len()..end]
+                    .find('/')
+                    .unwrap_or(end - scheme.len());
+            let start = offset + authority_end + "/devtools/browser/".len();
+            if text.get(start..start + id.len()) == Some(id) {
+                spans.push((start, start + id.len()));
+            }
         }
     }
     spans
@@ -2486,14 +2540,8 @@ mod tests {
         ]});
         let paths = cursor_node_paths(&root).unwrap();
         assert_eq!(paths.len(), 6);
-        assert_eq!(
-            paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(1)"],
-            3
-        );
-        assert_eq!(
-            paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(3)"],
-            5
-        );
+        assert_eq!(paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(1)"], 3);
+        assert_eq!(paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(3)"], 5);
         assert!(!paths.values().any(|id| matches!(id, 99 | 100)));
     }
 
