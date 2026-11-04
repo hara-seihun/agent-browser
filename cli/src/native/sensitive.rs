@@ -495,6 +495,7 @@ impl Observation {
     pub fn protect_text(&self, text: &str) -> String {
         // Single pass over the ORIGINAL string: replacement markers are never
         // themselves re-redacted (important for short expiry and CVC values).
+        let public_ids = public_social_id_spans(text);
         let mut out = String::new();
         let mut start = 0;
         while start < text.len() {
@@ -527,6 +528,7 @@ impl Observation {
                 .then(|| payment_number_length(&text[start..]))
                 .flatten()
                 .filter(|_| start == 0 || !text.as_bytes()[start - 1].is_ascii_digit())
+                .filter(|_| !public_ids.iter().any(|&(lo, hi)| lo <= start && start < hi))
             {
                 out.push_str("[redacted: cc-number]");
                 start += length;
@@ -636,6 +638,77 @@ fn expiry_echo_length(text: &str, expiry: &str) -> Option<usize> {
         return None;
     }
     Some(end)
+}
+
+/// Only the numeric path component of a recognized public social permalink is
+/// exempt from the generic payment-number guess. Known secret matching still
+/// runs at every character, and scoped payment controls remain protected.
+fn public_social_id_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for (offset, _) in text.match_indices("https://") {
+        if text[..offset].chars().next_back().is_some_and(|ch| {
+            !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '(' | '[' | '{' | '<' | '=' | ':')
+        }) {
+            continue;
+        }
+        let rest = &text[offset + "https://".len()..];
+        let Some((host, path)) = rest.split_once('/') else {
+            continue;
+        };
+        let id = match host {
+            "x.com" | "www.x.com" | "twitter.com" | "www.twitter.com" => {
+                let Some((user, path)) = path.split_once('/') else {
+                    continue;
+                };
+                if user.is_empty()
+                    || user.len() > 15
+                    || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    continue;
+                }
+                path.strip_prefix("status/")
+            }
+            "linkedin.com" | "www.linkedin.com" => {
+                path.strip_prefix("feed/update/urn:li:activity:")
+            }
+            _ => None,
+        };
+        let Some(id) = id else { continue };
+        if let Some(span) = public_numeric_id_span(text, id) {
+            spans.push(span);
+        }
+    }
+    // data-urn on LinkedIn cards exposes the public activity identifier before
+    // the page renders a permalink. Do not treat arbitrary URL paths as URNs.
+    for (offset, _) in text.match_indices("urn:li:activity:") {
+        if text[..offset].chars().next_back().is_some_and(|ch| {
+            !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '(' | '[' | '{' | '<' | '=' | ':')
+        }) {
+            continue;
+        }
+        if let Some(span) = public_numeric_id_span(text, &text[offset + "urn:li:activity:".len()..])
+        {
+            spans.push(span);
+        }
+    }
+    spans
+}
+
+fn public_numeric_id_span(text: &str, id: &str) -> Option<(usize, usize)> {
+    let length = id.bytes().take_while(u8::is_ascii_digit).count();
+    if !(1..=20).contains(&length)
+        || id[length..].chars().next().is_some_and(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    ch,
+                    '/' | '?' | '#' | '\'' | '"' | ')' | ']' | '}' | '<' | '>' | ',' | ';' | '.'
+                )
+        })
+    {
+        return None;
+    }
+    let start = text.len() - id.len();
+    Some((start, start + length))
 }
 
 /// Full payment numbers are private even when a site renders them as ordinary
