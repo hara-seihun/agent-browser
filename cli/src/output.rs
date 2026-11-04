@@ -1803,8 +1803,10 @@ agent-browser type - Type text into an element
 
 Usage: agent-browser type <selector> <text>
 
-Types text into the specified element character by character.
+Types text into the specified element character by character using key events
+for US-layout characters and Unicode insertion for other characters.
 Unlike fill, this does not clear existing content first.
+Success means input was dispatched; observe the application to check it saved.
 
 Global Options:
   --json               Output as JSON
@@ -2047,7 +2049,8 @@ Lexical, ProseMirror, CodeMirror, and Monaco.
 
 Subcommands:
   type <text>          Type text character-by-character with real
-                       key events (keydown, keypress, keyup per char)
+                       key events for US-layout characters; other
+                       characters use Unicode text insertion.
   inserttext <text>    Insert text without key events (like paste)
 
 Note: For key combos (Enter, Control+a), use the 'press' command

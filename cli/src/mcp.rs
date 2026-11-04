@@ -876,7 +876,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_TYPE,
             "Type text",
-            "Type text into an element by @ref or CSS selector.",
+            "Type text into an element by @ref or CSS selector. US-layout characters send key events; other characters use Unicode insertion. Success acknowledges dispatch, not application retention.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to type." },
@@ -1025,7 +1025,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_KEYBOARD_TYPE,
             "Keyboard type",
-            "Type text at the current focus using real key events.",
+            "Type text at the current focus. US-layout characters send key events; other characters use Unicode insertion. Success acknowledges dispatch, not application retention.",
             json!({ "text": { "type": "string" } }),
             &["text"],
         ),

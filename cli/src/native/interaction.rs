@@ -478,8 +478,10 @@ pub async fn type_text_into_active_context(
     let delay = delay_ms.unwrap_or(0);
 
     for ch in text.chars() {
-        if matches!(ch, '\n' | '\r' | '\t') {
-            let (key, code, key_code) = char_to_key_info(ch);
+        // Editors such as Google Sheets enter editing mode on keydown.
+        // insertText alone can be acknowledged by Chrome yet discarded by the app.
+        let (key, code, key_code) = char_to_key_info(ch);
+        if key_code != 0 {
             let text_str = key_text(&key);
             client
                 .send_command_typed::<_, Value>(
@@ -515,9 +517,9 @@ pub async fn type_text_into_active_context(
                 )
                 .await?;
         } else {
-            // VS Code/Electron webviews reject repeated dispatchKeyEvent calls
-            // carrying printable `text`. Insert printable characters directly
-            // and reserve key events for controls like Enter and Tab.
+            // Characters without a physical US-layout key use Chrome text input,
+            // matching keyboard.type in Playwright. keyboard inserttext remains
+            // the explicit event-free alternative for editors that require it.
             client
                 .send_command_typed::<_, Value>(
                     "Input.insertText",
@@ -1401,6 +1403,16 @@ fn char_to_key_info(ch: char) -> (String, String, i32) {
 /// be swallowed.
 fn punctuation_key_info(ch: char) -> (&'static str, i32) {
     match ch {
+        '!' => ("Digit1", 49),
+        '@' => ("Digit2", 50),
+        '#' => ("Digit3", 51),
+        '$' => ("Digit4", 52),
+        '%' => ("Digit5", 53),
+        '^' => ("Digit6", 54),
+        '&' => ("Digit7", 55),
+        '*' => ("Digit8", 56),
+        '(' => ("Digit9", 57),
+        ')' => ("Digit0", 48),
         // VK_OEM_1 (0xBA = 186) — ";:" key on US layout
         ';' | ':' => ("Semicolon", 186),
         // VK_OEM_PLUS (0xBB = 187) — "=+" key
@@ -1587,7 +1599,7 @@ mod tests {
     /// so that `type_text` falls back to `Input.insertText`.
     #[test]
     fn test_unmapped_chars_return_zero_keycode() {
-        for ch in ['@', '#', '$', '%', '^', '&', '*', '(', ')', '€', '£', '你'] {
+        for ch in ['€', '£', '你'] {
             let (key, code, vk) = char_to_key_info(ch);
             assert_eq!(
                 code, "",

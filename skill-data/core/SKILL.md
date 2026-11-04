@@ -452,7 +452,7 @@ agent-browser snapshot -i
 
 **Click does nothing / overlay swallows the click** Some modals and cookie banners block other clicks. If `click` reports `covered by <...>`, interact with that covering element first. Otherwise, snapshot, find the dismiss/close button, click it, then re-snapshot.
 
-**Fill / type doesn't work** Some custom input components intercept key events. Try:
+**Fill / type doesn't work** Both `type` and `keyboard type` send key events for US-layout characters, so editors such as Google Sheets can enter edit mode. Other characters use Unicode text insertion. Use `keyboard inserttext` when key events are unwanted. Success means input was dispatched; observe the page to check that the application saved it. Some custom input components intercept key events. Try:
 
 ```bash
 agent-browser focus @e1
