@@ -1163,7 +1163,10 @@ fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
         let Some(children) = node["children"].as_array() else {
             return Ok(());
         };
-        let mut counts = HashMap::<String, usize>::new();
+        // Element position is unique even when namespaces or casing differ.
+        // CDP nodeName can be STYLE and style for siblings with one localName.
+        // Use the same element-only positions as both renderer projections.
+        let mut index = 0;
         for child in children {
             let Some(name) = child["nodeName"].as_str() else {
                 continue;
@@ -1175,17 +1178,8 @@ fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
             if !element {
                 continue;
             }
-            let index = counts.entry(name.to_owned()).or_insert(0);
-            *index += 1;
-            let local = match child.get("localName") {
-                Some(value) => value
-                    .as_str()
-                    .filter(|name| !name.is_empty())
-                    .ok_or("Cursor element local name unavailable")?
-                    .to_owned(),
-                None => name.to_ascii_lowercase(),
-            };
-            let component = format!("{local}:nth-of-type({index})");
+            index += 1;
+            let component = format!("*:nth-child({index})");
             let path = if parent.is_empty() {
                 component
             } else {
@@ -2411,16 +2405,14 @@ mod tests {
         let paths = cursor_node_paths(&root).unwrap();
         assert_eq!(paths.len(), 6);
         assert_eq!(
-            paths["html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(1)"],
+            paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(1)"],
             3
         );
         assert_eq!(
-            paths["html:nth-of-type(1) > body:nth-of-type(1) > div:nth-of-type(2)"],
+            paths["*:nth-child(1) > *:nth-child(1) > *:nth-child(3)"],
             5
         );
         assert!(!paths.values().any(|id| matches!(id, 99 | 100)));
-        let malformed = json!({"children":[{"nodeName":"DIV","nodeType":1,"localName":null,"backendNodeId":7}]});
-        assert!(cursor_node_paths(&malformed).is_err());
     }
 
     #[test]

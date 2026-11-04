@@ -926,10 +926,10 @@ async fn find_cursor_interactive_elements(
         while (current) {
             var index = 1, sibling = current.previousElementSibling;
             while (sibling) {
-                if (sibling.tagName === current.tagName) index++;
+                index++;
                 sibling = sibling.previousElementSibling;
             }
-            path.unshift(current.localName + ':nth-of-type(' + index + ')');
+            path.unshift('*:nth-child(' + index + ')');
             current = current.parentElement;
         }
         results.push({

@@ -7,8 +7,8 @@ function() {
         for (; el; el = el.parentElement) {
             let n = 1;
             for (let p = el.previousElementSibling; p; p = p.previousElementSibling)
-                if (p.tagName === el.tagName) n++;
-            parts.unshift(el.localName + ':nth-of-type(' + n + ')');
+                n++;
+            parts.unshift('*:nth-child(' + n + ')');
         }
         return parts.join(' > ');
     };
