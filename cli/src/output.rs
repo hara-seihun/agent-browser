@@ -2827,6 +2827,8 @@ Private Fill Options:
   --timeout <ms>           Total deadline 1..300000ms; initial 180000ms unless configured
 
 Private fill behavior:
+  Text controls use target-scoped browser edits and real InputEvent events.
+  Redirected focus fails without inserting elsewhere. Private values stay private.
   Pins input/document and checks live target/frame before and after lookup.
   Existing native browser required; no launch, restore, navigation or submit.
   Stop recording, tracing, streaming and network capture first.

@@ -1008,6 +1008,7 @@ where
             Err("auth_fill_input_changed: pinned input or document changed; not replayed".into())
         }
         Some("not_editable") => Err("auth_fill_not_editable: pinned input is not editable".into()),
+        Some("focus_changed") => Err("auth_fill_focus_changed: focus left the pinned input before editing; not replayed".into()),
         Some("invalid_value") => {
             Err("auth_fill_invalid_value: value is invalid for the pinned input".into())
         }
@@ -1169,10 +1170,28 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
                 el.tagName === 'INPUT' && el.maxLength === 1 && el.type === this.type && el.form === this.form);
     };
     if (!validSegments()) return {status:'detached'};
-    const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
-    setter.call(this, expected);
-    this.dispatchEvent(new view.Event('input', {bubbles:true}));
+    const nativeText = !input || ['text','password','email','tel','url','search'].includes(this.type);
+    if (nativeText && !segments) {
+        // Keep focus, selection and edit in this one bound call. Chrome emits a
+        // real InputEvent, updating React/masked controls without sending the
+        // private value through page-level keyboard input or a focus race.
+        this.focus();
+        if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
+        if (this.getRootNode().activeElement !== this) return {status:'focus_changed'};
+        this.select();
+        if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
+        if (this.getRootNode().activeElement !== this) return {status:'focus_changed'};
+        if (!document.execCommand('insertText', false, expected)) return {status:'not_retained'};
+    } else {
+        // Number/temporal fields have no text selection. Split code widgets
+        // need the whole code in their first box so their input handler can
+        // distribute it, bypassing that box's maxlength=1 as before.
+        const prototype = input ? view.HTMLInputElement.prototype : view.HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+        setter.call(this, expected);
+        this.dispatchEvent(new view.InputEvent('input', {bubbles:true, composed:true,
+            inputType:'insertReplacementText', data:expected}));
+    }
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
     await new Promise(resolve => view.setTimeout(resolve, 100));
     const rendered = segments ? segments.map(el => el.value).join('') : this.value;
