@@ -3192,8 +3192,11 @@ async fn execute_command_inner(
         let drained = state.drain_cdp_events();
         state.deferred_dialog_events.push_back(drained);
     }
-    // Lifecycle commands must not wait for renderer or iframe setup events.
-    if !matches!(action, "dialog" | "snapshot" | "session_info" | "close" | "mainframe")
+    // Launch only establishes or reuses a connection. Its handler installs
+    // mandatory network controls; the requested command owns page observation.
+    // A preparatory launch must not spend that command's deadline draining
+    // loading widgets before the requested command has even started.
+    if !matches!(action, "launch" | "dialog" | "snapshot" | "session_info" | "close" | "mainframe")
         && !browser_metadata_only
         && !lifecycle_confirmation
     {
@@ -3882,7 +3885,7 @@ async fn execute_command_inner(
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    if !matches!(action, "dialog" | "snapshot" | "close" | "session_info")
+    if !matches!(action, "launch" | "dialog" | "snapshot" | "close" | "session_info")
         && !browser_metadata_only
         && !lifecycle_confirmation
     {
