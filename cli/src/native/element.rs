@@ -271,8 +271,12 @@ async fn resolve_center_in_same_process_frame(
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
             else el.scrollIntoView({{ block: 'center', inline: 'center' }});
             const rect = el.getBoundingClientRect();
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const win=el.ownerDocument.defaultView;
+            const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
+            const right=Math.min(win.innerWidth,rect.right), bottom=Math.min(win.innerHeight,rect.bottom);
+            const visible=right>left && bottom>top;
+            const x = visible ? (left+right)/2 : rect.x + rect.width / 2;
+            const y = visible ? (top+bottom)/2 : rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
             return {{ x: x, y: y, blocker: blockerAt(doc, el, x, y) }};
         }}"#,
@@ -401,7 +405,7 @@ pub async fn resolve_element_center(
 
             if let Ok(r) = result {
                 let (x, y) = box_model_center(&r.model);
-                check_node_interception(
+                let (x, y) = resolve_unobstructed_point(
                     client,
                     effective_session_id,
                     backend_node_id,
@@ -439,7 +443,7 @@ pub async fn resolve_element_center(
             )
             .await?;
         let (x, y) = box_model_center(&result.model);
-        check_node_interception(
+        let (x, y) = resolve_unobstructed_point(
             client,
             effective_session_id,
             fresh_id,
@@ -540,22 +544,21 @@ pub(super) async fn resolve_checkbox_point(
     })), Some(session_id)).await?;
     let backend_id = described["node"]["backendNodeId"].as_i64()
         .ok_or("click_state_unavailable: checkbox node unavailable before dispatch")?;
-    check_node_interception(client, session_id, backend_id, selector, x, y).await?;
+    let (x, y) = resolve_unobstructed_point(client, session_id, backend_id, selector, x, y).await?;
     Ok(Some((x, y)))
 }
 
-/// Hit-test a ref-resolved node at its computed click point and error if an
-/// unrelated element (overlay, banner, sticky header) would receive the input
-/// instead. Best effort: resolution failures skip the check rather than block
-/// the interaction.
-async fn check_node_interception(
+/// Return a viewport-visible click point for a ref-resolved node, refusing
+/// unrelated covering elements before dispatch. If node resolution fails, the
+/// caller retains its original box-model point.
+async fn resolve_unobstructed_point(
     client: &CdpClient,
     session_id: &str,
     backend_node_id: i64,
     target: &str,
     x: f64,
     y: f64,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     let resolved: Result<DomResolveNodeResult, String> = client
         .send_command_typed(
             "DOM.resolveNode",
@@ -568,10 +571,10 @@ async fn check_node_interception(
         )
         .await;
     let Ok(resolved) = resolved else {
-        return Ok(());
+        return Ok((x, y));
     };
     let Some(object_id) = resolved.object.object_id else {
-        return Ok(());
+        return Ok((x, y));
     };
     let (anchor, model) = document_viewport_anchor(client, session_id, &object_id).await?;
     // Hit testing uses document-local CSS pixels, unlike CDP's session-relative
@@ -579,6 +582,7 @@ async fn check_node_interception(
     // parent through frameElement, so derive the conversion from the live node.
     let function = format!(
         r#"function(x, y, border, anchor) {{
+            let inputX=x, inputY=y;
             const r=anchor.getBoundingClientRect();
             const xs=[border[0],border[2],border[4],border[6]];
             const ys=[border[1],border[3],border[5],border[7]];
@@ -589,6 +593,20 @@ async fn check_node_interception(
             x=r.left+(x-left)*sx;
             y=r.top+(y-top)*sy;
             let topDoc = this.ownerDocument || document;
+            const win=topDoc.defaultView;
+            // Scrolling cannot put the center of a tall dropdown option (or
+            // any oversized element) inside a smaller iframe. Use the center
+            // of its visible intersection instead, before checking blockers.
+            if (x < 0 || y < 0 || x >= win.innerWidth || y >= win.innerHeight) {{
+                const rect=this.getBoundingClientRect();
+                const l=Math.max(0,rect.left), t=Math.max(0,rect.top);
+                const rr=Math.min(win.innerWidth,rect.right), b=Math.min(win.innerHeight,rect.bottom);
+                if (rr > l && b > t) {{
+                    x=(l+rr)/2; y=(t+b)/2;
+                    inputX=left+(x-r.left)/sx;
+                    inputY=top+(y-r.top)/sy;
+                }}
+            }}
             while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
                 const owner=topDoc.defaultView.frameElement;
                 const rect=owner.getBoundingClientRect();
@@ -596,7 +614,7 @@ async fn check_node_interception(
                 topDoc = owner.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
-            return blockerAt(topDoc, this, x, y);
+            return {{blocker:blockerAt(topDoc, this, x, y), x:inputX, y:inputY}};
         }}"#,
     );
     let result = client
@@ -615,12 +633,19 @@ async fn check_node_interception(
         if let Some(blocker) = value
             .get("result")
             .and_then(|r| r.get("value"))
+            .and_then(|v| v.get("blocker"))
             .and_then(|v| v.as_str())
         {
             return Err(intercepted_error(target, blocker));
         }
+        if let (Some(x), Some(y)) = (
+            value["result"]["value"]["x"].as_f64(),
+            value["result"]["value"]["y"].as_f64(),
+        ) {
+            return Ok((x, y));
+        }
     }
-    Ok(())
+    Ok((x, y))
 }
 
 /// Coordinates from DOM.getBoxModel are viewport-relative, and input events
@@ -964,8 +989,12 @@ fn build_selector_js(selector: &str) -> String {
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
                 rect = el.getBoundingClientRect();
             }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const win=el.ownerDocument.defaultView;
+            const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
+            const right=Math.min(win.innerWidth,rect.right), bottom=Math.min(win.innerHeight,rect.bottom);
+            const visible=right>left && bottom>top;
+            const x = visible ? (left+right)/2 : rect.x + rect.width / 2;
+            const y = visible ? (top+bottom)/2 : rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
             return {{ x: x, y: y, blocker: blockerAt(document, el, x, y) }};
         }})()"#,
