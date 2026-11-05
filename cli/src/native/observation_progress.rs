@@ -101,6 +101,16 @@ enum State {
 #[derive(Clone, Default)]
 pub(crate) struct ObservationProgress(Arc<Mutex<State>>);
 
+tokio::task_local! {
+    pub(crate) static COMMAND_PROGRESS: ObservationProgress;
+}
+
+/// Connections opened inside a command must retain its original diagnostic
+/// handle, including the work after a preparatory launch or reconnect.
+pub(crate) fn connection_progress() -> ObservationProgress {
+    COMMAND_PROGRESS.try_with(Clone::clone).unwrap_or_default()
+}
+
 struct Scope {
     progress: ObservationProgress,
 }

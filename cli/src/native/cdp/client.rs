@@ -550,8 +550,7 @@ impl CdpClient {
             dom_revisions,
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
-            observation_progress: super::super::observation_progress::ObservationProgress::default(
-            ),
+            observation_progress: super::super::observation_progress::connection_progress(),
         })
     }
 

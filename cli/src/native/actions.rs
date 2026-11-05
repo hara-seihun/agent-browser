@@ -2929,10 +2929,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         return command_not_executed_response(cmd);
     }
     let progress = state.protected_observation_progress();
-    let result = COMMAND_DEADLINE
+    let result = super::observation_progress::COMMAND_PROGRESS
         .scope(
-            deadline,
-            progress.before(deadline, execute_command_owned(cmd, state)),
+            progress.clone(),
+            COMMAND_DEADLINE.scope(
+                deadline,
+                progress.before(deadline, execute_command_owned(cmd, state)),
+            ),
         )
         .await;
     match result {
