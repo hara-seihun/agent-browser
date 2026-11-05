@@ -2821,6 +2821,8 @@ Private Fill Options:
   --item <title>            Provider item reference
   --field <field>           Provider field name (proton-pass: recovery_code reads 2FA Recovery)
   --selector <css>          CSS selector in selected frame (no refs)
+                           Searches document, then nested open shadow roots;
+                           select the input, not its noneditable custom host.
   --target <tab>            Active tab as `tab list` names it (t1, label or target ID);
                             omitted: the active tab. Never switches tabs
   --frame <frame-id|main>   Selected frame; omitted: the frame chosen with

@@ -89,7 +89,7 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
-Selectors use native CSS or `xpath=` syntax; for text matching use `find role` or `find text`, not Playwright-only pseudo-classes such as `:text-is`.
+Selectors use native CSS or `xpath=` syntax; for text matching use `find role` or `find text`, not Playwright-only pseudo-classes such as `:text-is`. CSS selectors search the selected document first, then nested open shadow roots, without entering iframes. Select shadow inputs themselves, such as `input[name=password]`, not their noneditable custom-element hosts. XPath retains document-only semantics.
 
 Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric post IDs; known secrets and protected payment controls remain redacted.
 

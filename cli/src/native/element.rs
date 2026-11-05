@@ -885,7 +885,8 @@ fn build_find_element_js(selector: &str) -> String {
 }
 
 /// Same as build_find_element_js but rooted at an arbitrary Document
-/// expression (e.g. an iframe's contentDocument).
+/// expression (e.g. an iframe's contentDocument). CSS searches the selected
+/// document first, then its nested open shadow roots; it never enters frames.
 fn build_find_element_js_in(root: &str, selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
@@ -894,7 +895,19 @@ fn build_find_element_js_in(root: &str, selector: &str) -> String {
         )
     } else {
         format!(
-            "{root}.querySelector({selector})",
+            r#"(() => {{
+                const direct = {root}.querySelector({selector});
+                if (direct) return direct;
+                const find = root => {{
+                    for (const host of root.querySelectorAll('*')) {{
+                        if (!host.shadowRoot) continue;
+                        const match = host.shadowRoot.querySelector({selector}) || find(host.shadowRoot);
+                        if (match) return match;
+                    }}
+                    return null;
+                }};
+                return find({root});
+            }})()"#,
             selector = serde_json::to_string(selector).unwrap_or_default(),
         )
     }
@@ -909,8 +922,17 @@ fn build_count_elements_js(selector: &str) -> String {
         )
     } else {
         format!(
-            "document.querySelectorAll({}).length",
-            serde_json::to_string(selector).unwrap_or_default()
+            r#"(() => {{
+                const count = root => {{
+                    let total = root.querySelectorAll({selector}).length;
+                    for (const host of root.querySelectorAll('*')) {{
+                        if (host.shadowRoot) total += count(host.shadowRoot);
+                    }}
+                    return total;
+                }};
+                return count(document);
+            }})()"#,
+            selector = serde_json::to_string(selector).unwrap_or_default()
         )
     }
 }

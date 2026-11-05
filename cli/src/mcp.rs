@@ -1521,7 +1521,7 @@ fn parity_tools() -> Vec<Value> {
                 "credentialProvider": {"type":"string", "minLength":1},
                 "item": {"type":"string", "minLength":1},
                 "field": {"type":"string", "minLength":1, "description":"Provider field name; proton-pass recovery_code privately resolves the exact 2FA Recovery custom text field."},
-                "selector": {"type":"string", "minLength":1, "description":"CSS selector in the selected frame; refs are not accepted."},
+                "selector": {"type":"string", "minLength":1, "description":"CSS selector in the selected frame, searching the document then nested open shadow roots; target the input rather than its noneditable custom host. Refs are not accepted."},
                 "target": {"type":"string", "minLength":1},
                 "frame": {"type":"string", "minLength":1, "description":"Explicit selected frame ID, or main after frame main."},
                 "format": {"type":"string", "enum":crate::plugins::EXPIRY_FORMATS, "description":"Only valid for expiration_date: mm/yy, mm/yyyy or mmyy for one box, mm, yy or yyyy for separate month and year boxes or selects; omitted reads the layout from the field (placeholder, label, autocomplete, maxlength, options)."},
