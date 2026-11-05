@@ -119,6 +119,18 @@ async function(value, route) {
     // encoding only where a space was requested; never trim or collapse text.
     const logical = contenteditable ? actual.split('').map((char, index) =>
         char === '\u00a0' && expected[index] === ' ' ? ' ' : char).join('') : actual;
-    if (logical !== expected) return { status: 'value_not_retained' };
+    // Telephone masks may insert punctuation without changing the requested
+    // number. Restrict equivalence to declared telephone controls, keep every
+    // digit and the leading plus, and never normalize arbitrary text fields.
+    // Sensitive-target classification still runs before this shared operation.
+    const telephone = input && (this.type === 'tel' ||
+        /(?:^|\s)tel(?:-(?:country-code|national|area-code|local|local-prefix|local-suffix|extension))?(?:\s|$)/i.test(this.autocomplete));
+    const phoneText = text => {
+        const compact = text.replace(/[ \t\r\n\u00a0\u202f().-]/g, '');
+        return /^\+?[0-9]+$/.test(compact) ? compact : null;
+    };
+    const expectedPhone = telephone ? phoneText(expected) : null;
+    const formattedPhone = expectedPhone !== null && phoneText(logical) === expectedPhone;
+    if (logical !== expected && !formattedPhone) return { status: 'value_not_retained' };
     return { status: 'filled' };
 }

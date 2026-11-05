@@ -1787,6 +1787,8 @@ Empty text clears them. Direct/ref/find fills check retained values after events
 Temporal and protected-form edits wait two frames and a task under the command
 deadline; ordinary text and rich-editor clearing wait a task without painted frames.
 Rich editors compare logical block text, not innerText paragraph spacing.
+Telephone masks may insert spaces, parentheses, periods and hyphens; digits and
+the leading plus must remain unchanged. Sensitive-control rules still apply.
 A deadline after dispatch means an unknown outcome;
 never replay the fill automatically. Invalid or non-editable inputs fail.
 JSON code: fill_invalid_value, fill_not_editable, fill_focus_changed, fill_value_not_retained,
