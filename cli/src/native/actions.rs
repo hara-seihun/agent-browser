@@ -3488,12 +3488,20 @@ async fn execute_command_inner(
     // A throwaway preflight/postflight would spend separate budgets and erase its
     // useful incomplete result, while exposing no additional protected content.
     let mut guard_incomplete: Option<String> = None;
-    let input_acknowledgement = super::sensitive::input_acknowledgement(action, cmd);
+    let fill_input = action == "fill"
+        || (FIND_SUBACTION_COMMANDS.contains(&action)
+            && cmd.get("subaction").and_then(Value::as_str) == Some("fill"));
+    let input_acknowledgement = super::sensitive::input_acknowledgement(
+        if fill_input { "fill" } else { action },
+        cmd,
+    );
     let observation_session = if matches!(action, "snapshot" | "dialog") {
         None
-    } else if input_acknowledgement || browser_metadata_only {
+    } else if (input_acknowledgement && !fill_input) || browser_metadata_only {
         // These responses contain no page content. Keep remembered redaction,
         // but do not read the renderer before or after dispatching input.
+        // Fill still needs its preflight inventory to refuse protected targets;
+        // its acknowledgement does not need another inventory after editing.
         state
             .browser
             .as_ref()
@@ -3573,7 +3581,7 @@ async fn execute_command_inner(
         None
     };
 
-    let target_scoped_fill = action == "fill"
+    let target_scoped_fill = fill_input
         && observation_session
             .as_ref()
             .and_then(|session| state.sensitive_observations.get(session))

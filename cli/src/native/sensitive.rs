@@ -2098,15 +2098,18 @@ pub fn content_free(action: &str, cmd: &Value) -> bool {
 
 /// Input and download acknowledgements contain selectors/keys, static status or
 /// completed-file metadata, never page text or control values. They do not need
-/// a fresh page inventory. Downloads transfer only the browser-created file,
-/// not a DOM export, and must not fail after saving due to a page observation.
+/// a post-dispatch page inventory. Fill retains its preflight inventory and
+/// target classification before editing, but returns only the selector/status.
+/// Downloads transfer only the browser-created file, not a DOM export, and must
+/// not fail after saving due to a page observation.
 /// In particular, a click may navigate away or start a payment POST;
 /// renderer observation must not turn its successful dispatch into a timeout.
 /// A new-tab click also returns a page-derived href, so it still needs protection.
 pub fn input_acknowledgement(action: &str, cmd: &Value) -> bool {
     matches!(
         action,
-        "download"
+        "fill"
+            | "download"
             | "waitfordownload"
             | "click"
             | "dblclick"
