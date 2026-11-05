@@ -5499,6 +5499,9 @@ async fn inventory_until_frame_change<T>(
                     Err(broadcast::error::RecvError::Closed) => return operation.await,
                 };
                 if changed {
+                    // The daemon drains the entire event batch next. Coalesce
+                    // our copy too, so a widget's many frames cause one retry.
+                    while events.try_recv().is_ok() {}
                     return Err(super::sensitive::InventoryError::Changed(
                         super::sensitive::DocumentChange::FrameBindings,
                     ));
@@ -5514,13 +5517,13 @@ async fn reconcile_sensitive_tab(
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
     let mut continuation = super::sensitive::InventoryContinuation::default();
+    let mut frame_events = state
+        .browser
+        .as_ref()
+        .ok_or_else(|| "Browser not launched".to_string())?
+        .client
+        .subscribe();
     loop {
-        let mut frame_events = state
-            .browser
-            .as_ref()
-            .ok_or_else(|| "Browser not launched".to_string())?
-            .client
-            .subscribe();
         state
             .observation_progress
             .clone()
@@ -6748,6 +6751,12 @@ async fn protected_snapshot_observation(
     state.ref_map.clear();
     progress
         .before(deadline, async {
+            let mut frame_events = state
+                .browser
+                .as_ref()
+                .ok_or_else(|| "Browser not launched".to_string())?
+                .client
+                .subscribe();
             progress
                 .track(
                     super::observation_progress::Phase::DrainEvents,
@@ -6756,12 +6765,6 @@ async fn protected_snapshot_observation(
                 .await?;
             let mut continuation = super::sensitive::InventoryContinuation::default();
             loop {
-                let mut frame_events = state
-                    .browser
-                    .as_ref()
-                    .ok_or_else(|| "Browser not launched".to_string())?
-                    .client
-                    .subscribe();
                 progress
                     .track(
                         super::observation_progress::Phase::AttachmentHarvest,
