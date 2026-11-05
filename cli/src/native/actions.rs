@@ -2836,6 +2836,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "session_info"
             | "webmcp_result"
             | "webmcp_cancel"
+            | "mainframe"
     )
 }
 
@@ -3192,7 +3193,7 @@ async fn execute_command_inner(
         state.deferred_dialog_events.push_back(drained);
     }
     // Lifecycle commands must not wait for renderer or iframe setup events.
-    if !matches!(action, "dialog" | "snapshot" | "session_info" | "close")
+    if !matches!(action, "dialog" | "snapshot" | "session_info" | "close" | "mainframe")
         && !browser_metadata_only
         && !lifecycle_confirmation
     {
@@ -3346,6 +3347,17 @@ async fn execute_command_inner(
 
     if action == "session_info" {
         let mut response = success_response(&id, session_info(state));
+        inject_lifecycle(&mut response, state, false, false, false);
+        return response;
+    }
+    // Resetting frame selection is local daemon state, not page observation.
+    // Keep it usable even while a child renderer is stalled or showing a dialog.
+    if action == "mainframe" {
+        let result = handle_mainframe(state).await;
+        let mut response = match result {
+            Ok(data) => success_response(&id, data),
+            Err(error) => error_response(&id, &error),
+        };
         inject_lifecycle(&mut response, state, false, false, false);
         return response;
     }
@@ -10801,6 +10813,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
     state.active_frame_id = None;
+    super::element::set_active_frame(None);
     Ok(json!({ "frame": "main", "frameId": "main" }))
 }
 
