@@ -17,6 +17,8 @@ Native navigation, interaction, protected snapshots, and protected getters are c
 
 Click and other input-only acknowledgements return after input dispatch without a fresh page inventory or post-action frame setup. They do not confirm that the application accepted the action; inspect a new snapshot to learn the outcome, and never replay an uncertain payment or submission automatically. Snapshots include represented presentational iframes as well as ordinary iframes, with the same protected-value handling.
 
+Native and Salesforce synthetic shadow controls support normal snapshot refs and clicks. Clicks test inside nested roots and still refuse unrelated overlays.
+
 ## Native sensitive form input protection
 
 Known expiry hints for native form controls and contenteditable fields also include aria-label, aria-labelledby, associated or wrapping labels, and MM/YY placeholders. Snapshots protect remembered combined expiry echoes before AX aggregation/ref construction, including whitespace-formatted sibling StaticText after a textbox disappears. Split month/year controls and their AX descendants are scoped; short fragments never become global text substitutions. Rendered text getters preserve native innerText layout outside mapped protected spans without changing live DOM or controls; unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED.

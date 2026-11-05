@@ -844,7 +844,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with stable element refs. Failed iframe setup without network controls still attempts validated live inventory; unreadable live frames return incomplete metadata without content or refs.",
+            "Return an accessibility-tree snapshot with stable element refs, including native and Salesforce synthetic shadow controls. Failed iframe setup without network controls still attempts validated live inventory; unreadable live frames return incomplete metadata without content or refs.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Include interactive elements plus alerts and status messages; retain protected field descriptions and invalid state." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },

@@ -748,6 +748,44 @@ impl CdpClient {
         groups.clear();
     }
 
+    /// Use Chrome's DOM view rather than page-patched synthetic shadow APIs.
+    /// Reusing a named world keeps objects comparable within a document; Chrome
+    /// creates a fresh context after navigation. No page globals are changed.
+    pub async fn dom_world(&self, session: &str, frame: Option<&str>) -> Result<i64, String> {
+        let tree;
+        let frame = match frame {
+            Some(frame) => frame,
+            None => {
+                tree = self.send_command_no_params("Page.getFrameTree", Some(session)).await?;
+                tree["frameTree"]["frame"]["id"].as_str()
+                    .ok_or("DOM world frame unavailable")?
+            }
+        };
+        let world = self.send_command(
+            "Page.createIsolatedWorld",
+            Some(json!({ "frameId": frame, "worldName": "agent-browser-dom" })),
+            Some(session),
+        ).await?;
+        world["executionContextId"].as_i64().ok_or_else(|| "DOM world unavailable".into())
+    }
+
+    pub async fn evaluate_dom(
+        &self,
+        session: &str,
+        expression: String,
+        return_by_value: bool,
+    ) -> Result<super::types::EvaluateResult, String> {
+        let context = self.dom_world(session, None).await?;
+        self.send_command_typed(
+            "Runtime.evaluate",
+            &json!({
+                "expression": expression, "contextId": context,
+                "returnByValue": return_by_value, "awaitPromise": false,
+            }),
+            Some(session),
+        ).await
+    }
+
     pub async fn send_command(
         &self,
         method: &str,

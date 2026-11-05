@@ -4,6 +4,8 @@ Known expiry hints for native form controls and contenteditable fields also incl
 
 Compact element references that reduce context usage dramatically for AI agents. Native snapshots and `get value/text/html/attr` replace protected form values with typed `[redacted: …]` markers without changing live fields. `cc-name` remains public. Shadow DOM and cross-origin out-of-process iframes are covered. This is form-input protection, not general secret detection in arbitrary page text. See [trust-boundaries.md](trust-boundaries.md#native-sensitive-form-input-contract) for exact markers, guarded channels, and live control detection.
 
+Snapshot refs include native and Salesforce synthetic shadow controls. Renderer projections and CSS selector resolution use an isolated DOM world so page-patched ancestry cannot disagree with Chrome’s protected inventory. Clicks test inside nested shadow roots and still refuse unrelated overlays.
+
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
 ## Contents

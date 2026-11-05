@@ -4,9 +4,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::{
-    AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
-};
+use super::cdp::types::{AXNode, AXProperty, AXValue, GetFullAXTreeResult};
 #[cfg(test)]
 use super::element::resolve_ax_session;
 use super::element::RefMap;
@@ -725,11 +723,13 @@ async fn supplement_visible_dialogs(
     let group = client.object_group(vec![session.to_owned()]).await?;
     let result =
         async {
+            let world = client.dom_world(session, Some(frame)).await?;
             let resolved = client
                 .send_command(
                     "DOM.resolveNode",
                     Some(serde_json::json!({
                         "nodeId": context.frame_node(frame)?, "objectGroup": group.name,
+                        "executionContextId": world,
                     })),
                     Some(session),
                 )
@@ -959,15 +959,13 @@ async fn find_cursor_interactive_elements(
 })()
 "#;
 
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.replace("/* SHADOW_DOM_HELPERS */", include_str!("shadow_dom.js")),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
+    // Synthetic shadow polyfills rewrite ancestry and selectors in the page's
+    // world. The inventory comes from Chrome, so project from that same DOM.
+    let result = client
+        .evaluate_dom(
+            session_id,
+            js.replace("/* SHADOW_DOM_HELPERS */", include_str!("shadow_dom.js")),
+            true,
         )
         .await?;
 

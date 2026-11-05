@@ -6,6 +6,8 @@ The `snapshot` command returns a compact accessibility tree with refs for elemen
 
 Click and other input-only acknowledgements return after input dispatch without a fresh page inventory or post-action frame setup. They do not confirm that the application accepted the action; inspect a new snapshot to learn the outcome, and never replay an uncertain payment or submission automatically.
 
+Snapshot refs include native and Salesforce synthetic shadow controls. Renderer projections and CSS selector resolution use an isolated DOM world so page-patched ancestry cannot disagree with Chrome’s protected inventory. Clicks test inside nested shadow roots and still refuse unrelated overlays.
+
 ## Options
 
 Interactive snapshots retain alert and status text, including their noninteractive children. Field descriptions (such as `aria-describedby` validation messages) and invalid state appear beside controls. Descriptions use the same remembered-value redaction as other snapshot text; protected field values remain masked. Compact output retains this feedback too.

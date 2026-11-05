@@ -2248,6 +2248,7 @@ Usage: agent-browser snapshot [options]
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Designed for AI agents to understand page structure.
+Native and Salesforce synthetic shadow controls support normal refs and clicks.
 
 Options:
   -i, --interactive    Interactive elements plus alerts and status messages

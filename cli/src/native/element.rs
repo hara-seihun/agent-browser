@@ -233,14 +233,14 @@ pub(super) async fn frame_document_object_id(
     let document = described["node"]["contentDocument"]["backendNodeId"]
         .as_i64()
         .ok_or_else(|| format!("Frame {} has no document yet", frame_id))?;
+    let world = client.dom_world(session_id, Some(frame_id)).await?;
     let result: DomResolveNodeResult = client
         .send_command_typed(
             "DOM.resolveNode",
-            &DomResolveNodeParams {
-                backend_node_id: Some(document),
-                node_id: None,
-                object_group: Some("agent-browser".to_string()),
-            },
+            &serde_json::json!({
+                "backendNodeId": document, "objectGroup": "agent-browser",
+                "executionContextId": world,
+            }),
             Some(session_id),
         )
         .await?;
@@ -751,15 +751,7 @@ pub async fn resolve_element_object_id(
         if let Some(frame_session) = iframe_sessions.get(&frame_id) {
             let js = build_find_element_js(selector_or_ref);
             let result: EvaluateResult = client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(false),
-                        await_promise: Some(false),
-                    },
-                    Some(frame_session.as_str()),
-                )
+                .evaluate_dom(frame_session.as_str(), js, false)
                 .await?;
             if result.exception_details.is_some() {
                 return Err(selector_evaluation_error());
@@ -778,15 +770,7 @@ pub async fn resolve_element_object_id(
 
     let js = build_find_element_js(selector_or_ref);
     let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(false),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+        .evaluate_dom(session_id, js, false)
         .await?;
 
     if result.exception_details.is_some() {
@@ -942,13 +926,33 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     // Descend from the given document through same-origin iframes so a point
     // over a frame resolves to the element inside it, in that frame's space.
     let d = doc, lx = x, ly = y;
+    // Document hit tests return shadow hosts, not the painted inner element.
+    // Descend each root before judging a host to be an unrelated overlay. Roots
+    // on the target's ancestry also cover closed roots without accepting a host
+    // blindly: an overlay inside that root must still refuse the click.
+    const roots = new Map();
+    for (let n = el; n;) {
+        const root = n.getRootNode?.();
+        if (!root?.host) break;
+        roots.set(root.host, root); n = root.host;
+    }
     let hit = d.elementFromPoint(lx, ly);
-    while (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument && hit !== el) {
-        const r = hit.getBoundingClientRect();
-        lx -= r.x + hit.clientLeft;
-        ly -= r.y + hit.clientTop;
-        d = hit.contentDocument;
-        hit = d.elementFromPoint(lx, ly);
+    const visited = new Set();
+    while (hit && hit !== el && !visited.has(hit)) {
+        visited.add(hit);
+        const root = hit.shadowRoot || roots.get(hit);
+        if (root?.elementFromPoint) {
+            const inner = root.elementFromPoint(lx, ly);
+            if (inner && inner !== hit) { hit = inner; continue; }
+        }
+        if ((hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && hit.contentDocument) {
+            const r = hit.getBoundingClientRect();
+            lx -= r.x + hit.clientLeft; ly -= r.y + hit.clientTop;
+            d = hit.contentDocument;
+            hit = d.elementFromPoint(lx, ly);
+            continue;
+        }
+        break;
     }
     if (!hit) return "no element in viewport";
     if (hit === el) return null;
@@ -1009,15 +1013,7 @@ async fn resolve_by_selector(
     let js = build_selector_js(selector);
 
     let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+        .evaluate_dom(session_id, js, true)
         .await?;
 
     if result.exception_details.is_some() {
@@ -1502,15 +1498,7 @@ pub async fn get_element_count(
         .unwrap_or(session_id);
 
     let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+        .evaluate_dom(session_id, js, true)
         .await?;
 
     Ok(result.result.value.and_then(|v| v.as_i64()).unwrap_or(0))
