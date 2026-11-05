@@ -468,6 +468,29 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
+/// A document anchor remains measurable even when a checkbox itself is hidden.
+/// Its DOM rectangle and CDP box locate the document in the input session.
+async fn document_viewport_anchor(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<(String, BoxModel), String> {
+    let root = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId":object_id,
+        "functionDeclaration":"function() { return this.ownerDocument.documentElement; }",
+        "objectGroup":"agent-browser",
+        "returnByValue":false,
+    })), Some(session_id)).await?;
+    let root_id = root["result"]["objectId"].as_str()
+        .ok_or("click_state_unavailable: frame document unavailable before dispatch")?.to_string();
+    let model: DomGetBoxModelResult = client.send_command_typed(
+        "DOM.getBoxModel",
+        &DomGetBoxModelParams { object_id: Some(root_id.clone()), backend_node_id: None, node_id: None },
+        Some(session_id),
+    ).await?;
+    Ok((root_id, model.model))
+}
+
 /// Native checkboxes often have a clipped, offscreen input and a painted label.
 /// Pick an actually hit-testable part of the input or its associated label before
 /// any pointer event. Never activate with JavaScript or retry a dispatched click.
@@ -475,9 +498,7 @@ pub(super) async fn resolve_checkbox_point(
     client: &CdpClient,
     session_id: &str,
     object_id: &str,
-    ref_map: &RefMap,
     selector: &str,
-    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<(f64, f64)>, String> {
     let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
         "objectId": object_id,
@@ -492,32 +513,28 @@ pub(super) async fn resolve_checkbox_point(
     let (Some(mut x), Some(mut y)) = (value["x"].as_f64(), value["y"].as_f64()) else {
         return Err("click_not_hittable: checkbox and associated labels have no unobstructed activation point; no pointer events dispatched".into());
     };
-    // A same-process frame shares the page's CDP input session, but its DOM
-    // rectangles are frame-local. Resolve the owner from CDP, including when
-    // cross-origin access to window.frameElement is unavailable.
-    let frame_id = parse_ref(selector)
-        .and_then(|r| ref_map.get(&r).and_then(|e| e.frame_id.clone()))
-        .or_else(active_frame);
-    if let Some(frame_id) = frame_id.filter(|id| !iframe_sessions.contains_key(id)) {
-        let owner = frame_owner_object_id(client, session_id, &frame_id).await?;
-        let offset = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-            "objectId": owner,
-            "functionDeclaration": r#"function() {
-                let x=0, y=0, owner=this;
-                while (owner) {
-                    const r=owner.getBoundingClientRect();
-                    x += r.x + owner.clientLeft; y += r.y + owner.clientTop;
-                    owner=owner.ownerDocument.defaultView.frameElement;
-                }
-                return {x, y};
-            }"#,
-            "returnByValue":true,
-        })), Some(session_id)).await?;
-        let (Some(dx), Some(dy)) = (offset["result"]["value"]["x"].as_f64(), offset["result"]["value"]["y"].as_f64()) else {
-            return Err("click_state_unavailable: checkbox frame coordinates unavailable before dispatch".into());
-        };
-        x += dx; y += dy;
-    }
+    // DOM rectangles are local to the element's document. CDP box models
+    // already include every same-process frame offset in the input session's
+    // CSS viewport, even across origins where window.frameElement is null.
+    let (anchor, model) = document_viewport_anchor(client, session_id, object_id).await?;
+    let placed = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId":anchor,
+        "functionDeclaration": r#"function(x,y,border) {
+            const r=this.getBoundingClientRect();
+            const xs=[border[0],border[2],border[4],border[6]];
+            const ys=[border[1],border[3],border[5],border[7]];
+            const left=Math.min(...xs), top=Math.min(...ys);
+            const sx=r.width ? (Math.max(...xs)-left)/r.width : 1;
+            const sy=r.height ? (Math.max(...ys)-top)/r.height : sx;
+            return {x:left+(x-r.left)*sx, y:top+(y-r.top)*sy};
+        }"#,
+        "arguments":[{"value":x},{"value":y},{"value":model.border}],
+        "returnByValue":true,
+    })), Some(session_id)).await?;
+    (x,y) = match (placed["result"]["value"]["x"].as_f64(), placed["result"]["value"]["y"].as_f64()) {
+        (Some(x),Some(y)) => (x,y),
+        _ => return Err("click_state_unavailable: checkbox frame coordinates unavailable before dispatch".into()),
+    };
     let described = client.send_command("DOM.describeNode", Some(serde_json::json!({
         "objectId":object_id, "depth":0,
     })), Some(session_id)).await?;
@@ -556,15 +573,27 @@ async fn check_node_interception(
     let Some(object_id) = resolved.object.object_id else {
         return Ok(());
     };
-    // Box-model coordinates are in the top-level viewport space, so the
-    // hit-test starts from the top document. For an OOPIF node the
-    // frameElement walk stops at the process boundary, where the frame's own
-    // document and session-local coordinates are already consistent.
+    let (anchor, model) = document_viewport_anchor(client, session_id, &object_id).await?;
+    // Hit testing uses document-local CSS pixels, unlike CDP's session-relative
+    // input coordinates. Cross-origin same-process frames cannot find their
+    // parent through frameElement, so derive the conversion from the live node.
     let function = format!(
-        r#"function(x, y) {{
+        r#"function(x, y, border, anchor) {{
+            const r=anchor.getBoundingClientRect();
+            const xs=[border[0],border[2],border[4],border[6]];
+            const ys=[border[1],border[3],border[5],border[7]];
+            const left=Math.min(...xs), top=Math.min(...ys);
+            const width=Math.max(...xs)-left, height=Math.max(...ys)-top;
+            const sx=width && r.width ? r.width/width : 1;
+            const sy=height && r.height ? r.height/height : sx;
+            x=r.left+(x-left)*sx;
+            y=r.top+(y-top)*sy;
             let topDoc = this.ownerDocument || document;
             while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
-                topDoc = topDoc.defaultView.frameElement.ownerDocument;
+                const owner=topDoc.defaultView.frameElement;
+                const rect=owner.getBoundingClientRect();
+                x+=rect.left+owner.clientLeft; y+=rect.top+owner.clientTop;
+                topDoc = owner.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
             return blockerAt(topDoc, this, x, y);
@@ -576,7 +605,7 @@ async fn check_node_interception(
             Some(serde_json::json!({
                 "objectId": object_id,
                 "functionDeclaration": function,
-                "arguments": [{ "value": x }, { "value": y }],
+                "arguments": [{ "value": x }, { "value": y }, { "value": model.border }, { "objectId": anchor }],
                 "returnByValue": true,
             })),
             Some(session_id),

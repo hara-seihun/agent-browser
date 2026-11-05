@@ -44,7 +44,7 @@ pub async fn click(
     .await?;
     require_click_enabled(client, &object_session, &object).await?;
     let (x, y, effective_session_id) = if let Some((x, y)) = resolve_checkbox_point(
-        client, &object_session, &object, ref_map, selector_or_ref, iframe_sessions,
+        client, &object_session, &object, selector_or_ref,
     ).await? {
         (x, y, object_session.clone())
     } else {
