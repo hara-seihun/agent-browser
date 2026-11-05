@@ -5466,12 +5466,61 @@ async fn observe_sensitive_tab_until(
     protected_inventory_before(deadline, &progress, reconcile_sensitive_tab(state, session)).await
 }
 
+/// A loading payment widget can replace or attach frames while a DOM read is
+/// pending. Reconcile that event immediately instead of waiting on a retired
+/// renderer until the command deadline. This receiver does not consume the
+/// daemon's events; the next drain applies the attachments and removals.
+async fn inventory_until_frame_change<T>(
+    events: &mut broadcast::Receiver<CdpEvent>,
+    session: &str,
+    frames: &HashMap<String, String>,
+    operation: impl std::future::Future<Output = Result<T, super::sensitive::InventoryError>>,
+) -> Result<T, super::sensitive::InventoryError> {
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            event = events.recv() => {
+                let changed = match event {
+                    Ok(event) => match event.method.as_str() {
+                        "Target.attachedToTarget" | "Target.detachedFromTarget"
+                        | "Page.frameAttached" | "Page.frameDetached" | "Page.frameNavigated" => {
+                            event.session_id.as_deref().is_some_and(|sid| {
+                                sid == session || frames.values().any(|known| known == sid)
+                            }) || event.params["sessionId"].as_str().is_some_and(|sid| {
+                                frames.values().any(|known| known == sid)
+                            })
+                        }
+                        "Target.targetDestroyed" => event.params["targetId"]
+                            .as_str().is_some_and(|frame| frames.contains_key(frame)),
+                        _ => false,
+                    },
+                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(broadcast::error::RecvError::Closed) => return operation.await,
+                };
+                if changed {
+                    return Err(super::sensitive::InventoryError::Changed(
+                        super::sensitive::DocumentChange::FrameBindings,
+                    ));
+                }
+            }
+            result = &mut operation => return result,
+        }
+    }
+}
+
 async fn reconcile_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
 ) -> Result<super::sensitive::Observation, String> {
     let mut continuation = super::sensitive::InventoryContinuation::default();
     loop {
+        let mut frame_events = state
+            .browser
+            .as_ref()
+            .ok_or_else(|| "Browser not launched".to_string())?
+            .client
+            .subscribe();
         state
             .observation_progress
             .clone()
@@ -5488,11 +5537,16 @@ async fn reconcile_sensitive_tab(
                 super::sensitive::UNSUPPORTED
             ));
         }
-        let gap = match super::sensitive::observe_inventory_continued(
-            &mgr.client,
+        let gap = match inventory_until_frame_change(
+            &mut frame_events,
             session,
             &state.iframe_sessions,
-            &mut continuation,
+            super::sensitive::observe_inventory_continued(
+                &mgr.client,
+                session,
+                &state.iframe_sessions,
+                &mut continuation,
+            ),
         )
         .await
         {
@@ -6702,6 +6756,12 @@ async fn protected_snapshot_observation(
                 .await?;
             let mut continuation = super::sensitive::InventoryContinuation::default();
             loop {
+                let mut frame_events = state
+                    .browser
+                    .as_ref()
+                    .ok_or_else(|| "Browser not launched".to_string())?
+                    .client
+                    .subscribe();
                 progress
                     .track(
                         super::observation_progress::Phase::AttachmentHarvest,
@@ -6726,15 +6786,20 @@ async fn protected_snapshot_observation(
                     )));
                 }
                 let mut refs = RefMap::new();
-                match snapshot::take_snapshot_with_observation(
-                    &mgr.client,
+                match inventory_until_frame_change(
+                    &mut frame_events,
                     session,
-                    options,
-                    &mut refs,
-                    frame,
                     &state.iframe_sessions,
-                    &private_observation,
-                    &mut continuation,
+                    snapshot::take_snapshot_with_observation(
+                        &mgr.client,
+                        session,
+                        options,
+                        &mut refs,
+                        frame,
+                        &state.iframe_sessions,
+                        &private_observation,
+                        &mut continuation,
+                    ),
                 )
                 .await
                 {
