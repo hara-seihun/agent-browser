@@ -8,7 +8,7 @@ Local auth-vault save/list/show/delete and credentials set/get/delete/list run t
 
 # agent-browser core
 
-Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
+Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Contact name and email controls remain ordinary fields when a site uses `autocomplete="new-password"` to suppress autofill. Password types, credential-labelled fields, ambiguous controls and previously private fills remain protected. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
 
 If a split-code widget changes its pinned group after the single input dispatch (for example, auto-advancing to confirmation), the result is `dispatched: true, retention: "unavailable"`, not a fill failure or proof of authentication. Inspect the next page without replaying the input. Groups that change before dispatch still refuse; unchanged groups still require exact collective retention.
 

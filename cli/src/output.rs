@@ -3914,6 +3914,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
     [redacted: cc-number], [redacted: cc-exp], [redacted: cc-exp-month],
     [redacted: cc-exp-year], [redacted: cc-csc], [redacted: password],
     [redacted: one-time-code]. cc-name stays public; live fields stay unchanged.
+  Contact names/emails using new-password only to suppress autofill stay public;
+  password types, credential hints and ambiguous controls remain protected.
   Form/contenteditable expiry hints include ARIA/associated/wrapping labels
   and MM/YY placeholders.
   Remembered combined expiry echoes tolerate whitespace before AX refs commit;

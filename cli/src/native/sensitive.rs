@@ -93,6 +93,48 @@ const IDENTIFIERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+// Some contact forms use new-password to suppress browser autofill on names
+// and email addresses. Only ignore that token with positive contact semantics;
+// password controls, credential hints and privately filled controls stay private.
+const CONTACT_HINTS: &[&str] = &[
+    "name",
+    "fullname",
+    "fullnameoptional",
+    "firstname",
+    "lastname",
+    "givenname",
+    "familyname",
+    "recipientname",
+    "contactname",
+    "email",
+    "emailaddress",
+    "recipientemail",
+    "contactemail",
+];
+const FIELD_HINT_KEYS: &[&str] = &["name", "id", "aria-label", "placeholder", "label"];
+
+fn contact_field(attributes: &HashMap<String, String>) -> bool {
+    let hints: Vec<_> = FIELD_HINT_KEYS
+        .iter()
+        .filter_map(|key| attributes.get(*key))
+        .flat_map(|value| value.lines())
+        .map(normalize)
+        .collect();
+    if hints.iter().any(|hint| {
+        IDENTIFIERS
+            .iter()
+            .any(|(_, names)| names.iter().any(|name| hint.contains(name)))
+    }) {
+        return false;
+    }
+    attributes
+        .get("type")
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("email"))
+        || hints
+            .iter()
+            .any(|hint| CONTACT_HINTS.contains(&hint.as_str()))
+}
+
 const OTP_HINTS: &[&str] = &[
     "otp",
     "code",
@@ -196,6 +238,9 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
                 .iter()
                 .find(|(a, _)| token.eq_ignore_ascii_case(a))
             {
+                if token.eq_ignore_ascii_case("new-password") && contact_field(attributes) {
+                    continue;
+                }
                 if *kind != "one-time-code" || otp_shaped(attributes) {
                     return Some(kind);
                 }
@@ -237,6 +282,27 @@ pub fn classifier_js() -> String {
       }}
       if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && !el.isContentEditable) return null;
       if ((el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';
+      const root = el.getRootNode();
+      const labels = Array.from(el.labels || []).map(label => label.textContent || '');
+      if (el.isContentEditable && el.id) {{
+        for (const label of root.querySelectorAll('label[for]')) {{
+          if (label.htmlFor === el.id) labels.push(label.textContent || '');
+        }}
+      }}
+      const wrapping = el.closest('label');
+      if (wrapping) labels.push(wrapping.textContent || '');
+      for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) {{
+        if (id) labels.push(root.getElementById(id)?.textContent || '');
+      }}
+      const hints = ['name', 'id', 'aria-label', 'placeholder'].map(key => el.getAttribute(key) || '').concat(labels);
+      const rules = {};
+      const contactHints = {};
+      const contactField = ((el.getAttribute('type') || '').toLowerCase() === 'email'
+        || hints.some(hint => contactHints.includes(hint.toLowerCase().replace(/[^a-z0-9]/g, ''))))
+        && !hints.some(hint => {{
+          const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return rules.some(([, names]) => names.some(n => name.includes(n)));
+        }});
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
       const autos = {};
       const otpShaped = () => {{
@@ -251,22 +317,11 @@ pub fn classifier_js() -> String {
           return {}.some(hint => name.includes(hint));
         }});
       }};
-      for (const token of tokens) if (autos[token] && (autos[token] !== 'one-time-code' || otpShaped())) return autos[token];
+      for (const token of tokens) {{
+        if (token === 'new-password' && contactField) continue;
+        if (autos[token] && (autos[token] !== 'one-time-code' || otpShaped())) return autos[token];
+      }}
       if (tokens.includes('cc-name')) return null;
-      const rules = {};
-      const root = el.getRootNode();
-      const labels = Array.from(el.labels || []).map(label => label.textContent || '');
-      if (el.isContentEditable && el.id) {{
-        for (const label of root.querySelectorAll('label[for]')) {{
-          if (label.htmlFor === el.id) labels.push(label.textContent || '');
-        }}
-      }}
-      const wrapping = el.closest('label');
-      if (wrapping) labels.push(wrapping.textContent || '');
-      for (const id of (el.getAttribute('aria-labelledby') || '').split(/\s+/)) {{
-        if (id) labels.push(root.getElementById(id)?.textContent || '');
-      }}
-      const hints = ['name', 'id', 'aria-label', 'placeholder'].map(key => el.getAttribute(key) || '').concat(labels);
       for (const hint of hints) {{
         const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
         if (['mmyy', 'mmyyyy'].includes(name)) return 'cc-exp';
@@ -275,9 +330,10 @@ pub fn classifier_js() -> String {
       return null;
     }};"#,
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
+        serde_json::to_string(IDENTIFIERS).unwrap(),
+        serde_json::to_string(CONTACT_HINTS).unwrap(),
         serde_json::to_string(&AUTOCOMPLETE.iter().copied().collect::<HashMap<_, _>>()).unwrap(),
         serde_json::to_string(OTP_HINTS).unwrap(),
-        serde_json::to_string(IDENTIFIERS).unwrap(),
     )
 }
 
@@ -927,7 +983,7 @@ fn collect_nodes(
                 targets
                     .entry(target.clone())
                     .or_default()
-                    .push_str(&node_text(node));
+                    .push_str(&format!("\n{}", node_text(node)));
             }
         }
         for key in ["children", "pseudoElements"] {
@@ -965,11 +1021,13 @@ fn collect_nodes(
         };
         let mut label = wrapping.clone();
         if let Some(text) = attrs.get("id").and_then(|id| targets.get(id)) {
+            label.push('\n');
             label.push_str(text);
         }
         if let Some(references) = attrs.get("aria-labelledby") {
             for id in references.split_whitespace() {
                 if let Some(text) = ids.get(id) {
+                    label.push('\n');
                     label.push_str(&node_text(text));
                 }
             }
