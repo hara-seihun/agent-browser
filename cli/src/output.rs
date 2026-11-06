@@ -1426,6 +1426,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
+        // Private browser-to-Proton card creation is not a local auth profile.
+        if data.get("saved").and_then(|v| v.as_bool()) == Some(true)
+            && data.get("vault").and_then(|v| v.as_str()) == Some("Agent")
+        {
+            let item = data.get("item").and_then(|v| v.as_str()).unwrap_or("");
+            println!("{} Card saved to Agent vault: {}", color::success_indicator(), item);
+            return;
+        }
+
         // Auth save/update/login/delete
         if data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
