@@ -1,6 +1,8 @@
 //! One private field fill, bound to the caller's exact active target and frame.
 //! The daemon owns the operation lock, deadline and disconnect cancellation.
 //! Generic fills do not navigate, submit, insert by focus or replay.
+//! A split widget may auto-advance itself; acknowledge dispatch, not retention,
+//! when the pinned group changes after its single input event.
 //! The closed WORK provider additionally owns identifier readiness and explicit submit.
 
 use super::actions::DaemonState;
@@ -1001,6 +1003,12 @@ where
         Some("submitted") if work_password => Ok(
             json!({"submitted":true,"authentication":"not-established","target":req.target,"frame":req.frame,"field":req.field}),
         ),
+        // Group identity was checked before editing. Its removal/disablement after
+        // dispatch can be the widget auto-advancing, not a failed input. Do not
+        // claim retention or authentication, inspect a new page, or replay.
+        Some("dispatched") if segments.is_some() => Ok(
+            json!({"dispatched":true,"retention":"unavailable","target":req.target,"frame":req.frame,"field":req.field}),
+        ),
         Some("filled") => Ok(
             json!({"filled": true, "target": req.target, "frame": req.frame, "field": req.field}),
         ),
@@ -1192,10 +1200,18 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
         this.dispatchEvent(new view.InputEvent('input', {bubbles:true, composed:true,
             inputType:'insertReplacementText', data:expected}));
     }
+    // An input handler can consume the whole code and replace/disable the group
+    // synchronously. Never send another event to those stale controls or call
+    // this a failed edit. Only dispatch is known, not the site's acceptance.
+    const groupChanged = () => segments &&
+        (!this.isConnected || this.ownerDocument !== document || !validSegments());
+    if (groupChanged()) return {status:'dispatched'};
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
+    if (groupChanged()) return {status:'dispatched'};
     await new Promise(resolve => view.setTimeout(resolve, 100));
     const rendered = segments ? segments.map(el => el.value).join('') : this.value;
-    if (!this.isConnected || this.ownerDocument !== document || !validSegments()) return {status:'detached',redactionValue:rendered};
+    if (groupChanged()) return {status:'dispatched',redactionValue:rendered};
+    if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
     const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
     return {status:complete && presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
 }"#;

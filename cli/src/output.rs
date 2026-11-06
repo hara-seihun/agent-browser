@@ -2840,6 +2840,8 @@ Private fill behavior:
   Metadata-only results/errors; private values registered for later redaction.
   First box of a complete2..32 visible same-type maxlength1 input group (including visual subgroups):
     Pin every segment, dispatch once, require exact collective retention.
+    Group changed after dispatch: dispatched:true, retention:unavailable.
+    Inspect the next page; this does not prove authentication. Never replay.
   Global redaction minimum:3 Unicode characters; short control markers remain.
   Scoped getters/snapshots honor private control IDs; bulk content/read refuse.
   session info prunes global fragments and reports sensitiveSecretMaintenance
