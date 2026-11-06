@@ -1306,6 +1306,10 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
 
         // Deduplicate redundant StaticText
         if children_indices.len() == 1
+            // A generic/ignored container is not rendered; its child must carry
+            // the text even when both were assigned the same private marker.
+            && !tree_nodes[i].role.is_empty()
+            && tree_nodes[i].role != "generic"
             && tree_nodes[children_indices[0]].role == "StaticText"
             && tree_nodes[i].name == tree_nodes[children_indices[0]].name
         {

@@ -107,6 +107,29 @@ const OTP_HINTS: &[&str] = &[
 ];
 const OTP_TYPES: &[&str] = &["", "text", "number"];
 
+// Explicit private page text is protected even when it is not a form control.
+const PRIVATE_TEXT_LABELS: &[&str] = &[
+    "totpsecret",
+    "otpsecret",
+    "authenticatorsecret",
+    "authenticatorseed",
+    "totpseed",
+    "otpseed",
+    "twofactorsecret",
+    "2fasecret",
+    "mfasecret",
+];
+
+fn private_text(attributes: &HashMap<String, String>) -> bool {
+    attributes
+        .get("data-private")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        || attributes.get("aria-label").is_some_and(|label| {
+            let label = normalize(label);
+            PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
+        })
+}
+
 /// `autocomplete="one-time-code"` alone does not make a field a one-time code:
 /// some forms put it on every field. It protects only a single-line input that
 /// is code-shaped (short maxlength, numeric inputmode or pattern, or a code-like
@@ -205,8 +228,14 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 /// Used inside synchronous getters and eval's execution-time DOM guard.
 pub fn classifier_js() -> String {
     format!(
-        r#"const kindOf = el => {{
-      if (!el || el.nodeType !== 1 || (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && !el.isContentEditable)) return null;
+        r#"const privateText = el => (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
+      || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint));
+    const kindOf = el => {{
+      if (!el || el.nodeType !== 1) return null;
+      for (let parent = el; parent; parent = parent.parentElement || parent.getRootNode().host) {{
+        if (privateText(parent)) return 'credential';
+      }}
+      if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && !el.isContentEditable) return null;
       if ((el.getAttribute('type') || '').toLowerCase() === 'password') return 'password';
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
       const autos = {};
@@ -245,6 +274,7 @@ pub fn classifier_js() -> String {
       }}
       return null;
     }};"#,
+        serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(&AUTOCOMPLETE.iter().copied().collect::<HashMap<_, _>>()).unwrap(),
         serde_json::to_string(OTP_HINTS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
@@ -855,6 +885,7 @@ struct Control {
     backend: i64,
     kind: &'static str,
     display: bool,
+    text: bool,
 }
 
 fn node_attributes(node: &Value) -> HashMap<String, String> {
@@ -944,6 +975,7 @@ fn collect_nodes(
             }
         }
         let display = display_button(node);
+        let text = private_text(&attrs);
         if display {
             label.push_str(payment_label);
             label.push_str(&node_text(node));
@@ -954,7 +986,8 @@ fn collect_nodes(
         attrs.insert("label".into(), label);
         if let Some(backend) = node["backendNodeId"].as_i64() {
             if seen.insert(backend)
-                && (display
+                && (text
+                    || display
                     || (editable
                         && node["nodeName"]
                             .as_str()
@@ -967,14 +1000,16 @@ fn collect_nodes(
                 if let Some(name) = node["nodeName"].as_str() {
                     attrs.insert("tagname".into(), name.to_owned());
                 }
-                if let Some(kind) = classify(&attrs)
+                if let Some(kind) = text
+                    .then_some("credential")
+                    .or_else(|| classify(&attrs))
                     .or_else(|| {
                         (display
                             && !display_payment_spans(&node_text(node), "cc-number").is_empty())
                         .then_some("cc-number")
                     })
                     .filter(|kind| {
-                        !display
+                        text || !display
                             || !display_payment_spans(
                                 &format!(
                                     "{} {}",
@@ -990,7 +1025,8 @@ fn collect_nodes(
                         session: session.to_owned(),
                         backend,
                         kind,
-                        display,
+                        display: display && !text,
+                        text,
                     });
                 }
             }
@@ -1673,7 +1709,23 @@ async fn inventory_control(
         let values = client.observation_progress.track(Phase::ControlValues,
             client.send_command("Runtime.callFunctionOn", Some(json!({
                 "objectId": object,
-                "functionDeclaration": if control.display {
+                "functionDeclaration": if control.text {
+                    // Keep both rendered text and individual fragments private, including
+                    // short descendants whose AX parent may be omitted by Chrome.
+                    r#"function() {
+                        const values = [this.textContent || '', this.innerText || '', String(this.value || '')];
+                        const scan = node => {
+                            if (node.nodeType === 3) values.push(node.textContent || '');
+                            if (node.nodeType === 1) {
+                                if ('value' in node) values.push(String(node.value || ''));
+                                if (node.shadowRoot) scan(node.shadowRoot);
+                            }
+                            for (const child of node.childNodes) scan(child);
+                        };
+                        scan(this);
+                        return values;
+                    }"#
+                } else if control.display {
                     "function() { return [this.textContent || '', this.getAttribute('aria-label') || '']; }"
                 } else {
                     "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }"
@@ -1894,27 +1946,46 @@ where
             attached: iframe_sessions.clone(),
         }));
     }
-    fn collect_live_nodes(node: &Value, session: &str, nodes: &mut HashSet<(String, i64)>) {
+    fn collect_live_nodes(
+        node: &Value,
+        session: &str,
+        nodes: &mut HashSet<(String, i64)>,
+        private_nodes: &mut HashSet<(String, i64)>,
+        inherited_private: bool,
+    ) {
+        let private = inherited_private || private_text(&node_attributes(node));
         if let Some(backend) = node["backendNodeId"].as_i64() {
-            nodes.insert((session.to_owned(), backend));
+            let key = (session.to_owned(), backend);
+            nodes.insert(key.clone());
+            if private {
+                private_nodes.insert(key);
+            }
         }
         for key in ["children", "shadowRoots", "pseudoElements"] {
             for child in node[key].as_array().into_iter().flatten() {
-                collect_live_nodes(child, session, nodes);
+                collect_live_nodes(child, session, nodes, private_nodes, private);
             }
         }
         for key in ["contentDocument", "templateContent"] {
             if let Some(child) = node.get(key) {
-                collect_live_nodes(child, session, nodes);
+                collect_live_nodes(child, session, nodes, private_nodes, private);
             }
         }
     }
     let mut live_nodes = HashSet::new();
+    let mut private_text_nodes = HashSet::new();
     for document in &documents {
-        collect_live_nodes(&document.root, &document.session, &mut live_nodes);
+        collect_live_nodes(
+            &document.root,
+            &document.session,
+            &mut live_nodes,
+            &mut private_text_nodes,
+            false,
+        );
     }
     let mut observation = Observation {
         live_nodes: Some(live_nodes),
+        private_text_nodes,
         frame_sessions: visited
             .into_iter()
             .filter(|session| session != top_session)

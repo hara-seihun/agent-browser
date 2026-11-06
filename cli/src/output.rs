@@ -3948,7 +3948,10 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   recollect all projections under one deadline. Post-capture guards never retry.
   Cancelled renderer handles retain connection-owned cleanup (500ms bound).
   Unresolved cleanup refuses further observation until connection close.
-  This is native form-input protection, not general secret detection in page text.
+  Explicit data-private=true elements and TOTP/authenticator secret or seed labels
+  protect text/descendants as [redacted: credential], including screenshots and eval.
+  Private auth export still writes only to its exclusive private file.
+  This is not general secret detection in arbitrary page text.
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,
   inspect/expose, addinitscript.
   Guarded on current or remembered sensitive tabs: eval/evalhandle, addscript,
