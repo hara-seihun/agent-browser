@@ -1261,6 +1261,8 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, mut drained: DrainedEvents) -> Result<(), String> {
+        let previous_session = self.browser.as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok()).map(str::to_owned);
         // A dialog can defer setup across batches; discard attachments whose
         // close/detach was already consumed by a later drain.
         if let Some(mgr) = &self.browser {
@@ -1539,6 +1541,19 @@ impl DaemonState {
             if let Some(ref mut mgr) = self.browser {
                 mgr.update_page_target_info(&te.target_info);
             }
+        }
+
+        // Registering an opener's popup can select a new page. Reset the old
+        // document's selected iframe and refs after registration, not only when
+        // targets are removed during the earlier event drain.
+        if previous_session.as_deref() != self.browser.as_ref()
+            .and_then(|mgr| mgr.active_session_id().ok())
+        {
+            self.ref_map.clear();
+            self.active_frame_id = None;
+            super::element::set_active_frame(None);
+            self.active_iframe_sessions.clear();
+            self.webmcp.clear_invocations();
         }
 
         // Fetch response bodies for HAR entries that just finished loading,
@@ -2466,6 +2481,7 @@ impl DaemonState {
         {
             self.ref_map.clear();
             self.active_frame_id = None;
+            super::element::set_active_frame(None);
             self.active_iframe_sessions.clear();
             if self
                 .pending_dialog
@@ -6903,9 +6919,6 @@ fn incomplete_snapshot(error: super::sensitive::InventoryError) -> Value {
 }
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")
@@ -6927,17 +6940,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     state.ref_map.clear();
-    let frame = state.active_frame_id.clone();
-    let (tree, refs) = match protected_snapshot_observation(
-        state,
-        &session_id,
-        &options,
-        frame.as_deref(),
-    )
-    .await
-    {
-        Ok(complete) => complete,
-        Err(error) => return Ok(incomplete_snapshot(error)),
+    let (tree, refs) = loop {
+        let session_id = state.browser.as_ref().ok_or("Browser not launched")?
+            .active_session_id()?.to_string();
+        let frame = state.active_frame_id.clone();
+        match protected_snapshot_observation(state, &session_id, &options, frame.as_deref()).await {
+            Ok(complete) => break complete,
+            // The initial event drain may follow a newly opened popup. Rebind
+            // this read to its document within the original command deadline;
+            // never repeat input or reuse the opener's frame selection.
+            Err(super::sensitive::InventoryError::Unavailable(_))
+                if state.browser.as_ref().and_then(|mgr| mgr.active_session_id().ok())
+                    .is_some_and(|current| current != session_id) => continue,
+            Err(error) => return Ok(incomplete_snapshot(error)),
+        }
     };
     state.ref_map = refs;
     let progress = state.protected_observation_progress();
