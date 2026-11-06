@@ -341,21 +341,39 @@ pub async fn fill_observed(
                 .await
                 .map_err(|_| unsupported())?;
             let backend = owner["backendNodeId"].as_i64().ok_or_else(unsupported)?;
-            let owner: DomResolveNodeResult = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend),
-                        node_id: None,
-                        object_group: Some("agent-browser".into()),
-                    },
+            // Same-process frames can be cross-origin. Parent-realm
+            // iframe.contentDocument is then null even for a correctly bound
+            // ref. Compare the exact documents through CDP instead; never
+            // replace identity with an origin, label or selector comparison.
+            let owner = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(serde_json::json!({"backendNodeId":backend,"depth":0})),
                     Some(session),
                 )
                 .await
                 .map_err(|_| unsupported())?;
-            let owner_object = owner.object.object_id.ok_or_else(unsupported)?;
-            let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({"objectId":object,"functionDeclaration":"function(owner) { return this.isConnected && owner.isConnected && owner.contentDocument === this.ownerDocument; }","arguments":[{"objectId":owner_object}],"returnByValue":true})), Some(session)).await.map_err(|_| unsupported())?;
-            if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
+            let expected_document = owner["node"]["contentDocument"]["backendNodeId"]
+                .as_i64()
+                .ok_or_else(unsupported)?;
+            let document = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+                "objectId":object,
+                "functionDeclaration":"function() { return this.isConnected ? this.ownerDocument : null; }",
+                "objectGroup":"agent-browser","returnByValue":false
+            })), Some(session)).await.map_err(|_| unsupported())?;
+            if document.get("exceptionDetails").is_some() {
+                return Err(unsupported());
+            }
+            let document_object = document["result"]["objectId"].as_str().ok_or_else(unsupported)?;
+            let document = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(serde_json::json!({"objectId":document_object,"depth":0})),
+                    Some(session),
+                )
+                .await
+                .map_err(|_| unsupported())?;
+            if document["node"]["backendNodeId"].as_i64() != Some(expected_document) {
                 return Err(unsupported());
             }
         }
