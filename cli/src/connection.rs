@@ -1143,8 +1143,10 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
     })
 }
 
-/// Check if an error is transient and worth retrying against the SAME daemon.
-/// Transient errors include:
+/// Classify interrupted transports for diagnostics only; dispatched commands
+/// are never retried. Temporary read unavailability is handled on the same
+/// connection while its response deadline is still live.
+/// Interrupted transports include:
 /// - EAGAIN/EWOULDBLOCK (os error 35 on macOS, 11 on Linux)
 /// - EOF errors (daemon closed connection before responding)
 /// - Connection reset/broken pipe (daemon crashed or restarting)
@@ -1191,12 +1193,94 @@ fn read_timeout_for(cmd: &Value) -> Result<Duration, String> {
     Ok(Duration::from_millis((op_ms + 10_000).max(30_000)))
 }
 
+/// Read one response without resetting its budget or discarding a partial line.
+/// Unix socket read timeouts also report EAGAIN, so use readiness and an absolute
+/// deadline instead of interpreting EAGAIN as a broken daemon connection.
+fn read_response(stream: Connection, timeout: Duration) -> Result<Response, String> {
+    let deadline = Instant::now() + timeout;
+    #[cfg(unix)]
+    match &stream {
+        Connection::Unix(socket) => socket.set_nonblocking(true),
+        Connection::Tcp(socket) => socket.set_nonblocking(true),
+    }
+    .map_err(|error| {
+        format!(
+            "Failed to configure response socket: {}; command outcome unknown; not replayed",
+            error
+        )
+    })?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or_else(|| {
+            "ipc_response_timeout: response deadline expired; command outcome unknown; not replayed".to_string()
+        })?;
+        #[cfg(not(unix))]
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|error| {
+                format!(
+                    "Failed to set response deadline: {}; command outcome unknown; not replayed",
+                    error
+                )
+            })?;
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return Err("IPC response EOF; command outcome unknown; not replayed".into()),
+            Ok(_) if line.last() == Some(&b'\n') => break,
+            Ok(_) => {
+                return Err("Incomplete IPC response; command outcome unknown; not replayed".into())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                #[cfg(unix)]
+                {
+                    use std::os::fd::AsRawFd;
+                    let fd = match reader.get_ref() {
+                        Connection::Unix(socket) => socket.as_raw_fd(),
+                        Connection::Tcp(socket) => socket.as_raw_fd(),
+                    };
+                    let mut pollfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // Round up so a fractional millisecond does not end the budget early.
+                    let millis = remaining
+                        .as_millis()
+                        .saturating_add(1)
+                        .min(i32::MAX as u128) as i32;
+                    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+                    if ready < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(format!("Failed to wait for IPC response: {}; command outcome unknown; not replayed", error));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to read: {}; command outcome unknown; not replayed",
+                    error
+                ))
+            }
+        }
+    }
+    serde_json::from_slice(&line)
+        .map_err(|_| "Invalid response; command outcome unknown; not replayed".to_string())
+}
+
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream
-        .set_read_timeout(Some(read_timeout_for(cmd)?))
-        .map_err(|error| format!("Failed to set command read timeout: {}", error))?;
+    let timeout = read_timeout_for(cmd)?;
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
@@ -1209,17 +1293,7 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
         )
     })?;
 
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader.read_line(&mut response_line).map_err(|e| {
-        format!(
-            "Failed to read: {}; command outcome unknown; not replayed",
-            e
-        )
-    })?;
-
-    serde_json::from_str(&response_line)
-        .map_err(|_| "Invalid response; command outcome unknown; not replayed".to_string())
+    read_response(stream, timeout)
 }
 
 #[cfg(test)]
