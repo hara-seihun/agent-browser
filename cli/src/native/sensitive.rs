@@ -121,9 +121,10 @@ fn contact_field(attributes: &HashMap<String, String>) -> bool {
         .map(normalize)
         .collect();
     if hints.iter().any(|hint| {
-        IDENTIFIERS
-            .iter()
-            .any(|(_, names)| names.iter().any(|name| hint.contains(name)))
+        api_text_label(hint)
+            || IDENTIFIERS
+                .iter()
+                .any(|(_, names)| names.iter().any(|name| hint.contains(name)))
     }) {
         return false;
     }
@@ -149,6 +150,134 @@ const OTP_HINTS: &[&str] = &[
 ];
 const OTP_TYPES: &[&str] = &["", "text", "number"];
 
+// These names identify credential values, not an arbitrary UUID elsewhere on a page.
+const API_TEXT_LABELS: &[&str] = &[
+    "apikey",
+    "apisecret",
+    "secretkey",
+    "accesskey",
+    "clientsecret",
+    "accesstoken",
+    "authtoken",
+    "bearertoken",
+    "privatetoken",
+    "accesskeyid",
+    "secretaccesskey",
+    "scwsecretkey",
+    "scwaccesskey",
+];
+
+fn api_text_label(text: &str) -> bool {
+    if text.len() > 64 {
+        return false;
+    }
+    let label = normalize(text);
+    API_TEXT_LABELS.contains(&label.as_str())
+}
+
+fn api_labeled_value(text: &str) -> Option<&str> {
+    let text = text.trim().strip_prefix("export ").unwrap_or(text.trim());
+    text.char_indices().take(64).find_map(|(offset, ch)| {
+        if !(ch.is_whitespace() || ch == ':' || ch == '=') || !api_text_label(&text[..offset]) {
+            return None;
+        }
+        let value = text[offset..]
+            .trim_start_matches(|ch: char| ch.is_whitespace() || ch == ':' || ch == '=');
+        api_value(value).then_some(value)
+    })
+}
+
+// Bound work per element even on very broad or deeply nested pages.
+fn api_node_label(node: &Value) -> bool {
+    fn read(node: &Value, text: &mut String) -> bool {
+        let value = node["nodeValue"].as_str().unwrap_or("");
+        if text.len() + value.len() > 64 {
+            return false;
+        }
+        text.push_str(value);
+        node["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|child| read(child, text))
+    }
+    let mut text = String::new();
+    read(node, &mut text) && api_text_label(&text)
+}
+
+fn api_value(text: &str) -> bool {
+    let text = text.trim();
+    text.len() >= 8
+        && text.len() <= 512
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-/.+=".contains(&b))
+        && text.bytes().any(|b| b.is_ascii_alphanumeric())
+}
+
+// Find the smallest field containing one exact API label and a displayed token.
+// Text nodes are bound to their containing element for screenshot geometry.
+// Completed fields never donate their values to an ancestor's unrelated label.
+fn api_display_nodes(root: &Value) -> HashSet<i64> {
+    fn walk(
+        node: &Value,
+        parent: Option<i64>,
+        found: &mut HashSet<i64>,
+    ) -> (usize, Vec<(i64, usize)>) {
+        let backend = node["backendNodeId"].as_i64().or(parent);
+        if matches!(node["nodeName"].as_str(), Some("SCRIPT" | "STYLE")) {
+            return (0, Vec::new());
+        }
+        if node["nodeName"] == "#text" {
+            let text = node["nodeValue"].as_str().unwrap_or("");
+            if text.lines().any(|line| api_labeled_value(line).is_some()) {
+                if let Some(parent) = parent {
+                    found.insert(parent);
+                }
+                return (1, Vec::new());
+            }
+            return (
+                usize::from(api_text_label(text)),
+                parent
+                    .filter(|_| api_value(text))
+                    .map(|id| vec![(id, 0)])
+                    .unwrap_or_default(),
+            );
+        }
+        if api_node_label(node) {
+            return (1, Vec::new());
+        }
+        let mut labels = 0;
+        let mut values = Vec::new();
+        for child in node["children"].as_array().into_iter().flatten() {
+            let (count, candidates) = walk(child, backend, found);
+            labels += count;
+            values.extend(
+                candidates
+                    .into_iter()
+                    .filter_map(|(id, depth)| (depth < 4).then_some((id, depth + 1))),
+            );
+        }
+        if labels == 1 && !values.is_empty() {
+            found.extend(values.drain(..).map(|(id, _)| id));
+        }
+        for key in ["shadowRoots", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() {
+                walk(child, None, found);
+            }
+        }
+        for key in ["contentDocument", "templateContent"] {
+            if let Some(child) = node.get(key) {
+                walk(child, None, found);
+            }
+        }
+        (labels, values)
+    }
+    let mut found = HashSet::new();
+    walk(root, None, &mut found);
+    found
+}
+
 // Explicit private page text is protected even when it is not a form control.
 const PRIVATE_TEXT_LABELS: &[&str] = &[
     "totpsecret",
@@ -168,7 +297,7 @@ fn private_text(attributes: &HashMap<String, String>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
         || attributes.get("aria-label").is_some_and(|label| {
             let label = normalize(label);
-            PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
+            api_text_label(&label) || PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
         })
 }
 
@@ -256,6 +385,9 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
     for key in ["name", "id", "aria-label", "placeholder", "label"] {
         if let Some(value) = attributes.get(key) {
             let normalized = normalize(value);
+            if api_text_label(&normalized) {
+                return Some("credential");
+            }
             if matches!(normalized.as_str(), "mmyy" | "mmyyyy") {
                 return Some("cc-exp");
             }
@@ -273,8 +405,69 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 /// Used inside synchronous getters and eval's execution-time DOM guard.
 pub fn classifier_js() -> String {
     format!(
-        r#"const privateText = el => (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
-      || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint));
+        r#"const apiLabels = {};
+    const apiLabel = text => {{
+      if (!text || text.length > 64) return false;
+      const label = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return apiLabels.includes(label);
+    }};
+    const apiValue = text => /^[a-z0-9_\-/.+=]{{8,512}}$/i.test(text) && /[a-z0-9]/i.test(text);
+    const apiLabeledValue = text => {{
+      text = text.trim().replace(/^export /, '');
+      for (let i = 0; i < Math.min(64, text.length); i++) {{
+        if (/[\s:=]/.test(text[i]) && apiLabel(text.slice(0, i)) && apiValue(text.slice(i).replace(/^[\s:=]+/, ''))) return true;
+      }}
+      return false;
+    }};
+    const apiNodeLabel = node => {{
+      let text = '';
+      const read = node => {{
+        const value = node.nodeValue || '';
+        if (text.length + value.length > 64) return false;
+        text += value;
+        return Array.from(node.childNodes).every(read);
+      }};
+      return read(node) && apiLabel(text);
+    }};
+    const apiRoots = new WeakMap();
+    const apiDisplay = el => {{
+      const root = el.getRootNode();
+      if (!apiRoots.has(root)) {{
+        const found = new Set();
+        const walk = node => {{
+          if (node.nodeType === 1 && ['SCRIPT','STYLE'].includes(node.tagName)) return [0, []];
+          if (node.nodeType === 3) {{
+            const text = (node.textContent || '').trim();
+            if (text.split(/\r?\n/).some(apiLabeledValue)) {{
+              if (node.parentElement) found.add(node.parentElement);
+              return [1, []];
+            }}
+            return [apiLabel(text) ? 1 : 0,
+              node.parentElement && apiValue(text) ? [[node.parentElement, 0]] : []];
+          }}
+          if (apiNodeLabel(node)) return [1, []];
+          let labels = 0, values = [];
+          for (const child of node.childNodes) {{
+            const [count, candidates] = walk(child);
+            labels += count;
+            values.push(...candidates.filter(([, depth]) => depth < 4).map(([el, depth]) => [el, depth + 1]));
+          }}
+          if (labels === 1 && values.length) {{
+            for (const [el] of values) found.add(el);
+            values = [];
+          }}
+          return [labels, values];
+        }};
+        walk(root);
+        apiRoots.set(root, found);
+      }}
+      return apiRoots.get(root).has(el);
+    }};
+    const privateText = el => (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
+      || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
+      || apiLabel(el.getAttribute('aria-label'))
+      || apiLabel((el.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => el.getRootNode().getElementById(id)?.textContent || '').join(' '))
+      || apiDisplay(el);
     const kindOf = el => {{
       if (!el || el.nodeType !== 1) return null;
       for (let parent = el; parent; parent = parent.parentElement || parent.getRootNode().host) {{
@@ -301,7 +494,7 @@ pub fn classifier_js() -> String {
         || hints.some(hint => contactHints.includes(hint.toLowerCase().replace(/[^a-z0-9]/g, ''))))
         && !hints.some(hint => {{
           const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
-          return rules.some(([, names]) => names.some(n => name.includes(n)));
+          return apiLabel(name) || rules.some(([, names]) => names.some(n => name.includes(n)));
         }});
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
       const autos = {};
@@ -324,11 +517,13 @@ pub fn classifier_js() -> String {
       if (tokens.includes('cc-name')) return null;
       for (const hint of hints) {{
         const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (apiLabel(name)) return 'credential';
         if (['mmyy', 'mmyyyy'].includes(name)) return 'cc-exp';
         for (const [kind, names] of rules) if (names.some(n => name.includes(n))) return kind;
       }}
       return null;
     }};"#,
+        serde_json::to_string(API_TEXT_LABELS).unwrap(),
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
@@ -1003,6 +1198,7 @@ fn collect_nodes(
         parent_editable: bool,
         payment_label: &str,
         button_counts: &HashMap<usize, usize>,
+        api_nodes: &HashSet<i64>,
     ) {
         let mut attrs = node_attributes(node);
         let editable = match attrs
@@ -1033,7 +1229,11 @@ fn collect_nodes(
             }
         }
         let display = display_button(node);
-        let text = private_text(&attrs);
+        let text = private_text(&attrs)
+            || node["backendNodeId"]
+                .as_i64()
+                .is_some_and(|id| api_nodes.contains(&id))
+            || api_text_label(&label);
         if display {
             label.push_str(payment_label);
             label.push_str(&node_text(node));
@@ -1115,6 +1315,7 @@ fn collect_nodes(
                     editable,
                     &field_label,
                     button_counts,
+                    api_nodes,
                 );
             }
         }
@@ -1133,7 +1334,17 @@ fn collect_nodes(
     let mut counts = HashMap::new();
     button_counts(node, &mut counts);
     walk(
-        node, session, controls, seen, &ids, &targets, "", false, "", &counts,
+        node,
+        session,
+        controls,
+        seen,
+        &ids,
+        &targets,
+        "",
+        false,
+        "",
+        &counts,
+        &api_display_nodes(node),
     );
 }
 
@@ -2010,8 +2221,13 @@ where
         nodes: &mut HashSet<(String, i64)>,
         private_nodes: &mut HashSet<(String, i64)>,
         inherited_private: bool,
+        api_nodes: &HashSet<i64>,
     ) {
-        let private = inherited_private || private_text(&node_attributes(node));
+        let private = inherited_private
+            || private_text(&node_attributes(node))
+            || node["backendNodeId"]
+                .as_i64()
+                .is_some_and(|id| api_nodes.contains(&id));
         if let Some(backend) = node["backendNodeId"].as_i64() {
             let key = (session.to_owned(), backend);
             nodes.insert(key.clone());
@@ -2021,12 +2237,12 @@ where
         }
         for key in ["children", "shadowRoots", "pseudoElements"] {
             for child in node[key].as_array().into_iter().flatten() {
-                collect_live_nodes(child, session, nodes, private_nodes, private);
+                collect_live_nodes(child, session, nodes, private_nodes, private, api_nodes);
             }
         }
         for key in ["contentDocument", "templateContent"] {
             if let Some(child) = node.get(key) {
-                collect_live_nodes(child, session, nodes, private_nodes, private);
+                collect_live_nodes(child, session, nodes, private_nodes, private, api_nodes);
             }
         }
     }
@@ -2039,6 +2255,7 @@ where
             &mut live_nodes,
             &mut private_text_nodes,
             false,
+            &api_display_nodes(&document.root),
         );
     }
     let mut observation = Observation {
@@ -2112,6 +2329,16 @@ where
                     control.kind,
                     &value,
                 );
+                if control.text {
+                    for token in value.lines().filter_map(api_labeled_value) {
+                        observation.remember_private_value(
+                            &control.session,
+                            control.backend,
+                            "credential",
+                            token,
+                        );
+                    }
+                }
             }
         }
     }
