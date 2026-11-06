@@ -3024,7 +3024,7 @@ async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
             preparation["id"] = cmd["id"].clone();
             preparation["timeout"] =
                 json!(crate::commands::command_timeout_ms(cmd).expect("validated command budget"));
-            let mut response = Box::pin(execute_command_inner(&preparation, state, None)).await;
+            let mut response = Box::pin(execute_command_inner(&preparation, state, None, false)).await;
             if response["success"] != true
                 || response.get("code").is_some()
                 || response["data"]["confirmation_required"] == true
@@ -3044,17 +3044,32 @@ async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
     }
-    let mut response = Box::pin(execute_requested_command(&requested, state)).await;
+    // Successful launch preparation already established or checked this connection.
+    // Keep that result only for this requested action, never across commands.
+    let connection_prepared = cmd
+        .get("launchPreparations")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    let mut response = Box::pin(execute_requested_command(
+        &requested,
+        state,
+        connection_prepared,
+    ))
+    .await;
     if cmd.get("launchPreparations").is_some() {
         response["launchPreparation"] = json!("complete");
     }
     response
 }
 
-async fn execute_requested_command(cmd: &Value, state: &mut DaemonState) -> Value {
+async fn execute_requested_command(
+    cmd: &Value,
+    state: &mut DaemonState,
+    connection_prepared: bool,
+) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     if !matches!(action, "auth_login" | "auth_fill" | "auth_export") {
-        return Box::pin(execute_command_inner(cmd, state, None)).await;
+        return Box::pin(execute_command_inner(cmd, state, None, connection_prepared)).await;
     }
     let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
     let Some(budget_ms) = cmd
@@ -3070,7 +3085,12 @@ async fn execute_requested_command(cmd: &Value, state: &mut DaemonState) -> Valu
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
     match tokio::time::timeout_at(
         deadline,
-        Box::pin(execute_command_inner(cmd, state, Some(deadline))),
+        Box::pin(execute_command_inner(
+            cmd,
+            state,
+            Some(deadline),
+            connection_prepared,
+        )),
     )
     .await
     {
@@ -3099,6 +3119,7 @@ async fn execute_command_inner(
     cmd: &Value,
     state: &mut DaemonState,
     auth_deadline: Option<tokio::time::Instant>,
+    connection_prepared: bool,
 ) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let lifecycle_confirmation = action == "confirm"
@@ -3272,7 +3293,7 @@ async fn execute_command_inner(
         if restore_key_change_needs_launch {
             true
         } else if let Some(ref mut mgr) = state.browser {
-            mgr.has_process_exited() || !mgr.is_connection_alive().await
+            mgr.has_process_exited() || (!connection_prepared && !mgr.is_connection_alive().await)
         } else {
             true
         }
@@ -16186,6 +16207,7 @@ mod tests {
                     &json!({"action":"snapshot", "id":"test"}),
                     &mut state,
                     None,
+                    false,
                 )
                 .await;
                 assert_eq!(response["success"], true, "{failed}: {response}");
@@ -17167,7 +17189,7 @@ mod tests {
             state.browser = Some(fixture.manager);
             let start = std::time::Instant::now();
             let result =
-                execute_command_inner(&json!({"action":"snapshot","id":"test"}), &mut state, None)
+                execute_command_inner(&json!({"action":"snapshot","id":"test"}), &mut state, None, false)
                     .await;
             assert_eq!(result["success"], true);
             let response = &result["data"];
