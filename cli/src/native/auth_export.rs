@@ -15,6 +15,11 @@ const PAGE: &str = "auth_export_page_error: private read failed; no value return
 /// Reconstruct setup failures as metadata, never preserve foreign error text.
 pub(crate) fn public_error(message: &str) -> &'static str {
     match message.split(':').next() {
+        Some("auth_export_card_number_invalid") => "auth_export_card_number_invalid: pinned number field must contain 12..19 digits",
+        Some("auth_export_card_cvv_invalid") => "auth_export_card_cvv_invalid: pinned CVC field must contain 3..4 digits",
+        Some("auth_export_card_expiry_invalid") => "auth_export_card_expiry_invalid: expiry must be YYYY-MM, MM/YY or MM/YYYY",
+        Some("auth_export_card_invalid") => "auth_export_card_invalid: item, cardholder, expiry and unique CSS number/CVC selectors are required",
+        Some("auth_export_vault_uncertain") => "auth_export_vault_uncertain: vault create did not acknowledge success; inspect the item before another attempt; never replay",
         Some("auth_export_invalid_request") => INVALID,
         Some("auth_export_binding_changed") => BINDING,
         Some("auth_export_field_unavailable") => FIELD,
@@ -37,6 +42,21 @@ pub async fn handle_auth_export(
     state: &mut DaemonState,
     deadline: Instant,
 ) -> Result<Value, String> {
+    if cmd.get("destination").and_then(Value::as_str) == Some("proton-card") {
+        return save_card(cmd, state, deadline).await;
+    }
+    let output = cmd.get("output").and_then(Value::as_str).ok_or(INVALID)?;
+    let sink = ExclusiveSink::prepare(output)?;
+    let value = read_private_field(cmd, state, deadline).await?;
+    sink.publish(&value)
+}
+
+/// Only native private consumers receive these bytes; normal command responses never do.
+async fn read_private_field(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: Instant,
+) -> Result<String, String> {
     let field = |name: &str| {
         cmd.get(name)
             .and_then(Value::as_str)
@@ -44,6 +64,11 @@ pub async fn handle_auth_export(
             .ok_or(INVALID)
     };
     let selector = field("selector")?;
+    let index = cmd.get("selectorIndex").and_then(Value::as_u64);
+    let container = cmd["destination"] == "proton-card";
+    if index.is_some_and(|i| i > 1000) {
+        return Err(INVALID.into());
+    }
     let location = FieldLocation {
         target: super::auth_fill::canonical_target(
             state,
@@ -56,7 +81,6 @@ pub async fn handle_auth_export(
         )
         .map_err(|_| BINDING)?,
     };
-    let output = field("output")?;
     if selector.starts_with('@') || selector.starts_with("xpath=") || selector.starts_with("//") {
         return Err(INVALID.into());
     }
@@ -72,7 +96,6 @@ pub async fn handle_auth_export(
     if Instant::now() >= deadline {
         return Err("auth_export_timeout: private export deadline expired; not replayed".into());
     }
-    let sink = ExclusiveSink::prepare(output)?;
     let bound = bind_location(state, &location).await.map_err(|_| BINDING)?;
     super::element::set_active_frame(if location.frame == "main" {
         None
@@ -80,7 +103,7 @@ pub async fn handle_auth_export(
         Some(&location.frame)
     });
     let client = state.browser.as_ref().ok_or(BINDING)?.client.clone();
-    let (object, session) = resolve_element_object_id(
+    let (mut object, session) = resolve_element_object_id(
         &client,
         &bound.session,
         &RefMap::new(),
@@ -92,6 +115,16 @@ pub async fn handle_auth_export(
     if session != bound.frame_session.as_deref().unwrap_or(&bound.session) {
         return Err(BINDING.into());
     }
+    if let Some(index) = index {
+        let selected = client.send_command("Runtime.callFunctionOn", Some(json!({
+            "objectId":object,"functionDeclaration":"function(selector,index){return this.ownerDocument.querySelectorAll(selector)[index] || null}",
+            "arguments":[{"value":selector},{"value":index}],"returnByValue":false
+        })),Some(&session)).await.map_err(|_| PAGE)?;
+        object = selected["result"]["objectId"]
+            .as_str()
+            .ok_or(FIELD)?
+            .to_owned();
+    }
     let group = client
         .object_group(vec![session.clone()])
         .await
@@ -101,7 +134,7 @@ pub async fn handle_auth_export(
             "Runtime.callFunctionOn",
             Some(json!({
                 "objectId":object, "functionDeclaration":PIN_FIELD,
-                "arguments":[{"value":selector}], "objectGroup":group.name, "returnByValue":false
+                "arguments":[{"value":selector},{"value":index},{"value":container}], "objectGroup":group.name, "returnByValue":false
             })),
             Some(&session),
         )
@@ -114,7 +147,7 @@ pub async fn handle_auth_export(
     let described = client
         .send_command(
             "DOM.describeNode",
-            Some(json!({"objectId":object,"depth":1})),
+            Some(json!({"objectId":object,"depth":if container {-1} else {1}})),
             Some(&session),
         )
         .await
@@ -128,19 +161,18 @@ pub async fn handle_auth_export(
         _ => true,
     };
     let mut text_backends = vec![backend];
-    if is_text {
-        if let Some(children) = described["node"]["children"].as_array() {
+    fn collect_nodes(node: &Value, ids: &mut Vec<i64>) {
+        if let Some(children) = node["children"].as_array() {
             for child in children {
-                if child["nodeType"] == 3 {
-                    text_backends.push(
-                        child["backendNodeId"]
-                            .as_i64()
-                            .filter(|id| *id > 0)
-                            .ok_or(PAGE)?,
-                    );
+                if let Some(id) = child["backendNodeId"].as_i64().filter(|id| *id > 0) {
+                    ids.push(id);
                 }
+                collect_nodes(child, ids);
             }
         }
+    }
+    if is_text {
+        collect_nodes(&described["node"], &mut text_backends);
     }
     if bind_location(state, &location).await.map_err(|_| BINDING)? != bound {
         return Err(BINDING.into());
@@ -150,7 +182,7 @@ pub async fn handle_auth_export(
             "Runtime.callFunctionOn",
             Some(json!({
                 "objectId":object, "functionDeclaration":READ_FIELD,
-                "arguments":[{"objectId":document},{"value":selector}], "returnByValue":true
+                "arguments":[{"objectId":document},{"value":selector},{"value":index},{"value":container}], "returnByValue":true
             })),
             Some(&session),
         )
@@ -190,21 +222,172 @@ pub async fn handle_auth_export(
     if Instant::now() >= deadline {
         return Err("auth_export_timeout: private export deadline expired; not replayed".into());
     }
-    sink.publish(value.ok_or(PAGE)?)
+    Ok(value.ok_or(PAGE)?.to_owned())
 }
 
-const PIN_FIELD: &str = r#"function(selector) {
+/// Fixed Proton consumer: private values go only into stdin, never argv, files or output.
+async fn save_card(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: Instant,
+) -> Result<Value, String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    const INVALID_CARD: &str = "auth_export_card_invalid: item, cardholder, expiry and unique CSS number/CVC selectors are required";
+    const VAULT: &str = "auth_export_vault_uncertain: vault create did not acknowledge success; inspect the item before another attempt; never replay";
+    // This consumer owns only Kenan's Agent vault, not other users' accounts.
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } != 1000 {
+        return Err(INVALID_CARD.into());
+    }
+    let required = |key: &str| {
+        cmd.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(INVALID_CARD)
+    };
+    let item = required("item")?;
+    let holder = required("cardholderName")?;
+    let expiry_selector = cmd.get("expirationSelector").and_then(Value::as_str);
+    if expiry_selector.is_some() == cmd.get("expirationDate").is_some() {
+        return Err(INVALID_CARD.into());
+    }
+    let number_selector = required("numberSelector")?;
+    let cvv_selector = required("cvvSelector")?;
+    if item.len() > 256
+        || holder.len() > 256
+        || (number_selector == cvv_selector && cmd["numberIndex"] == cmd["cvvIndex"])
+    {
+        return Err(INVALID_CARD.into());
+    }
+    let location = FieldLocation {
+        target: super::auth_fill::canonical_target(state, required("target")?)
+            .map_err(|_| BINDING)?,
+        frame: super::auth_fill::canonical_frame(state, required("frame")?).map_err(|_| BINDING)?,
+    };
+    let original = bind_location(state, &location).await.map_err(|_| BINDING)?;
+    let mut read_cmd = cmd.clone();
+    read_cmd["selector"] = json!(number_selector);
+    read_cmd["selectorIndex"] = cmd["numberIndex"].clone();
+    let number_raw = read_private_field(&read_cmd, state, deadline).await?;
+    read_cmd["selector"] = json!(cvv_selector);
+    read_cmd["selectorIndex"] = cmd["cvvIndex"].clone();
+    let cvv_raw = read_private_field(&read_cmd, state, deadline).await?;
+    let expiry_raw = if let Some(selector) = expiry_selector {
+        read_cmd["selector"] = json!(selector);
+        read_cmd["selectorIndex"] = cmd["expirationIndex"].clone();
+        read_private_field(&read_cmd, state, deadline).await?
+    } else {
+        required("expirationDate")?.to_owned()
+    };
+    let compact: String = expiry_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let expiry = if compact.len() == 7
+        && compact.as_bytes()[4] == b'-'
+        && compact
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 4 || b.is_ascii_digit())
+    {
+        compact
+    } else {
+        let parts: Vec<_> = compact.split('/').collect();
+        if parts.len() != 2
+            || parts[0].len() != 2
+            || !parts[0].bytes().all(|b| b.is_ascii_digit())
+            || ![2, 4].contains(&parts[1].len())
+            || !parts[1].bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("auth_export_card_expiry_invalid: invalid private expiry".into());
+        }
+        format!(
+            "{}{}-{}",
+            if parts[1].len() == 2 { "20" } else { "" },
+            parts[1],
+            parts[0]
+        )
+    };
+    if !expiry[5..]
+        .parse::<u8>()
+        .ok()
+        .is_some_and(|m| (1..=12).contains(&m))
+    {
+        return Err("auth_export_card_expiry_invalid: invalid private expiry".into());
+    }
+    if bind_location(state, &location).await.map_err(|_| BINDING)? != original {
+        return Err(BINDING.into());
+    }
+    // Dedicated card buttons can include copy-icon text and Unicode spacing.
+    let number: String = number_raw.chars().filter(char::is_ascii_digit).collect();
+    let cvv: String = cvv_raw.chars().filter(char::is_ascii_digit).collect();
+    if !(12..=19).contains(&number.len()) {
+        return Err("auth_export_card_number_invalid: invalid private number".into());
+    }
+    if !(3..=4).contains(&cvv.len()) {
+        return Err("auth_export_card_cvv_invalid: invalid private CVC".into());
+    }
+    // Register normalized forms as well as exactly what the page displayed.
+    state
+        .sensitive_observations
+        .entry(original.session.clone())
+        .or_default()
+        .remember_private_value(&original.session, 0, "credential", &number);
+    state
+        .sensitive_observations
+        .entry(original.session.clone())
+        .or_default()
+        .remember_private_value(&original.session, 0, "credential", &cvv);
+    let template = json!({"title":item,"cardholder_name":holder,"number":number,
+        "cvv":cvv,"expiration_date":expiry});
+    if Instant::now() >= deadline {
+        return Err("auth_export_timeout: private operation expired; never replay".into());
+    }
+    let mut child = tokio::process::Command::new("/home/kenan/tools/pass-cli/main")
+        .args([
+            "item",
+            "create",
+            "credit-card",
+            "--vault-name",
+            "Agent",
+            "--from-template",
+            "-",
+        ])
+        .env(
+            "PROTON_PASS_AGENT_REASON",
+            "Save the authorized browser-created virtual card directly to Agent vault",
+        )
+        .env("PASS_CLI_NO_CACHE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| VAULT)?;
+    let mut stdin = child.stdin.take().ok_or(VAULT)?;
+    stdin
+        .write_all(template.to_string().as_bytes())
+        .await
+        .map_err(|_| VAULT)?;
+    stdin.shutdown().await.map_err(|_| VAULT)?;
+    drop(stdin);
+    let status = child.wait().await.map_err(|_| VAULT)?;
+    if !status.success() {
+        return Err(VAULT.into());
+    }
+    Ok(json!({"saved":true,"vault":"Agent","item":item}))
+}
+
+const PIN_FIELD: &str = r#"function(selector,index,container) {
     const d=this.ownerDocument;
     const matches=d.querySelectorAll(selector);
-    if (!this.isConnected || matches.length!==1 || matches[0]!==this || !this.getClientRects().length) return null;
-    if (!['INPUT','TEXTAREA'].includes(this.tagName) && this.children.length!==0) return null;
+    if (!this.isConnected || (index===null ? matches.length!==1 || matches[0]!==this : matches[index]!==this) || !this.getClientRects().length) return null;
+    if (!['INPUT','TEXTAREA'].includes(this.tagName) && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return null;
     return d;
 }"#;
-const READ_FIELD: &str = r#"function(document, selector) {
-    const valid=()=>this.isConnected && this.ownerDocument===document && this.getClientRects().length && document.querySelectorAll(selector).length===1 && document.querySelector(selector)===this;
+const READ_FIELD: &str = r#"function(document, selector,index,container) {
+    const valid=()=>{const m=document.querySelectorAll(selector); return this.isConnected && this.ownerDocument===document && this.getClientRects().length && (index===null ? m.length===1 && m[0]===this : m[index]===this)};
     if (!valid()) return {status:'changed'};
     const control=['INPUT','TEXTAREA'].includes(this.tagName);
-    if (!control && this.children.length!==0) return {status:'unavailable'};
+    if (!control && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return {status:'unavailable'};
     const value=control ? this.value : this.textContent;
     if (typeof value!=='string' || value.length===0) return {status:'unavailable'};
     if (!valid()) return {status:'changed',value};

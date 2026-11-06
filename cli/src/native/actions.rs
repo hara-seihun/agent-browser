@@ -2869,6 +2869,9 @@ fn policy_actions_for_command(
     needs_implicit_launch: bool,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
+    if action == "auth_export" && cmd["destination"] == "proton-card" {
+        actions.push("auth_save".to_owned());
+    }
     // `a11y <url>` performs a real browser navigation before the audit. Keep
     // navigation deny and confirmation policies effective for the compound
     // command instead of treating it as a read-only audit.
@@ -3114,7 +3117,11 @@ async fn execute_requested_command(
             if response["success"] == true {
                 success_response(
                     id,
-                    json!({"path":response["data"]["path"],"byteCount":response["data"]["byteCount"]}),
+                    if cmd["destination"] == "proton-card" {
+                        json!({"saved":response["data"]["saved"],"vault":"Agent","item":cmd["item"]})
+                    } else {
+                        json!({"path":response["data"]["path"],"byteCount":response["data"]["byteCount"]})
+                    },
                 )
             } else {
                 let message =

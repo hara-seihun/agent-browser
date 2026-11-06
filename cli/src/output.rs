@@ -2858,6 +2858,17 @@ Private fill behavior:
   Only password-ready permits a separate password command; unknown is not replayed.
   Refused/unknown carry a closed reason code, never private page or account data.
 
+Private card to Proton Pass (Kenan's Agent vault):
+  auth save-card --item TITLE --cardholder-name NAME
+      --number-selector CSS [--number-index N] --cvv-selector CSS [--cvv-index N]
+      (--expiration-date YYYY-MM | --expiration-selector CSS [--expiration-index N])
+      --target TAB --frame FRAME [--timeout MS]
+  Indices are zero-based. Sources may be inputs, text leaves, or card buttons.
+  Pins target/frame/document and each source; registers private values for redaction.
+  Card values go directly to pass-cli stdin, never files, argv or command output.
+  Output is saved/vault/item only. Stop captures first. Never automatically replay.
+  On timeout or uncertain vault creation inspect the item before another attempt.
+
 Private export:
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]
@@ -4139,6 +4150,9 @@ Auth Vault:
             --selector <css> [--target <tab>] [--frame <frame-id|main>]
             [--format mm/yy|mm/yyyy|mmyy|mm|yy|yyyy] [--timeout <ms>]
                              Private pinned fill, metadata only, no submit/retry
+  auth save-card --item TITLE --cardholder-name NAME --number-selector CSS
+      --cvv-selector CSS --expiration-date YYYY-MM --target TAB --frame FRAME
+                             Private Proton card creation, metadata only
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]
                              Private exclusive0600 file, path/byteCount only

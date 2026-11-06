@@ -1232,6 +1232,42 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
+                Some("save-card") => {
+                    const USAGE: &str = "agent-browser auth save-card --item TITLE --cardholder-name NAME --number-selector CSS --cvv-selector CSS --expiration-date YYYY-MM --target TAB --frame FRAME [--timeout MS]";
+                    let mut cmd = json!({"id":id,"action":"auth_export","destination":"proton-card","timeout":configured_timeout(flags)?.unwrap_or(180_000)});
+                    let mut seen = std::collections::HashSet::new();
+                    let mut j = 1;
+                    while j < rest.len() {
+                        let key = match rest[j] {
+                            "--item" => "item", "--cardholder-name" => "cardholderName",
+                            "--number-selector" => "numberSelector", "--cvv-selector" => "cvvSelector",
+                            "--number-index" => "numberIndex", "--cvv-index" => "cvvIndex",
+                            "--expiration-selector" => "expirationSelector", "--expiration-index" => "expirationIndex",
+                            "--expiration-date" => "expirationDate", "--target" => "target", "--frame" => "frame", "--timeout" => "timeout",
+                            _ => return Err(ParseError::InvalidValue {message:"unknown save-card flag".into(),usage:USAGE}),
+                        };
+                        if !seen.insert(key) { return Err(ParseError::InvalidValue {message:"duplicate save-card flag".into(),usage:USAGE}); }
+                        let value = rest.get(j+1).filter(|v| !v.starts_with("--") && !v.trim().is_empty())
+                            .ok_or_else(|| ParseError::MissingArguments {context:"auth save-card".into(),usage:USAGE})?;
+                        if key == "numberIndex" || key == "cvvIndex" || key == "expirationIndex" {
+                            let index = value.parse::<u64>().ok().filter(|v| *v <= 1000)
+                                .ok_or_else(|| ParseError::InvalidValue {message:"invalid save-card index".into(),usage:USAGE})?;
+                            cmd[key] = json!(index);
+                        } else if key == "timeout" {
+                            let ms = value.parse::<u64>().ok().filter(|v| *v>0 && *v<=300_000)
+                                .ok_or_else(|| ParseError::InvalidValue {message:"invalid save-card timeout".into(),usage:USAGE})?;
+                            cmd[key] = json!(ms);
+                        } else { cmd[key] = json!(value); }
+                        j += 2;
+                    }
+                    if ["item","cardholderName","numberSelector","cvvSelector","target","frame"].iter().any(|k| cmd.get(*k).is_none()) {
+                        return Err(ParseError::MissingArguments {context:"auth save-card".into(),usage:USAGE});
+                    }
+                    if cmd.get("expirationDate").is_some() == cmd.get("expirationSelector").is_some() {
+                        return Err(ParseError::InvalidValue {message:"choose expiration-date or expiration-selector".into(),usage:USAGE});
+                    }
+                    Ok(cmd)
+                }
                 Some("export") => {
                     const USAGE: &str = "agent-browser auth export --selector <css> [--target <tab>] [--frame <frame-id|main>] --output <absolute-path> [--timeout <ms>]";
                     let mut cmd = json!({"id":id,"action":"auth_export","timeout":configured_timeout(flags)?.unwrap_or(180_000)});
