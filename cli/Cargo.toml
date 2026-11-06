@@ -60,7 +60,9 @@ strip = true
 
 [profile.ci]
 inherits = "release"
-lto = "thin"
+# No LTO: a one-line edit rebuilt in 62 s with thin LTO and rebuilds in 20 s without it.
+lto = false
+incremental = true
 codegen-units = 16
 
 # Browser control waits on CDP, not Rust optimization. Keep native iteration
