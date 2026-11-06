@@ -102,6 +102,7 @@ impl Write for Connection {
 }
 
 impl Connection {
+    #[cfg(any(not(unix), test))]
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
         match self {
             #[cfg(unix)]
