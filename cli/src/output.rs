@@ -2313,6 +2313,10 @@ Closes the current session. Native external CDP browsers are detached,
 never sent Browser.close. Owned Browser.close attempts have a 2-second
 limit, followed by transport cleanup and owned-process reaping.
 
+Without a restore key, or with --restore-save never, close skips state
+export and sensitive-field observation. Configured exports still prohibit
+sensitive output.
+
 Native restore saving has a 2-second limit. On timeout, cleanup continues
 and JSON reports closed:true, saveStatus:timeout, and saveError without
 replacing existing saved state.

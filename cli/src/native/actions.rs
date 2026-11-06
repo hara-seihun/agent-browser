@@ -5713,34 +5713,34 @@ fn require_restore_export_allowed(state: &mut DaemonState) -> Result<(), String>
 pub(crate) async fn auto_save_restore_state(
     state: &mut DaemonState,
 ) -> Result<Option<String>, String> {
-    require_restore_export_allowed(state)?;
-    if state.session_name.is_some() {
-        if let Some(mgr) = state.browser.as_ref() {
-            let session = mgr.active_session_id()?.to_string();
-            let current =
-                super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
-            state
-                .sensitive_observations
-                .entry(session)
-                .or_default()
-                .merge(current);
-        }
-    }
-    require_restore_export_allowed(state)?;
-    validate_restore_if_pending(state).await;
-
+    // No export is requested without a restore key, or when saving is disabled.
+    // Decide that before sensitive-field checks or any shutdown-time page reads.
     let Some(session_name) = state.session_name.clone() else {
         state.restore_save_status = "not_configured".to_string();
         state.restore_saved_path = None;
         return Ok(None);
     };
+    if state.restore_save == "never" {
+        state.restore_save_status = "disabled".to_string();
+        state.restore_saved_path = None;
+        return Ok(None);
+    }
+
+    require_restore_export_allowed(state)?;
+    if let Some(mgr) = state.browser.as_ref() {
+        let session = mgr.active_session_id()?.to_string();
+        let current =
+            super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+        state
+            .sensitive_observations
+            .entry(session)
+            .or_default()
+            .merge(current);
+    }
+    require_restore_export_allowed(state)?;
+    validate_restore_if_pending(state).await;
 
     match state.restore_save.as_str() {
-        "never" => {
-            state.restore_save_status = "disabled".to_string();
-            state.restore_saved_path = None;
-            return Ok(None);
-        }
         "auto" if state.restore_load_failed => {
             state.restore_save_status = "skipped_restore_failed".to_string();
             state.restore_saved_path = None;

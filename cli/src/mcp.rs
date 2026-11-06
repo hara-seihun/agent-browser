@@ -965,7 +965,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLOSE,
             "Close browser",
-            "Close the current browser session through the canonical CLI. Native daemon_busy means no close was performed and the foreground command remains owned, never cancelled. Background autosave is read-only and bounded to250ms; lifecycle allows300ms for its lock. Process cleanup still owning state reports daemon_maintenance_busy. Restore saving is bounded to two seconds; on timeout cleanup continues with closed:true, saveStatus:timeout, and saveError, preserving existing saved state. External CDP browsers are detached without Browser.close. Owned Browser.close attempts are bounded to two seconds before transport cleanup and owned-process reaping.",
+            "Close the current browser session through the canonical CLI. Native daemon_busy means no close was performed and the foreground command remains owned, never cancelled. Background autosave is read-only and bounded to250ms; lifecycle allows300ms for its lock. Process cleanup still owning state reports daemon_maintenance_busy. Without a restore key, or with restore-save never, close skips export and sensitive-field observation. Configured exports still prohibit sensitive output. Restore saving is bounded to two seconds; on timeout cleanup continues with closed:true, saveStatus:timeout, and saveError, preserving existing saved state. External CDP browsers are detached without Browser.close. Owned Browser.close attempts are bounded to two seconds before transport cleanup and owned-process reaping.",
             json!({
                 "all": { "type": "boolean", "default": false, "description": "Close all active sessions." }
             }),
