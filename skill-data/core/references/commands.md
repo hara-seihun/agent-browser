@@ -236,7 +236,8 @@ agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body '{}'  # Mock response
 agent-browser network unroute [url]            # Remove routes
-agent-browser network requests                 # View tracked requests
+agent-browser network stop                     # Disable request/HAR capture and discard without export
+agent-browser network requests                 # View tracked requests (starts capture)
 agent-browser network requests --filter api    # Filter requests
 agent-browser network payment-errors           # Safe Stripe diagnostics on sensitive tabs
 agent-browser network payment-errors --clear   # Clear active-tab diagnostics

@@ -2828,6 +2828,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "close"
             | "read"
             | "har_stop"
+            | "network_stop"
             | "credentials_set"
             | "credentials_get"
             | "credentials_delete"
@@ -3018,6 +3019,11 @@ pub(crate) fn command_not_executed_response(cmd: &Value) -> Value {
 }
 
 async fn execute_command_owned(cmd: &Value, state: &mut DaemonState) -> Value {
+    // A discard must never reconnect, launch, or replace a browser just to
+    // apply client launch options. It only stops the existing collectors.
+    if cmd["action"] == "network_stop" {
+        return Box::pin(execute_requested_command(cmd, state, false)).await;
+    }
     let mut requested = cmd.clone();
     if let Some(object) = requested.as_object_mut() {
         object.remove("launchPreparations");
@@ -3243,7 +3249,7 @@ async fn execute_command_inner(
     // mandatory network controls; the requested command owns page observation.
     // A preparatory launch must not spend that command's deadline draining
     // loading widgets before the requested command has even started.
-    if !matches!(action, "launch" | "dialog" | "snapshot" | "session_info" | "close" | "mainframe")
+    if !matches!(action, "launch" | "dialog" | "snapshot" | "session_info" | "close" | "mainframe" | "network_stop")
         && !browser_metadata_only
         && !lifecycle_confirmation
     {
@@ -3397,6 +3403,14 @@ async fn execute_command_inner(
 
     if action == "session_info" {
         let mut response = success_response(&id, session_info(state));
+        inject_lifecycle(&mut response, state, false, false, false);
+        return response;
+    }
+    // Discarding captures changes only daemon state. Never require a live
+    // renderer, drain captured events, or export bytes to stop private capture.
+    if action == "network_stop" {
+        let data = handle_network_stop(state);
+        let mut response = success_response(&id, data);
         inject_lifecycle(&mut response, state, false, false, false);
         return response;
     }
@@ -13075,6 +13089,18 @@ pub fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
         }
     }
     false
+}
+
+/// Disable both general network collectors and discard their captured data.
+/// Network events remain enabled for mandatory controls and safe payment
+/// diagnostics; neither raw collector consumes them while its flag is false.
+fn handle_network_stop(state: &mut DaemonState) -> Value {
+    state.request_tracking = false;
+    state.har_recording = false;
+    state.tracked_requests.clear();
+    state.har_entries.clear();
+    state.har_body_total_bytes = 0;
+    json!({"stopped": true, "discarded": true, "requestTracking": false, "harRecording": false})
 }
 
 async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

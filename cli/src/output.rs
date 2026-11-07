@@ -2566,8 +2566,9 @@ Subcommands:
     --abort                  Abort matching requests
     --body <json>            Respond with custom body
   unroute [url]              Remove route (all if no URL)
-  requests [options]         List captured requests
-    --clear                  Clear request log
+  stop                      Disable request/HAR capture and discard data without export
+  requests [options]         List captured requests (starts tracking)
+    --clear                  Clear request log without stopping tracking
     --filter <pattern>       Filter by URL pattern
     --type <types>           Filter by resource type (comma-separated: xhr,fetch,document)
     --method <method>        Filter by HTTP method (GET, POST, etc.)
@@ -2603,6 +2604,7 @@ Examples:
   agent-browser network requests --type xhr,fetch
   agent-browser network requests --method POST --status 2xx
   agent-browser network requests --clear
+  agent-browser network stop
   agent-browser network request 1234.5
   agent-browser network har start
   agent-browser network har start --content all

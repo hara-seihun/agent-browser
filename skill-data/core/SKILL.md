@@ -391,6 +391,8 @@ agent-browser --session b fill @e1 "bob@test.com"
 
 When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
 
+Before private `auth fill`, use `network stop` to disable request/HAR capture and discard data without exporting. Clearing request records alone does not stop capture.
+
 ### Mock network requests
 
 ```bash

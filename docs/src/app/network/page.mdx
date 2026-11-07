@@ -38,6 +38,9 @@ agent-browser network requests --method POST
 agent-browser network requests --status 2xx
 agent-browser network request <requestId>
 agent-browser network requests --clear
+
+# Disable both request tracking and HAR capture, discarding captured data
+agent-browser network stop
 ```
 
 <table>
@@ -52,6 +55,8 @@ agent-browser network requests --clear
     <tr><td><code>--clear</code></td><td>Clear the tracked request log</td></tr>
   </tbody>
 </table>
+
+`network requests --clear` only clears records; tracking stays active. Use `network stop` before private `auth fill`. It works on protected tabs without exporting data or closing the browser, preserves routes and safe payment diagnostics, and is safe to repeat. Raw capture and HAR export guards remain unchanged.
 
 Use `network request <requestId>` to inspect one request and response in detail after finding its ID in `network requests`.
 

@@ -84,6 +84,7 @@ const TOOL_SET_MEDIA: &str = "agent_browser_set_media";
 const TOOL_NETWORK_ROUTE: &str = "agent_browser_network_route";
 const TOOL_NETWORK_UNROUTE: &str = "agent_browser_network_unroute";
 const TOOL_PAYMENT_ERRORS: &str = "agent_browser_payment_errors";
+const TOOL_NETWORK_STOP: &str = "agent_browser_network_stop";
 const TOOL_NETWORK_REQUESTS: &str = "agent_browser_network_requests";
 const TOOL_NETWORK_REQUEST: &str = "agent_browser_network_request";
 const TOOL_NETWORK_HAR_START: &str = "agent_browser_network_har_start";
@@ -1211,6 +1212,13 @@ fn parity_tools() -> Vec<Value> {
             "Payment errors",
             "Read safe Stripe payment error codes and nonsecret identifiers, including on protected tabs. Never returns raw network data.",
             json!({ "clear": { "type": "boolean" } }),
+            &[],
+        ),
+        tool(
+            TOOL_NETWORK_STOP,
+            "Network stop",
+            "Disable request tracking and HAR capture, discarding captured data without exporting. Safe on protected tabs; does not close the browser or remove routes.",
+            json!({}),
             &[],
         ),
         tool(
@@ -2403,6 +2411,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
             }
             call_cli_tool(arguments, args, None)
         }
+        TOOL_NETWORK_STOP => call_literal(arguments, &["network", "stop"]),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
         TOOL_NETWORK_HAR_START => {

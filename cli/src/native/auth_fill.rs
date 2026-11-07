@@ -298,7 +298,7 @@ pub async fn handle_auth_fill(
         || state.har_recording
         || state.request_tracking
     {
-        return Err("auth_fill_capture_active: stop recording, tracing, streaming and network capture before private lookup".into());
+        return Err("auth_fill_capture_active: use network stop to discard network capture; stop any recording, tracing or streaming before private lookup".into());
     }
     let plugins = match cmd.get("plugins") {
         Some(value) => {

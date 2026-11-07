@@ -375,7 +375,8 @@ agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
 agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
-agent-browser network requests                 # View tracked requests
+agent-browser network stop                     # Disable request/HAR capture and discard without export
+agent-browser network requests                 # View tracked requests (starts capture)
 agent-browser network requests --filter api    # Filter requests
 agent-browser network requests --type xhr,fetch  # Filter by resource type
 agent-browser network requests --method POST   # Filter by HTTP method

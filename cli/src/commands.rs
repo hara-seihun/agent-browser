@@ -3691,6 +3691,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "request",
         "payment-errors",
         "har",
+        "stop",
     ];
 
     match rest.first().copied() {
@@ -3721,6 +3722,15 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 cmd["url"] = json!(url);
             }
             Ok(cmd)
+        }
+        Some("stop") => {
+            if rest.len() != 1 {
+                return Err(ParseError::InvalidValue {
+                    message: "network stop accepts no arguments; it discards captures without exporting".into(),
+                    usage: "network stop",
+                });
+            }
+            Ok(json!({"id": id, "action": "network_stop"}))
         }
         Some("requests") => {
             let clear = rest.contains(&"--clear");
@@ -3808,7 +3818,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|payment-errors|har> [args...]",
+            usage: "network <route|unroute|requests|request|payment-errors|har|stop> [args...]",
         }),
     }
 }
