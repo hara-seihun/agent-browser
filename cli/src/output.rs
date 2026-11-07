@@ -3976,6 +3976,8 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Unresolved cleanup refuses further observation until connection close.
   Explicit data-private=true elements and TOTP/authenticator secret or seed labels
   protect text/descendants as [redacted: credential], including screenshots and eval.
+  OAuth authorization-code labels, IDs/classes (including code.auth-code) protect
+  displayed codes in snapshots/getters, mask screenshots and refuse evaluation.
   Private auth export still writes only to its exclusive private file.
   This is not general secret detection in arbitrary page text.
   Always refused: recording/video, trace, profiler, HAR, screencast/stream enable,

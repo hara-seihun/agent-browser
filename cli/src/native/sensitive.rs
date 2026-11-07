@@ -150,7 +150,8 @@ const OTP_HINTS: &[&str] = &[
 ];
 const OTP_TYPES: &[&str] = &["", "text", "number"];
 
-// These names identify credential values, not an arbitrary UUID elsewhere on a page.
+// These names identify displayed credentials, including OAuth authorization codes,
+// not arbitrary UUIDs or source-code blocks elsewhere on a page.
 const API_TEXT_LABELS: &[&str] = &[
     "apikey",
     "apisecret",
@@ -165,6 +166,14 @@ const API_TEXT_LABELS: &[&str] = &[
     "secretaccesskey",
     "scwsecretkey",
     "scwaccesskey",
+    "authcode",
+    "authorizationcode",
+    "authorisationcode",
+    "oauthcode",
+    "oauthauthorizationcode",
+    "oauthauthorisationcode",
+    "oauth2authorizationcode",
+    "yourauthorizationcode",
 ];
 
 fn api_text_label(text: &str) -> bool {
@@ -297,7 +306,14 @@ fn private_text(attributes: &HashMap<String, String>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
         || attributes.get("aria-label").is_some_and(|label| {
             let label = normalize(label);
-            api_text_label(&label) || PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
+            PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
+        })
+        || ["aria-label", "title", "id", "name"]
+            .iter()
+            .filter_map(|key| attributes.get(*key))
+            .any(|label| api_text_label(label))
+        || attributes.get("class").is_some_and(|classes| {
+            classes.split_whitespace().any(api_text_label)
         })
 }
 
@@ -465,7 +481,8 @@ pub fn classifier_js() -> String {
     }};
     const privateText = el => (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
       || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
-      || apiLabel(el.getAttribute('aria-label'))
+      || ['aria-label', 'title', 'id', 'name'].some(key => apiLabel(el.getAttribute(key)))
+      || (el.getAttribute('class') || '').split(/\s+/).some(apiLabel)
       || apiLabel((el.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => el.getRootNode().getElementById(id)?.textContent || '').join(' '))
       || apiDisplay(el);
     const kindOf = el => {{
