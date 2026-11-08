@@ -2480,11 +2480,11 @@ Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
-Examples:
-  agent-browser find role button click --name Submit
-
 Semantic input returns its dispatch acknowledgement without post-action page inspection.
 Locator preflight/redaction and protected text reads remain in force.
+
+Examples:
+  agent-browser find role button click --name Submit
   agent-browser find text "Sign In" click
   agent-browser find label "Email" fill "user@example.com"
   agent-browser find placeholder "Search..." fill "query"
