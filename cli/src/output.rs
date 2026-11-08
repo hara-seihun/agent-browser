@@ -2482,6 +2482,9 @@ Global Options:
 
 Examples:
   agent-browser find role button click --name Submit
+
+Semantic input returns its dispatch acknowledgement without post-action page inspection.
+Locator preflight/redaction and protected text reads remain in force.
   agent-browser find text "Sign In" click
   agent-browser find label "Email" fill "user@example.com"
   agent-browser find placeholder "Search..." fill "query"

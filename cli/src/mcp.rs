@@ -1104,7 +1104,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_FIND,
             "Find element",
-            "Find an element with semantic locators and optionally act on it.",
+            "Find an element with semantic locators and optionally act on it. Input subactions retain locator preflight/redaction and acknowledge dispatch without post-action page inspection; text remains a protected read. Inspect the resulting page before repeating an input.",
             json!({
                 "locator": { "type": "string", "enum": ["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"] },
                 "value": { "type": "string", "description": "Role, text, label, selector, or test id." },

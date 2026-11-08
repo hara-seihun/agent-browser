@@ -3552,20 +3552,25 @@ async fn execute_command_inner(
     // A throwaway preflight/postflight would spend separate budgets and erase its
     // useful incomplete result, while exposing no additional protected content.
     let mut guard_incomplete: Option<String> = None;
-    let fill_input = action == "fill"
-        || (FIND_SUBACTION_COMMANDS.contains(&action)
-            && cmd.get("subaction").and_then(Value::as_str) == Some("fill"));
-    let input_acknowledgement = super::sensitive::input_acknowledgement(
-        if fill_input { "fill" } else { action },
-        cmd,
-    );
+    // A semantic locator dispatches the same input as its direct subaction.
+    // A completed find-click must not be replaced with a post-navigation
+    // inventory/cleanup failure. Keep locator preflight: resolution failures
+    // can contain accessible names and still need remembered redaction.
+    let find_subaction = FIND_SUBACTION_COMMANDS.contains(&action).then(|| {
+        cmd.get("subaction").and_then(Value::as_str).unwrap_or("click")
+    });
+    let effect_action = find_subaction.unwrap_or(action);
+    let fill_input = effect_action == "fill";
+    let input_acknowledgement =
+        super::sensitive::input_acknowledgement(effect_action, cmd);
     let observation_session = if matches!(action, "snapshot" | "dialog") {
         None
-    } else if (input_acknowledgement && !fill_input) || browser_metadata_only {
+    } else if (input_acknowledgement && !fill_input && find_subaction.is_none()) || browser_metadata_only {
         // These responses contain no page content. Keep remembered redaction,
         // but do not read the renderer before or after dispatching input.
         // Fill still needs its preflight inventory to refuse protected targets;
-        // its acknowledgement does not need another inventory after editing.
+        // semantic locators also retain preflight for accessible-name redaction.
+        // Neither acknowledgement needs another inventory after editing.
         state
             .browser
             .as_ref()

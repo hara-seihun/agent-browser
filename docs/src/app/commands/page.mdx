@@ -845,3 +845,5 @@ Native `select` dispatches bubbling input and change events, then checks that th
 
 
 Eval reads the bound tab URL from browser metadata after script execution, without running a second script. Deadline diagnostics distinguish `evaluation_script` (including its synchronous sensitive-control check) from `evaluation_metadata`; the protections and no-replay behavior are unchanged.
+
+Semantic input commands such as `find role button click --name Submit` keep locator preflight and redaction, then return the input acknowledgement without another page inventory after dispatch. A subsequent navigation or sensitive-object cleanup failure cannot replace a completed semantic input with a failure. `find … text` remains a protected page read. A click acknowledgement confirms input dispatch, not application acceptance; inspect the resulting page before considering a repeat.
