@@ -1915,6 +1915,9 @@ Usage: agent-browser select <selector> <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
 Label matching normalizes whitespace such as non-breaking spaces.
+Dispatches input/change and checks retained options after rendering.
+Rejected or detached targets, disabled options and page errors fail.
+A render timeout means the outcome is unknown; inspect before another action.
 
 Global Options:
   --json               Output as JSON

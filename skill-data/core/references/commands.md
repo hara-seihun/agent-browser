@@ -91,6 +91,8 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
+Native `select` dispatches bubbling input and change events, then checks that the requested options remain selected after rendering. Disabled controls/options, custom combobox wrappers, missing or ambiguous options, page errors, detached targets and rejected values return errors instead of success. A rendering timeout means the selection may have happened; inspect the page before another action.
+
 Selectors use native CSS or `xpath=` syntax; for text matching use `find role` or `find text`, not Playwright-only pseudo-classes such as `:text-is`. CSS selectors search the selected document first, then nested open shadow roots, without entering iframes. Select shadow inputs themselves, such as `input[name=password]`, not their noneditable custom-element hosts. XPath retains document-only semantics.
 
 Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric post IDs; known secrets and protected payment controls remain redacted.

@@ -159,6 +159,8 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
+Native `select` dispatches bubbling input and change events, then checks that the requested options remain selected after rendering. Disabled controls/options, custom combobox wrappers, missing or ambiguous options, page errors, detached targets and rejected values return errors instead of success. A rendering timeout means the selection may have happened; inspect the page before another action.
+
 Both `type` and `keyboard type` send key events for US-layout characters, so editors such as Google Sheets can enter edit mode. Other characters use Unicode text insertion. Use `keyboard inserttext` when key events are unwanted. Success means input was dispatched; observe the page to check that the application saved it.
 
 Selectors use native CSS or `xpath=` syntax; for text matching use `find role` or `find text`, not Playwright-only pseudo-classes such as `:text-is`. CSS selectors search the selected document first, then nested open shadow roots, without entering iframes. Select shadow inputs themselves, such as `input[name=password]`, not their noneditable custom-element hosts. XPath retains document-only semantics.

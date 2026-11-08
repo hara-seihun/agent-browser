@@ -903,7 +903,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SELECT,
             "Select options",
-            "Select one or more options in a select element.",
+            "Select native options by value or label, dispatch input/change, and check retention after rendering. Disabled, ambiguous, detached or rejected selections and page errors fail. A rendering timeout has unknown outcome; inspect before another action.",
             json!({
                 "selector": selector_schema(),
                 "values": {
