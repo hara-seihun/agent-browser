@@ -6734,7 +6734,9 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     // Honor an active `frame <sel>` selection, like element resolution and
     // `wait` already do. Without this, `frame` reported success and `eval`
     // still ran in the top document.
-    let result = match state.active_frame_id.as_deref() {
+    let progress = state.protected_observation_progress();
+    let result = progress.track(super::observation_progress::Phase::EvaluationScript, async {
+        match state.active_frame_id.as_deref() {
         Some(frame_id) => match state.iframe_sessions.get(frame_id) {
             // Cross-origin frame: it owns a dedicated CDP session.
             Some(frame_session) => mgr.evaluate_in_session(frame_session, script, None).await?,
@@ -6746,8 +6748,12 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
             }
         },
         None => mgr.evaluate(script, None).await?,
-    };
-    let url = mgr.get_url().await.unwrap_or_default();
+        }
+    }).await;
+    // The script may start navigation or leave its renderer busy. Reading the
+    // bound target metadata needs no second JavaScript execution afterwards.
+    let url = progress.track(super::observation_progress::Phase::EvaluationMetadata,
+        mgr.get_url_metadata()).await?;
     Ok(json!({ "result": result, "origin": url }))
 }
 

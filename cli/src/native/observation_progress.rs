@@ -12,6 +12,8 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     CommandAction,
+    EvaluationScript,
+    EvaluationMetadata,
     NavigationRequest,
     NavigationLifecycle,
     NavigationMetadata,
