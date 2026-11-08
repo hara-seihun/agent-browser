@@ -690,46 +690,7 @@ pub async fn select_option(
     )
     .await?;
 
-    // Matching nothing must be an error, not a silent success: an agent that
-    // selects a misspelled option otherwise sees "Done", and only discovers
-    // the page state is wrong after more commands. List what was available.
-    let js = r#"function(vals) {
-            const normalize = (value) => String(value ?? '')
-                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            const options = Array.from(this.options);
-            const wanted = new Set();
-            for (const value of vals) {
-                let matches = options.filter((opt) =>
-                    value === opt.value ||
-                    value === opt.label.trim() ||
-                    value === opt.textContent.trim()
-                );
-                if (matches.length === 0) {
-                    const normalizedValue = normalize(value);
-                    matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue
-                    );
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
-                    }
-                }
-                if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                }
-                for (const opt of matches) wanted.add(opt);
-            }
-            if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-            }
-            for (const opt of options) opt.selected = wanted.has(opt);
-            this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched: wanted.size };
-        }"#
-    .to_string();
+    let js = include_str!("select.js").to_string();
 
     let result = client
         .send_command_typed::<_, Value>(
@@ -742,12 +703,15 @@ pub async fn select_option(
                     object_id: None,
                 }]),
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(&effective_session_id),
         )
         .await?;
 
+    if result.get("exceptionDetails").is_some() {
+        return Err("select_page_error: Selection failed in the page; inspect the current state before another action".into());
+    }
     if let Some(error) = result
         .get("result")
         .and_then(|r| r.get("value"))
@@ -757,6 +721,9 @@ pub async fn select_option(
         return Err(error.to_string());
     }
 
+    if result["result"]["value"]["matched"].as_u64().is_none() {
+        return Err("select_page_error: Invalid selection outcome".into());
+    }
     Ok(())
 }
 
