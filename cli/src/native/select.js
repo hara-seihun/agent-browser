@@ -51,7 +51,7 @@ async function(vals) {
                 const setter = Object.getOwnPropertyDescriptor(view.HTMLSelectElement.prototype, 'selectedIndex').set;
                 setter.call(this, options.indexOf([...wanted][0]));
             }
-            const expected = options.map(opt => wanted.has(opt));
+            const expected = options.filter(opt => wanted.has(opt)).map(opt => opt.value);
             this.dispatchEvent(new view.Event('input', { bubbles: true }));
             this.dispatchEvent(new view.Event('change', { bubbles: true }));
             // React can restore its controlled value after an event or at the
@@ -74,8 +74,8 @@ async function(vals) {
             });
             if (!rendered) return { error: 'select_render_timeout: Selection dispatched but rendering did not complete; retention is unknown; do not replay' };
             if (!this.isConnected) return { error: 'select_target_detached: Select was replaced after dispatch; inspect the current page before another action' };
-            const actual = Array.from(this.options);
-            if (actual.length !== options.length || actual.some((opt, index) => opt !== options[index] || opt.selected !== expected[index])) {
+            const actual = Array.from(this.selectedOptions, opt => opt.value);
+            if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
                 return { error: 'select_value_not_retained: Select did not retain the requested options after rendering; inspect the current page before another action' };
             }
             return { matched: wanted.size };
