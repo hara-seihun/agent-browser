@@ -2287,6 +2287,9 @@ Examples:
             r##"
 agent-browser eval - Execute JavaScript
 
+Origin comes from browser metadata; no second script reads the URL.
+Deadline diagnostics separate evaluation_script from evaluation_metadata.
+
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.

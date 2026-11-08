@@ -620,3 +620,6 @@ Global `--storage-state <path>` loads a saved authentication file; `--state <pat
 
 
 Native protected-tab fills bind and classify the exact form control; unrelated login controls do not prevent nonsecret iframe form edits. Sensitive targets and unavailable frame identities refuse explicitly. On systemd Linux hosts the native daemon belongs to a user service, independent of the launching shell; `close` ends that owned session. Service admission failure reports `daemon_owner_unavailable` instead of launching an unowned process.
+
+
+Eval reads the bound tab URL from browser metadata after script execution, without running a second script. Deadline diagnostics distinguish `evaluation_script` (including its synchronous sensitive-control check) from `evaluation_metadata`; the protections and no-replay behavior are unchanged.

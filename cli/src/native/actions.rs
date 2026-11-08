@@ -6734,7 +6734,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     // Honor an active `frame <sel>` selection, like element resolution and
     // `wait` already do. Without this, `frame` reported success and `eval`
     // still ran in the top document.
-    let progress = state.protected_observation_progress();
+    let progress = super::observation_progress::connection_progress();
     let result = progress
         .track(super::observation_progress::Phase::EvaluationScript, async {
             Ok::<_, String>(match state.active_frame_id.as_deref() {
