@@ -6735,25 +6735,27 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     // `wait` already do. Without this, `frame` reported success and `eval`
     // still ran in the top document.
     let progress = state.protected_observation_progress();
-    let result = progress.track(super::observation_progress::Phase::EvaluationScript, async {
-        match state.active_frame_id.as_deref() {
-        Some(frame_id) => match state.iframe_sessions.get(frame_id) {
-            // Cross-origin frame: it owns a dedicated CDP session.
-            Some(frame_session) => mgr.evaluate_in_session(frame_session, script, None).await?,
-            // Same-process frame: no session of its own, reach its realm
-            // through the owning element's contentWindow.
-            None => {
-                let session_id = mgr.active_session_id()?.to_string();
-                mgr.evaluate_in_frame(&session_id, frame_id, script).await?
-            }
-        },
-        None => mgr.evaluate(script, None).await?,
-        }
-    }).await;
+    let result = progress
+        .track(super::observation_progress::Phase::EvaluationScript, async {
+            Ok::<_, String>(match state.active_frame_id.as_deref() {
+                Some(frame_id) => match state.iframe_sessions.get(frame_id) {
+                    // Cross-origin frame: it owns a dedicated CDP session.
+                    Some(frame_session) => mgr.evaluate_in_session(frame_session, script, None).await?,
+                    // A same-process frame shares its parent's CDP session.
+                    None => {
+                        let session_id = mgr.active_session_id()?.to_string();
+                        mgr.evaluate_in_frame(&session_id, frame_id, script).await?
+                    }
+                },
+                None => mgr.evaluate(script, None).await?,
+            })
+        })
+        .await?;
     // The script may start navigation or leave its renderer busy. Reading the
     // bound target metadata needs no second JavaScript execution afterwards.
-    let url = progress.track(super::observation_progress::Phase::EvaluationMetadata,
-        mgr.get_url_metadata()).await?;
+    let url = progress
+        .track(super::observation_progress::Phase::EvaluationMetadata, mgr.get_url_metadata())
+        .await?;
     Ok(json!({ "result": result, "origin": url }))
 }
 
