@@ -1421,6 +1421,17 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
 
+        if data.get("dispatched").and_then(serde_json::Value::as_bool) == Some(true)
+            && data.get("field").and_then(serde_json::Value::as_str).is_some()
+        {
+            let retention = data.get("retention").and_then(serde_json::Value::as_str);
+            if matches!(retention, Some("unavailable" | "cleared")) {
+                println!("{} Private field dispatched; retention: {}. Inspect the page without replaying; authentication is not established.",
+                    color::success_indicator(), retention.unwrap());
+                return;
+            }
+        }
+
         if data.get("filled").and_then(serde_json::Value::as_bool) == Some(true) {
             println!("{} Private field filled", color::success_indicator());
             return;
@@ -2865,6 +2876,9 @@ Private fill behavior:
   First box of a complete2..32 visible same-type maxlength1 input group (including visual subgroups):
     Pin every segment, dispatch once, require exact collective retention.
     Group changed after dispatch: dispatched:true, retention:unavailable.
+  totp also supports complete4..12-box number groups without maxlength.
+  Code delivery followed by navigation or changed controls: dispatched:true, retention:unavailable.
+  Cleared code: dispatched:true, retention:cleared. Neither establishes authentication; inspect without replay.
     Inspect the next page; this does not prove authentication. Never replay.
   Global redaction minimum:3 Unicode characters; short control markers remain.
   Scoped getters/snapshots honor private control IDs; bulk content/read refuse.

@@ -1,8 +1,8 @@
 //! One private field fill, bound to the caller's exact active target and frame.
 //! The daemon owns the operation lock, deadline and disconnect cancellation.
 //! Generic fills do not navigate, submit, insert by focus or replay.
-//! A split widget may auto-advance itself; acknowledge dispatch, not retention,
-//! when the pinned group changes after its single input event.
+//! A code widget may split or consume its value and auto-advance itself.
+//! Acknowledge its single delivery independently of read-only retention.
 //! The closed WORK provider additionally owns identifier readiness and explicit submit.
 
 use super::actions::DaemonState;
@@ -885,7 +885,9 @@ where
     let mut segment_group = None;
     let mut backends = vec![backend];
     let count = value.chars().count();
-    if is_segment && (2..=32).contains(&count) {
+    if (is_segment || (req.field == "totp" && (4..=12).contains(&count)))
+        && (2..=32).contains(&count)
+    {
         let group = client
             .object_group(vec![object_session.clone()])
             .await
@@ -896,7 +898,7 @@ where
                 Some(json!({
                     "objectId": object,
                     "functionDeclaration": SEGMENT_GROUP,
-                    "arguments": [{"value": count}],
+                    "arguments": [{"value": count}, {"value": req.field}],
                     "objectGroup": group.name,
                     "returnByValue": false
                 })),
@@ -962,7 +964,7 @@ where
             observation.remember_private_value(&object_session, id, "credential", &value);
         }
     }
-    let filled = client
+    let mut filled = client
         .send_command(
             "Runtime.callFunctionOn",
             Some(json!({
@@ -977,8 +979,32 @@ where
         )
         .await
         .map_err(|_| PAGE)?;
+    // The code's single edit has an independent acknowledgement. Observation
+    // never dispatches events, so navigation during it cannot turn a completed
+    // edit into a retention failure or cause another delivery.
+    if req.field == "totp" && filled["result"]["value"]["status"] == "dispatched" {
+        let observed = tokio::time::timeout_at(
+            deadline.min(Instant::now() + std::time::Duration::from_secs(1)),
+            client.send_command("Runtime.callFunctionOn", Some(json!({
+            "objectId": object,
+            "functionDeclaration": PRIVATE_CODE_RETENTION,
+            "arguments": [{"value": value}, {"objectId": document},
+                match &segments { Some(array) => json!({"objectId":array}), None => json!({"value":null}) }],
+            "returnByValue": true, "awaitPromise": true
+        })), Some(&object_session))).await;
+        if let Ok(Ok(observed)) = observed {
+            if observed.get("exceptionDetails").is_none() && observed["result"]["value"].is_object() {
+                filled = observed;
+            }
+        }
+    }
     drop(segment_group);
-    client.settle_object_cleanup().await.map_err(|_| PAGE)?;
+    // Cleanup failure cannot undo acknowledged code delivery. Protected reads
+    // still require their own complete inventory and cleanup.
+    let cleanup = client.settle_object_cleanup().await;
+    if cleanup.is_err() && req.field != "totp" {
+        return Err(PAGE.into());
+    }
     if filled.get("exceptionDetails").is_some() {
         return Err(PAGE.into());
     }
@@ -1006,8 +1032,11 @@ where
         // Group identity was checked before editing. Its removal/disablement after
         // dispatch can be the widget auto-advancing, not a failed input. Do not
         // claim retention or authentication, inspect a new page, or replay.
-        Some("dispatched") if segments.is_some() => Ok(
+        Some("dispatched") if segments.is_some() || req.field == "totp" => Ok(
             json!({"dispatched":true,"retention":"unavailable","target":req.target,"frame":req.frame,"field":req.field}),
+        ),
+        Some("cleared") if req.field == "totp" => Ok(
+            json!({"dispatched":true,"retention":"cleared","target":req.target,"frame":req.frame,"field":req.field}),
         ),
         Some("filled") => Ok(
             json!({"filled": true, "target": req.target, "frame": req.frame, "field": req.field}),
@@ -1027,8 +1056,11 @@ where
     }
 }
 
-const SEGMENT_GROUP: &str = r#"function(count) {
-    const eligible = el => el.tagName === 'INPUT' && el.maxLength === 1 &&
+const SEGMENT_GROUP: &str = r#"function(count, field) {
+    // Number inputs ignore maxlength. A code-only common container and exact
+    // count identify their group without inferring code digits from page text.
+    const eligible = el => el.tagName === 'INPUT' &&
+        (el.maxLength === 1 || (field === 'totp' && el.type === 'number' && count >= 4 && count <= 12)) &&
         el.type === this.type && el.form === this.form && el.isConnected &&
         !el.matches(':disabled') && !el.readOnly && el.getClientRects().length;
     for (let parent = this.parentElement; parent; parent = parent.parentElement) {
@@ -1175,7 +1207,8 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
         return segments[0] === this && segments.length === Array.from(expected).length &&
             current.length === segments.length && current.every((el, i) => el === segments[i]) &&
             segments.every(el => el.isConnected && el.ownerDocument === document &&
-                el.tagName === 'INPUT' && el.maxLength === 1 && el.type === this.type && el.form === this.form);
+                el.tagName === 'INPUT' && (el.maxLength === 1 || (field === 'totp' && el.type === 'number')) &&
+                el.type === this.type && el.form === this.form);
     };
     if (!validSegments()) return {status:'detached'};
     const nativeText = !input || ['text','password','email','tel','url','search'].includes(this.type);
@@ -1203,17 +1236,37 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     // An input handler can consume the whole code and replace/disable the group
     // synchronously. Never send another event to those stale controls or call
     // this a failed edit. Only dispatch is known, not the site's acceptance.
-    const groupChanged = () => segments &&
-        (!this.isConnected || this.ownerDocument !== document || !validSegments());
+    const groupChanged = () => (segments || field === 'totp') &&
+        (!this.isConnected || this.ownerDocument !== document || this.matches(':disabled') || this.readOnly || !validSegments());
     if (groupChanged()) return {status:'dispatched'};
     this.dispatchEvent(new view.Event('change', {bubbles:true}));
     if (groupChanged()) return {status:'dispatched'};
+    if (field === 'totp') return {status:'dispatched'};
     await new Promise(resolve => view.setTimeout(resolve, 100));
     const rendered = segments ? segments.map(el => el.value).join('') : this.value;
     if (groupChanged()) return {status:'dispatched',redactionValue:rendered};
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
     const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
     return {status:complete && presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
+}"#;
+
+// Read only the original controls after acknowledged code delivery. Losing
+// their execution context is unavailable retention, never proof of rejection.
+const PRIVATE_CODE_RETENTION: &str = r#"async function(value, document, segments) {
+    const view = document.defaultView;
+    await new Promise(resolve => view.setTimeout(resolve, 100));
+    const controls = segments || [this];
+    if (controls.some(el => !el.isConnected || el.ownerDocument !== document ||
+        el.matches(':disabled') || el.readOnly || !el.getClientRects().length)) return {status:'dispatched'};
+    if (segments) {
+        const current = Array.from(segments.container.querySelectorAll('input,textarea,select')).filter(el =>
+            el.getClientRects().length && !el.matches(':disabled') && !el.readOnly);
+        if (current.length !== segments.length || !current.every((el, i) => el === segments[i])) return {status:'dispatched'};
+    }
+    const rendered = controls.map(el => el.value).join('');
+    if (!rendered) return {status:'cleared'};
+    const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
+    return {status:complete && rendered === value ? 'filled' : 'not_retained',redactionValue:rendered};
 }"#;
 
 #[cfg(test)]
