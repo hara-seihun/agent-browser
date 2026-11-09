@@ -268,7 +268,7 @@ async fn resolve_center_in_same_process_frame(
             const doc = this;
             const el = {find_expr};
             if (!el) return null;
-            el.scrollIntoView({{ block: 'nearest', inline: 'nearest', behavior: 'instant' }});
+            el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }});
             const rect = el.getBoundingClientRect();
             const win=el.ownerDocument.defaultView;
             const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
@@ -1000,12 +1000,12 @@ fn build_selector_js(selector: &str) -> String {
     // A viewport rectangle can still be clipped by an overflow ancestor (for
     // example an option below a listbox's visible rows). Always ask the browser
     // to scroll every enclosing scroll container before measuring and hit-testing.
-    // Nearest alignment leaves already-visible controls and overlays in place.
+    // Center alignment also moves viewport-visible controls away from sticky footers.
     format!(
         r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
-            el.scrollIntoView({{ block: 'nearest', inline: 'nearest', behavior: 'instant' }});
+            el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }});
             const rect = el.getBoundingClientRect();
             const win=el.ownerDocument.defaultView;
             const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
