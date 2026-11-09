@@ -1,5 +1,8 @@
 # agent-browser
 
+Stripe secret and restricted API keys (`sk_test_`, `sk_live_`, `rk_test_`, `rk_live_`) and webhook signing secrets (`whsec_`) are protected in page text, accessible names and DOM attributes without relying on nearby labels. Snapshots and getters redact them, screenshots mask their elements, and evaluation refuses sensitive pages. Backup/recovery-code labels, including “Save your backup code”, also protect their displayed values. Publishable `pk_` keys stay readable. `auth export` preserves selected bytes privately. Layout-only whitespace stays scoped to its protected node instead of becoming a global credential match. CLI and MCP use the same protection.
+
+
 OAuth authorization codes are private credentials. Native snapshots and getters redact code-labelled text, including Google’s `code.auth-code` display and authorization-code labels, IDs and classes; plain screenshots mask those elements and evaluation refuses. Use `auth export` to transfer a selected code directly to a private file without printing it. Ordinary source-code blocks stay readable.
 
 `get url` reads the selected target’s browser metadata without DOM/frame inventory or page evaluation. It omits URL userinfo, query and fragment, redacts opaque URLs, and still masks remembered credential fragments. JSON includes `sanitized: true` when URL components were omitted; text output also prints a sanitization notice. Use the result to identify the page, not to reconstruct query-dependent application state.
@@ -298,7 +301,7 @@ agent-browser download @e5 ./report.csv
 agent-browser wait --download ./archive.zip
 ```
 
-The destination is local even when connected to a remote browser over CDP. The completed file is transferred without repeating the original request, so POST, blob, and authenticated downloads work. An existing destination is replaced atomically only after a successful transfer. Downloads are matched to the initiating frame, not another tab.
+The destination is local even when connected to a remote browser over CDP. The completed file is transferred without repeating the original request, so POST, blob, and authenticated downloads work. An existing destination is replaced atomically only after a successful transfer. Downloads follow the initiating frame, its popups and child frames created by the click, without accepting unrelated tabs.
 
 ### Batch Execution
 

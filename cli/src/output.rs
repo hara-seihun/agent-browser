@@ -1984,6 +1984,7 @@ Clicks an element that triggers a download and saves the file to the local path,
 even with remote CDP. The completed file is transferred without repeating the
 request; an existing destination is replaced atomically only on success.
 Authenticated sensitive tabs are supported without exporting form controls.
+Child frames created by the click are followed only within the initiating tree.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)
@@ -2903,11 +2904,17 @@ Private card to Proton Pass (Kenan's Agent vault):
   Output is saved/vault/item only. Stop captures first. Never automatically replay.
   On timeout or uncertain vault creation inspect the item before another attempt.
 
+Stripe sk_/rk_ test/live keys and whsec_ secrets in names, text and DOM
+  attributes are private: snapshots/getters redact; screenshots mask; eval refuses.
+  Backup/recovery-code labels protect displayed values too.
+  Publishable pk_ keys remain readable. CLI and MCP share this protection.
+
 Private export:
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]
   One unique visible input/textarea value (readonly allowed) or text-only element.
   Pins live target/frame/document/field; existing browser required, no navigation.
+  Preserves selected bytes; layout-only whitespace never becomes a global secret.
   Linux nonroot daemon only. No symlink path components; output parent must be
   owned by the daemon UID with exact0700 permissions. New file is exclusive0600.
   Receipt contains only path and byteCount; never prints or hashes the value.

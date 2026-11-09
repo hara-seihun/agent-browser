@@ -1,5 +1,8 @@
 # Commands
 
+Stripe secret and restricted API keys (`sk_test_`, `sk_live_`, `rk_test_`, `rk_live_`) and webhook signing secrets (`whsec_`) are protected in page text, accessible names and DOM attributes without relying on nearby labels. Snapshots and getters redact them, screenshots mask their elements, and evaluation refuses sensitive pages. Backup/recovery-code labels, including “Save your backup code”, also protect their displayed values. Publishable `pk_` keys stay readable. `auth export` preserves selected bytes privately. Layout-only whitespace stays scoped to its protected node instead of becoming a global credential match. CLI and MCP use the same protection.
+
+
 Elements marked `data-private="true"` and text labelled as a TOTP/authenticator secret or seed are protected as `[redacted: credential]`, including their descendants and later text echoes. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
 
 Browser releases preserve running daemons and their active tabs. A command reports when its session is using another build; explicitly close that session or use a new session name to use the installed build. A configuration conflict returns an error without restarting an older daemon.
@@ -14,7 +17,7 @@ Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric 
 
 `get url` reads the selected target’s browser metadata without DOM/frame inventory or page evaluation. It omits URL userinfo, query and fragment, redacts opaque URLs, and still masks remembered credential fragments. JSON includes `sanitized: true` when URL components were omitted; text output also prints a sanitization notice. Use the result to identify the page, not to reconstruct query-dependent application state.
 
-`download` and `wait --download` save the actual completed browser file even on sensitive authenticated tabs. They do not export page or control contents, rescan the page after saving, or repeat the request. Remembered credentials remain redacted from response metadata.
+`download` and `wait --download` save the actual completed browser file even on sensitive authenticated tabs. They do not export page or control contents, rescan the page after saving, or repeat the request. Remembered credentials remain redacted from response metadata. Downloads follow newly created child frames only when their parent belongs to the initiating frame tree.
 
 ## Core
 

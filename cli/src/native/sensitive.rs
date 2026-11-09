@@ -14,7 +14,28 @@ pub const UNSUPPORTED: &str = "SENSITIVE_OUTPUT_UNSUPPORTED";
 pub const MIN_SECRET_CHARS: usize = 3;
 
 fn useful_secret(value: &str) -> bool {
-    value.chars().take(MIN_SECRET_CHARS).count() == MIN_SECRET_CHARS
+    // Private text inventories include layout-only descendants. Keep those nodes
+    // scoped, but never let their indentation become a global credential match.
+    !value.trim().is_empty()
+        && value.chars().take(MIN_SECRET_CHARS).count() == MIN_SECRET_CHARS
+}
+
+// Stripe secret/restricted keys and webhook signing secrets are credentials even
+// without a nearby label (the dashboard exposes them through names/data attrs).
+// Publishable pk_ keys deliberately remain ordinary public text.
+const STRIPE_SECRET_PREFIXES: &[&str] = &["sk_test_", "sk_live_", "rk_test_", "rk_live_", "whsec_"];
+
+fn stripe_secret_length(text: &str) -> Option<usize> {
+    STRIPE_SECRET_PREFIXES.iter().find_map(|prefix| {
+        let rest = text.strip_prefix(prefix)?;
+        let length = rest.bytes().take_while(u8::is_ascii_alphanumeric).count();
+        (length >= 8).then_some(prefix.len() + length)
+    })
+}
+
+fn has_stripe_secret(text: &str) -> bool {
+    text.char_indices()
+        .any(|(start, _)| stripe_secret_length(&text[start..]).is_some())
 }
 
 const AUTOCOMPLETE: &[(&str, &str)] = &[
@@ -200,6 +221,13 @@ const API_TEXT_LABELS: &[&str] = &[
     "oauthauthorisationcode",
     "oauth2authorizationcode",
     "yourauthorizationcode",
+    "backupcode",
+    "backupcodes",
+    "recoverycode",
+    "recoverycodes",
+    "emergencybackupcode",
+    "saveyourbackupcode",
+    "saveyourrecoverycode",
 ];
 
 fn api_text_label(text: &str) -> bool {
@@ -265,11 +293,18 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         if node["nodeName"] == "#text" {
             let text = node["nodeValue"].as_str().unwrap_or("");
+            if has_stripe_secret(text) {
+                if let Some(parent) = parent {
+                    found.insert(parent);
+                }
+                // This is a complete credential, not a label for sibling values.
+                return (0, Vec::new());
+            }
             if text.lines().any(|line| api_labeled_value(line).is_some()) {
                 if let Some(parent) = parent {
                     found.insert(parent);
                 }
-                return (1, Vec::new());
+                return (0, Vec::new());
             }
             return (
                 usize::from(api_text_label(text)),
@@ -295,6 +330,7 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         if labels == 1 && !values.is_empty() {
             found.extend(values.drain(..).map(|(id, _)| id));
+            labels = 0;
         }
         for key in ["shadowRoots", "pseudoElements"] {
             for child in node[key].as_array().into_iter().flatten() {
@@ -327,9 +363,10 @@ const PRIVATE_TEXT_LABELS: &[&str] = &[
 ];
 
 fn private_text(attributes: &HashMap<String, String>) -> bool {
-    attributes
-        .get("data-private")
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    attributes.values().any(|value| has_stripe_secret(value))
+        || attributes
+            .get("data-private")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
         || attributes.get("aria-label").is_some_and(|label| {
             let label = normalize(label);
             PRIVATE_TEXT_LABELS.iter().any(|hint| label.contains(hint))
@@ -448,6 +485,14 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 pub fn classifier_js() -> String {
     format!(
         r#"const apiLabels = {};
+    const stripePrefixes = {};
+    const stripeSecret = text => stripePrefixes.some(prefix => {{
+      let at = -1;
+      while ((at = text.indexOf(prefix, at + 1)) !== -1) {{
+        if (/^[A-Za-z0-9]{{8}}/.test(text.slice(at + prefix.length))) return true;
+      }}
+      return false;
+    }});
     const apiLabel = text => {{
       if (!text || text.length > 64) return false;
       const label = text.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -480,9 +525,13 @@ pub fn classifier_js() -> String {
           if (node.nodeType === 1 && ['SCRIPT','STYLE'].includes(node.tagName)) return [0, []];
           if (node.nodeType === 3) {{
             const text = (node.textContent || '').trim();
+            if (stripeSecret(text)) {{
+              if (node.parentElement) found.add(node.parentElement);
+              return [0, []];
+            }}
             if (text.split(/\r?\n/).some(apiLabeledValue)) {{
               if (node.parentElement) found.add(node.parentElement);
-              return [1, []];
+              return [0, []];
             }}
             return [apiLabel(text) ? 1 : 0,
               node.parentElement && apiValue(text) ? [[node.parentElement, 0]] : []];
@@ -497,6 +546,7 @@ pub fn classifier_js() -> String {
           if (labels === 1 && values.length) {{
             for (const [el] of values) found.add(el);
             values = [];
+            labels = 0;
           }}
           return [labels, values];
         }};
@@ -505,7 +555,8 @@ pub fn classifier_js() -> String {
       }}
       return apiRoots.get(root).has(el);
     }};
-    const privateText = el => (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
+    const privateText = el => Array.from(el.attributes).some(a => stripeSecret(a.value))
+      || (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
       || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
       || ['aria-label', 'title', 'id', 'name'].some(key => apiLabel(el.getAttribute(key)))
       || (el.getAttribute('class') || '').split(/\s+/).some(apiLabel)
@@ -575,6 +626,7 @@ pub fn classifier_js() -> String {
       return null;
     }};"#,
         serde_json::to_string(API_TEXT_LABELS).unwrap(),
+        serde_json::to_string(STRIPE_SECRET_PREFIXES).unwrap(),
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
@@ -762,7 +814,13 @@ impl Observation {
             self.remember_expiry_echo(value, &redacted);
         }
         if useful_secret(value) {
-            self.secrets.push((value.to_owned(), redacted));
+            // Exported text may include indentation outside the credential. Keep
+            // the exact value private and protect its unpadded echo as well.
+            self.secrets.push((value.to_owned(), redacted.clone()));
+            let trimmed = value.trim();
+            if trimmed != value && useful_secret(trimmed) {
+                self.secrets.push((trimmed.to_owned(), redacted));
+            }
             self.secrets
                 .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
             self.secrets.dedup_by(|a, b| a.0 == b.0);
@@ -850,6 +908,9 @@ impl Observation {
             {
                 out.push_str(marker);
                 start += secret.len();
+            } else if let Some(length) = stripe_secret_length(&text[start..]) {
+                out.push_str(&marker("credential"));
+                start += length;
             } else if let Some((length, marker)) =
                 self.expiry_echoes.iter().find_map(|(expiry, marker)| {
                     expiry_echo_length(&text[start..], expiry).map(|length| (length, marker))
@@ -2033,12 +2094,24 @@ async fn inventory_control(
                 "functionDeclaration": if control.text {
                     // Keep both rendered text and individual fragments private, including
                     // short descendants whose AX parent may be omitted by Chrome.
-                    r#"function() {
+                    r#"function(prefixes) {
+                        const stripeSecret = text => prefixes.some(prefix => {
+                            let at = -1;
+                            while ((at = text.indexOf(prefix, at + 1)) !== -1) {
+                                if (/^[A-Za-z0-9]{8}/.test(text.slice(at + prefix.length))) return true;
+                            }
+                            return false;
+                        });
                         const values = [this.textContent || '', this.innerText || '', String(this.value || '')];
                         const scan = node => {
                             if (node.nodeType === 3) values.push(node.textContent || '');
                             if (node.nodeType === 1) {
                                 if ('value' in node) values.push(String(node.value || ''));
+                                // Attributes can be the only full copy of a displayed
+                                // credential; retain them privately to protect echoes.
+                                for (const attr of node.attributes) {
+                                    if (stripeSecret(attr.value)) values.push(attr.value);
+                                }
                                 if (node.shadowRoot) scan(node.shadowRoot);
                             }
                             for (const child of node.childNodes) scan(child);
@@ -2051,6 +2124,7 @@ async fn inventory_control(
                 } else {
                     "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }"
                 },
+                "arguments": [{"value": STRIPE_SECRET_PREFIXES}],
                 "returnByValue": true,
             })), Some(&control.session)),
         ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;

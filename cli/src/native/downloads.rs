@@ -74,6 +74,23 @@ impl Download {
                 Ok(Err(_)) => return Err("Download event stream closed".into()),
                 Err(_) => return Err("Timeout waiting for download; the click was not repeated".into()),
             };
+            // Export buttons may create a temporary iframe only after the click.
+            // Its download is ours when its parent was already in our frame tree;
+            // never admit a frame merely because it shares the browser connection.
+            let attached_frame = if event.method == "Page.frameAttached" {
+                Some((&event.params["frameId"], &event.params["parentFrameId"]))
+            } else if event.method == "Page.frameNavigated" {
+                Some((&event.params["frame"]["id"], &event.params["frame"]["parentId"]))
+            } else {
+                None
+            };
+            if let Some((id, parent)) = attached_frame {
+                if parent.as_str().is_some_and(|id| self.frames.contains(id)) {
+                    if let Some(id) = id.as_str() {
+                        self.frames.insert(id.to_owned());
+                    }
+                }
+            }
             // Statements and exports may open a new tab which immediately becomes
             // a download. Its main frame is the new target, not the initiating
             // tab's frame. Follow only popups opened by this download's frames;
