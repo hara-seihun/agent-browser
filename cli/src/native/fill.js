@@ -56,8 +56,19 @@ async function(value, route) {
             if (this.getRootNode().activeElement !== this) return { status: 'focus_changed' };
             // No CDP keyboard fallback: selection/focus and the actual edit must
             // stay in one call, or a different field could receive the text.
-            if (!doc.execCommand(expected === '' ? 'delete' : 'insertText', false, expected)) {
-                return { status: 'value_not_retained' };
+            // execCommand skips beforeinput. Let masks consume the intended edit
+            // and cancel Chrome's default; do not insert again after cancellation.
+            const allowed = this.dispatchEvent(new view.InputEvent('beforeinput', {
+                bubbles: true, composed: true, cancelable: true,
+                inputType: expected === '' ? 'deleteContentForward' : 'insertText',
+                data: expected === '' ? null : expected
+            }));
+            if (!this.isConnected) return { status: 'target_detached' };
+            if (allowed) {
+                if (this.getRootNode().activeElement !== this) return { status: 'focus_changed' };
+                if (!doc.execCommand(expected === '' ? 'delete' : 'insertText', false, expected)) {
+                    return { status: 'value_not_retained' };
+                }
             }
         } else {
             // Number and temporal controls do not expose a text selection.

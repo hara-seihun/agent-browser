@@ -1222,7 +1222,18 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
         this.select();
         if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
         if (this.getRootNode().activeElement !== this) return {status:'focus_changed'};
-        if (!document.execCommand('insertText', false, expected)) return {status:'not_retained'};
+        // execCommand emits input but skips beforeinput. Masked editors keep
+        // their model in a cancellable beforeinput handler, so give that handler
+        // the edit first and perform Chrome's default edit only if it allows it.
+        // A cancelled edit is handled once, never replayed through another path.
+        const allowed = this.dispatchEvent(new view.InputEvent('beforeinput', {
+            bubbles:true, composed:true, cancelable:true, inputType:'insertText', data:expected
+        }));
+        if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
+        if (allowed) {
+            if (this.getRootNode().activeElement !== this) return {status:'focus_changed'};
+            if (!document.execCommand('insertText', false, expected)) return {status:'not_retained'};
+        }
     } else {
         // Number/temporal fields have no text selection. Split code widgets
         // need the whole code in their first box so their input handler can
