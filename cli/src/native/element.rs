@@ -268,8 +268,7 @@ async fn resolve_center_in_same_process_frame(
             const doc = this;
             const el = {find_expr};
             if (!el) return null;
-            if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-            else el.scrollIntoView({{ block: 'center', inline: 'center' }});
+            el.scrollIntoView({{ block: 'nearest', inline: 'nearest', behavior: 'instant' }});
             const rect = el.getBoundingClientRect();
             const win=el.ownerDocument.defaultView;
             const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
@@ -998,23 +997,16 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
 
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
-    // Input events dispatch at viewport coordinates, so an element outside the
-    // viewport must be scrolled into view first or the click lands on nothing.
-    // The blocker check reports an overlay covering the click point instead of
-    // letting the input land on it and silently doing the wrong thing.
+    // A viewport rectangle can still be clipped by an overflow ancestor (for
+    // example an option below a listbox's visible rows). Always ask the browser
+    // to scroll every enclosing scroll container before measuring and hit-testing.
+    // Nearest alignment leaves already-visible controls and overlays in place.
     format!(
         r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
-                r.bottom > 0 && r.right > 0 &&
-                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
-                r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
-            if (!inView(rect)) {{
-                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
-            }}
+            el.scrollIntoView({{ block: 'nearest', inline: 'nearest', behavior: 'instant' }});
+            const rect = el.getBoundingClientRect();
             const win=el.ownerDocument.defaultView;
             const left=Math.max(0,rect.left), top=Math.max(0,rect.top);
             const right=Math.min(win.innerWidth,rect.right), bottom=Math.min(win.innerHeight,rect.bottom);
