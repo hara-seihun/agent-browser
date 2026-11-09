@@ -2090,21 +2090,27 @@ impl BrowserManager {
         }
 
         // Some managed Chrome builds acknowledge overrides while fixing the window
-        // at its creation size. Observe the rendered viewport before claiming success.
-        let metrics = self.client.send_command(
-            "Page.getLayoutMetrics", None, Some(session_id),
+        // at its creation size. innerWidth/innerHeight include classic scrollbars;
+        // CDP cssVisualViewport.clientWidth/clientHeight exclude them and falsely
+        // report a failed resize on overflowing pages. Retain visual scale for
+        // mobile pages whose layout viewport is wider than the emulated screen.
+        let viewport = self.evaluate_in_session(
+            session_id,
+            "({width: window.innerWidth, height: window.innerHeight, scale: window.visualViewport.scale})",
+            None,
         ).await?;
-        let viewport = metrics.get("cssVisualViewport")
-            .ok_or("viewport_unavailable: Chrome did not return CSS viewport metrics")?;
         let scale = viewport.get("scale").and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
             .ok_or("viewport_unavailable: Chrome did not return the viewport scale")?;
-        let observed_width = viewport.get("clientWidth").and_then(Value::as_f64)
+        let observed_width = viewport.get("width").and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
             .ok_or("viewport_unavailable: Chrome did not return the viewport width")? * scale;
-        let observed_height = viewport.get("clientHeight").and_then(Value::as_f64)
+        let observed_height = viewport.get("height").and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
             .ok_or("viewport_unavailable: Chrome did not return the viewport height")? * scale;
         if (observed_width - width as f64).abs() > 1.0 || (observed_height - height as f64).abs() > 1.0 {
             return Err(format!(
-                "viewport_not_applied: requested {width}x{height}, rendered {:.0}x{:.0}. Managed browsers may require allowResizing:true when created; start a new resizing-enabled browser.",
+                "viewport_not_applied: requested {width}x{height}, rendered {:.0}x{:.0}. Chrome acknowledged the resize but its viewport differs; check the browser's resize policy (managed browsers may need allowResizing:true).",
                 observed_width, observed_height,
             ));
         }
