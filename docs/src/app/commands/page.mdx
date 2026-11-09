@@ -845,6 +845,8 @@ Global `--storage-state <path>` loads a saved authentication file; `--state <pat
 Native protected-tab fills bind and classify the exact form control; unrelated login controls do not prevent nonsecret iframe form edits. Sensitive targets and unavailable frame identities refuse explicitly. On systemd Linux hosts the native daemon belongs to a user service, independent of the launching shell; `close` ends that owned session. Service admission failure reports `daemon_owner_unavailable` instead of launching an unowned process.
 
 
+Text fills, including private `auth fill`, send a cancellable `beforeinput` before the default browser insertion. A masked editor that consumes the event owns the edit; the browser tool does not insert a second time. Selection and editing remain bound to the selected control, and retained values are checked after the application handles the event.
+
 ## Retained select values
 
 Native `select` dispatches bubbling input and change events, then checks that the requested options remain selected after rendering. Disabled controls/options, custom combobox wrappers, missing or ambiguous options, page errors, detached targets and rejected values return errors instead of success. A rendering timeout means the selection may have happened; inspect the page before another action.

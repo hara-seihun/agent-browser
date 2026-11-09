@@ -2948,6 +2948,9 @@ Examples:
   agent-browser auth login github --no-navigate
   agent-browser auth login my-app --credential-provider vault --item "My App"
   agent-browser auth fill --credential-provider vault --item "Payment Card" --field number --selector "input[name=cardnumber]" --target TARGET_ID --frame FRAME_ID
+Text edits honor cancellable beforeinput handlers, including masked payment fields.
+Cancelled edits are not replayed; retention is checked after application events.
+
   agent-browser auth list
   agent-browser auth show github
   agent-browser auth delete github

@@ -123,6 +123,7 @@ const TOOL_CLIPBOARD_COPY: &str = "agent_browser_clipboard_copy";
 const TOOL_CLIPBOARD_PASTE: &str = "agent_browser_clipboard_paste";
 const TOOL_AUTH_SAVE: &str = "agent_browser_auth_save";
 const TOOL_AUTH_LOGIN: &str = "agent_browser_auth_login";
+// Private fills use the same target-bound beforeinput/default-edit behavior as CLI.
 const TOOL_AUTH_FILL: &str = "agent_browser_auth_fill";
 const TOOL_AUTH_EXPORT: &str = "agent_browser_auth_export";
 const TOOL_AUTH_LIST: &str = "agent_browser_auth_list";
