@@ -2089,6 +2089,26 @@ impl BrowserManager {
             }
         }
 
+        // Some managed Chrome builds acknowledge overrides while fixing the window
+        // at its creation size. Observe the rendered viewport before claiming success.
+        let metrics = self.client.send_command(
+            "Page.getLayoutMetrics", None, Some(session_id),
+        ).await?;
+        let viewport = metrics.get("cssVisualViewport")
+            .ok_or("viewport_unavailable: Chrome did not return CSS viewport metrics")?;
+        let scale = viewport.get("scale").and_then(Value::as_f64)
+            .ok_or("viewport_unavailable: Chrome did not return the viewport scale")?;
+        let observed_width = viewport.get("clientWidth").and_then(Value::as_f64)
+            .ok_or("viewport_unavailable: Chrome did not return the viewport width")? * scale;
+        let observed_height = viewport.get("clientHeight").and_then(Value::as_f64)
+            .ok_or("viewport_unavailable: Chrome did not return the viewport height")? * scale;
+        if (observed_width - width as f64).abs() > 1.0 || (observed_height - height as f64).abs() > 1.0 {
+            return Err(format!(
+                "viewport_not_applied: requested {width}x{height}, rendered {:.0}x{:.0}. Managed browsers may require allowResizing:true when created; start a new resizing-enabled browser.",
+                observed_width, observed_height,
+            ));
+        }
+
         Ok(())
     }
 
