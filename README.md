@@ -2165,7 +2165,7 @@ Every native command has one deadline spanning state-lock admission, browser lau
 Global `--storage-state <path>` loads a saved authentication file; `--state <path>` before `wait` retains that meaning. After `wait`, `--state` accepts only `attached`, `detached`, `visible` or `hidden` and requires one selector. Invalid saved-state files are rejected before replacing an existing browser. MCP selector waits accept the same optional `state` enum.
 
 
-Contact name and email controls remain ordinary fields when a site uses `autocomplete="new-password"` to suppress autofill. Password types, credential-labelled fields, ambiguous controls and previously private fills remain protected.
+Contact name and email controls remain ordinary fields when a site uses `autocomplete="new-password"` to suppress autofill. Password-recovery workflow names such as `user_forgot_password_email` stay ordinary hints on `type="email"` controls; explicit sensitive autocomplete and privately filled controls remain protected. Password types, credential-labelled fields, ambiguous controls and previously private fills remain protected.
 
 Native protected-tab fills bind and classify the exact form control; unrelated login controls do not prevent nonsecret iframe form edits. Sensitive targets and unavailable frame identities refuse explicitly. On systemd Linux hosts the native daemon belongs to a user service, independent of the launching shell; `close` ends that owned session. Service admission failure reports `daemon_owner_unavailable` instead of launching an unowned process.
 

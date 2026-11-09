@@ -113,12 +113,38 @@ const CONTACT_HINTS: &[&str] = &[
 ];
 const FIELD_HINT_KEYS: &[&str] = &["name", "id", "aria-label", "placeholder", "label"];
 
+// Password recovery describes the workflow, not the contents of its email input.
+// Strip that phrase before inferring a secret from a name: "forgotpassword"
+// also contains "otp". Explicit autocomplete, remaining secret hints and
+// remembered private-fill node identities still take precedence.
+const PASSWORD_RECOVERY_HINTS: &[&str] = &[
+    "forgotpassword",
+    "forgottenpassword",
+    "resetpassword",
+    "passwordreset",
+    "recoverpassword",
+    "passwordrecovery",
+];
+
+fn field_hint(attributes: &HashMap<String, String>, value: &str) -> String {
+    let mut hint = normalize(value);
+    if attributes
+        .get("type")
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("email"))
+    {
+        for workflow in PASSWORD_RECOVERY_HINTS {
+            hint = hint.replace(workflow, "");
+        }
+    }
+    hint
+}
+
 fn contact_field(attributes: &HashMap<String, String>) -> bool {
     let hints: Vec<_> = FIELD_HINT_KEYS
         .iter()
         .filter_map(|key| attributes.get(*key))
         .flat_map(|value| value.lines())
-        .map(normalize)
+        .map(|value| field_hint(attributes, value))
         .collect();
     if hints.iter().any(|hint| {
         api_text_label(hint)
@@ -312,9 +338,9 @@ fn private_text(attributes: &HashMap<String, String>) -> bool {
             .iter()
             .filter_map(|key| attributes.get(*key))
             .any(|label| api_text_label(label))
-        || attributes.get("class").is_some_and(|classes| {
-            classes.split_whitespace().any(api_text_label)
-        })
+        || attributes
+            .get("class")
+            .is_some_and(|classes| classes.split_whitespace().any(api_text_label))
 }
 
 /// `autocomplete="one-time-code"` alone does not make a field a one-time code:
@@ -400,7 +426,7 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
     }
     for key in ["name", "id", "aria-label", "placeholder", "label"] {
         if let Some(value) = attributes.get(key) {
-            let normalized = normalize(value);
+            let normalized = field_hint(attributes, value);
             if api_text_label(&normalized) {
                 return Some("credential");
             }
@@ -507,10 +533,16 @@ pub fn classifier_js() -> String {
       const hints = ['name', 'id', 'aria-label', 'placeholder'].map(key => el.getAttribute(key) || '').concat(labels);
       const rules = {};
       const contactHints = {};
+      const recoveryHints = {};
+      const fieldHint = hint => {{
+        const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return (el.getAttribute('type') || '').toLowerCase() === 'email'
+          ? recoveryHints.reduce((text, workflow) => text.replaceAll(workflow, ''), name) : name;
+      }};
       const contactField = ((el.getAttribute('type') || '').toLowerCase() === 'email'
-        || hints.some(hint => contactHints.includes(hint.toLowerCase().replace(/[^a-z0-9]/g, ''))))
+        || hints.some(hint => contactHints.includes(fieldHint(hint))))
         && !hints.some(hint => {{
-          const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const name = fieldHint(hint);
           return apiLabel(name) || rules.some(([, names]) => names.some(n => name.includes(n)));
         }});
       const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
@@ -533,10 +565,12 @@ pub fn classifier_js() -> String {
       }}
       if (tokens.includes('cc-name')) return null;
       for (const hint of hints) {{
-        const name = hint.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const name = fieldHint(hint);
         if (apiLabel(name)) return 'credential';
         if (['mmyy', 'mmyyyy'].includes(name)) return 'cc-exp';
-        for (const [kind, names] of rules) if (names.some(n => name.includes(n))) return kind;
+        for (const [kind, names] of rules) {{
+          if (names.some(n => name.includes(n))) return kind;
+        }}
       }}
       return null;
     }};"#,
@@ -544,6 +578,7 @@ pub fn classifier_js() -> String {
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
+        serde_json::to_string(PASSWORD_RECOVERY_HINTS).unwrap(),
         serde_json::to_string(&AUTOCOMPLETE.iter().copied().collect::<HashMap<_, _>>()).unwrap(),
         serde_json::to_string(OTP_HINTS).unwrap(),
     )
