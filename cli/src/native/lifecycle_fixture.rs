@@ -21,16 +21,14 @@ fn fixture_structural_selector(document: &Value, backend: i64) -> Option<String>
         if node["backendNodeId"] == backend {
             return Some(path.to_owned());
         }
-        let mut siblings = HashMap::<String, usize>::new();
+        let mut index = 0;
         for child in node["children"].as_array()? {
             let tag = child["nodeName"].as_str()?;
             if tag.starts_with('#') {
                 continue;
             }
-            let tag = tag.to_ascii_lowercase();
-            let index = siblings.entry(tag.clone()).or_insert(0);
-            *index += 1;
-            let step = format!("{tag}:nth-of-type({index})");
+            index += 1;
+            let step = format!("*:nth-child({index})");
             let selector = if path.is_empty() {
                 step
             } else {
@@ -175,6 +173,7 @@ impl SyntheticCdp {
                                         json!({"sessionId": sid})
                                     }
                                 }
+                                "Page.createIsolatedWorld" => json!({"executionContextId": 1}),
                                 "Page.getFrameTree" => {
                                     // Kernel can omit the OOPIF from the parent's tree
                                     // and omit parentId from the OOPIF's own root.
@@ -307,7 +306,7 @@ impl SyntheticCdp {
                                 "Runtime.evaluate"
                                     if command["params"]["expression"]
                                         .as_str()
-                                        .is_some_and(|js| js.contains("var allElements")) =>
+                                        .is_some_and(|js| js.contains("textNodes: textNodes")) =>
                                 {
                                     if inventory.cursor_frames.contains(&root_frame) {
                                         match inventory.documents.get(&root_frame).and_then(
@@ -320,7 +319,7 @@ impl SyntheticCdp {
                                                 {
                                                     selector.push_str(" > missing:nth-of-type(1)");
                                                 }
-                                                json!({"result":{"type":"object","value":[{"selector":selector,"text":format!("cursor-{root_frame}"),"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
+                                                json!({"result":{"type":"object","value":[{"selector":selector,"textNodes":[{"text":format!("cursor-{root_frame}"),"ancestors":[selector.clone()]}],"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
                                             }
                                             None => {
                                                 json!({"exceptionDetails":{"text":"synthetic cursor DOM unavailable"}})
