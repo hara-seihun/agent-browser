@@ -5,14 +5,18 @@ No profiles, external navigation, dependencies, or sleep-based retries.
 """
 import json
 import subprocess
+import shutil
 import sys
 import uuid
 
 binary = sys.argv[1]
+chrome = shutil.which('chromium') or shutil.which('google-chrome')
+if not chrome:
+    raise SystemExit('Chromium or Google Chrome must be on PATH')
 session = 'click-regression-' + uuid.uuid4().hex[:10]
 
 def run(*args, success=True):
-    result = subprocess.run([binary, '--session', session, '--executable-path', '/usr/bin/chromium', '--json', *args], text=True, capture_output=True, timeout=30)
+    result = subprocess.run([binary, '--session', session, '--executable-path', chrome, '--json', *args], text=True, capture_output=True, timeout=30)
     payload = json.loads(result.stdout)
     assert bool(payload.get('success')) == success, (args, result.stdout, result.stderr)
     return payload
@@ -46,8 +50,8 @@ try:
     page('''<iframe id="frame" style="position:fixed;left:230px;top:160px;width:500px;height:300px" srcdoc="<button id='target' style='position:absolute;left:80px;top:60px;width:140px;height:50px' onclick='window.hits=1'>Frame target</button>"></iframe>''')
     run('frame', '#frame')
     run('click', '#target')
-    assert evaluate('window.hits') == 1
     run('frame', 'main')
+    assert evaluate("document.querySelector('#frame').contentWindow.hits") == 1
     print('PASS: translated same-process iframe uses its own local geometry')
 
     page('''<style>@keyframes move{from{transform:translateX(0)}to{transform:translateX(200px)}}button{position:fixed;left:100px;top:100px;width:200px;height:60px;animation:move 500ms linear infinite alternate}</style><button id="target" onclick="window.hits++">Never stable</button>''')
