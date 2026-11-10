@@ -1435,9 +1435,24 @@ fn collect_nodes(
         for root in node["shadowRoots"].as_array().into_iter().flatten() {
             collect_nodes(root, session, controls, seen);
         }
-        for key in ["contentDocument", "templateContent"] {
-            if let Some(root) = node.get(key) {
-                collect_nodes(root, session, controls, seen);
+        if let Some(root) = node.get("contentDocument") {
+            collect_nodes(root, session, controls, seen);
+        }
+        if let Some(root) = node.get("templateContent") {
+            // Inert template descendants belong to a separate document. Chrome
+            // cannot resolve their backend IDs in the live document, but the
+            // owning template element can safely expose its content for private
+            // inventory. Never publish a partial inventory of those descendants.
+            let mut nested = Vec::new();
+            collect_nodes(root, session, &mut nested, &mut HashSet::new());
+            if !nested.is_empty() {
+                // An absent owner identity must fail resolution, never silently
+                // drop a sensitive subtree from the inventory.
+                let backend = node["backendNodeId"].as_i64().unwrap_or(0);
+                controls.push(Control {
+                    session: session.to_owned(), backend, kind: "credential",
+                    display: false, text: true,
+                });
             }
         }
     }
@@ -2113,10 +2128,11 @@ async fn inventory_control(
                                     if (stripeSecret(attr.value)) values.push(attr.value);
                                 }
                                 if (node.shadowRoot) scan(node.shadowRoot);
+                                if (node.content) scan(node.content);
                             }
                             for (const child of node.childNodes) scan(child);
                         };
-                        scan(this);
+                        scan(this.content || this);
                         return values;
                     }"#
                 } else if control.display {
