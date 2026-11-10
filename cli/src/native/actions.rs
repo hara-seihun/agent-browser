@@ -16349,11 +16349,12 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(4), state.prepare_pending_iframes())
             .await.expect("setup must yield to inventory").unwrap();
         assert!(state.pending_iframe_setup.contains("owned-frame"));
-        let mut resumed = false;
-        while let Ok(command) = fixture.commands.try_recv() {
-            resumed |= command["method"] == "Runtime.runIfWaitingForDebugger";
-        }
-        assert!(resumed);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let command = fixture.commands.recv().await.expect("CDP command stream");
+                if command["method"] == "Runtime.runIfWaitingForDebugger" { break; }
+            }
+        }).await.expect("paused frame must be resumed");
         client.close().await;
         fixture.server.await.unwrap();
     }
