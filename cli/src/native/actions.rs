@@ -1777,6 +1777,29 @@ impl DaemonState {
                     .client
                     .observation_progress
                     .track(super::observation_progress::Phase::FrameSetup, async {
+                        // An unresponsive frame must not consume the entire
+                        // observation deadline. Resume even after timeout; the
+                        // protected live-tree inventory remains mandatory.
+                        if !controls_active {
+                            let attempt = async {
+                                let (domains, dom, accessibility) = tokio::join!(
+                                    mgr.prepare_iframe_domains_pub(&session),
+                                    mgr.client.send_command_no_params("DOM.enable", Some(&session)),
+                                    mgr.client.send_command_no_params("Accessibility.enable", Some(&session)),
+                                );
+                                domains?;
+                                dom?;
+                                accessibility?;
+                                Ok::<(), String>(())
+                            };
+                            let setup = tokio::time::timeout(std::time::Duration::from_secs(2), attempt)
+                                .await.unwrap_or_else(|_| Err("iframe setup timed out".into()));
+                            let resumed = tokio::time::timeout(
+                                std::time::Duration::from_secs(1), mgr.resume_if_waiting_pub(&session)
+                            ).await.unwrap_or_else(|_| Err("iframe resume timed out".into()));
+                            setup?;
+                            return resumed;
+                        }
                         let (domains, dom, accessibility) = tokio::join!(
                             mgr.prepare_iframe_domains_pub(&session),
                             mgr.client
@@ -1784,17 +1807,6 @@ impl DaemonState {
                             mgr.client
                                 .send_command_no_params("Accessibility.enable", Some(&session)),
                         );
-                        // Without network controls, domain setup is best effort:
-                        // a detached iframe or an unsupported domain must not
-                        // prevent the protected inventory from reading live frames.
-                        // Always release a paused frame before validating it.
-                        if !controls_active {
-                            let resumed = mgr.resume_if_waiting_pub(&session).await;
-                            domains?;
-                            dom?;
-                            accessibility?;
-                            return resumed;
-                        }
                         domains?;
                         dom?;
                         accessibility?;
@@ -16322,6 +16334,26 @@ mod tests {
         *state.domain_filter.write().await = Some(DomainFilter::new("fixture.invalid"));
         assert!(state.prepare_pending_iframes().await.is_err());
         assert!(state.browser.is_none());
+        client.close().await;
+        fixture.server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unresponsive_iframe_setup_yields_to_inventory_and_resumes() {
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        fixture.frame_inventory.lock().unwrap().hold_method = Some("DOM.enable".into());
+        let client = fixture.manager.client.clone();
+        let mut state = DaemonState::new();
+        state.browser = Some(fixture.manager);
+        state.pending_iframe_setup.insert("owned-frame".into());
+        tokio::time::timeout(std::time::Duration::from_secs(4), state.prepare_pending_iframes())
+            .await.expect("setup must yield to inventory").unwrap();
+        assert!(state.pending_iframe_setup.contains("owned-frame"));
+        let mut resumed = false;
+        while let Ok(command) = fixture.commands.try_recv() {
+            resumed |= command["method"] == "Runtime.runIfWaitingForDebugger";
+        }
+        assert!(resumed);
         client.close().await;
         fixture.server.await.unwrap();
     }
