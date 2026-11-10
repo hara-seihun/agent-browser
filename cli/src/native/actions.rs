@@ -3881,6 +3881,11 @@ async fn execute_command_inner(
         })
         .await;
 
+    // Completion of the action is not completion of response protection and
+    // metadata work. Keep that remaining work visible under the same budget.
+    action_progress.track(
+        super::observation_progress::Phase::ResponseFinalization,
+        async {
     if action == "auth_fill"
         && cmd["credentialProvider"] == "converge-work-password-v5"
         && cmd["field"] == "identifier"
@@ -4128,6 +4133,8 @@ async fn execute_command_inner(
     }
 
     resp
+        },
+    ).await
 }
 
 fn auto_launch_error_context(has_cdp: bool) -> &'static str {

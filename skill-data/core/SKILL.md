@@ -615,3 +615,6 @@ Global `--storage-state <path>` loads a saved authentication file; `--state <pat
 
 
 Native protected-tab fills bind and classify the exact form control; unrelated login controls do not prevent nonsecret iframe form edits. Sensitive targets and unavailable frame identities refuse explicitly. On systemd Linux hosts the native daemon belongs to a user service, independent of the launching shell; `close` ends that owned session. Service admission failure reports `daemon_owner_unavailable` instead of launching an unowned process.
+
+
+Browser command deadlines retain one diagnostic handle across preparatory launches and new CDP connections. `command_action` completion does not imply the whole command completed: `response_finalization` includes subsequent response protection and metadata work. CLI and MCP share these phases and the original absolute budget. IPC response reads wait for the entire newline-terminated response within one absolute deadline; partial responses never reset it, and interrupted or timed-out effects are not replayed.

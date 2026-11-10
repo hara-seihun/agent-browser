@@ -1302,6 +1302,34 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    #[cfg(unix)]
+    #[test]
+    fn response_deadline_covers_fragmented_body_without_replay() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let producer = std::thread::spawn(move || {
+            for part in [b"{\"success\":".as_slice(), b"true,\"data\":{}", b"}\n"] {
+                std::thread::sleep(Duration::from_millis(15));
+                writer.write_all(part).unwrap();
+            }
+        });
+        let response = read_response(Connection::Unix(reader), Duration::from_secs(2)).unwrap();
+        assert!(response.success);
+        producer.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_deadline_expires_for_partial_body_and_never_resends() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"{\"success\":").unwrap();
+        let error = read_response(Connection::Unix(reader), Duration::from_millis(30)).err().expect("partial response must time out");
+        assert!(error.contains("ipc_response_timeout"), "{error}");
+        assert!(error.contains("outcome unknown; not replayed"), "{error}");
+        writer.set_nonblocking(true).unwrap();
+        let mut bytes = [0; 1];
+        assert_eq!(std::io::Read::read(&mut writer, &mut bytes).unwrap(), 0);
+    }
+
     #[test]
     fn test_get_socket_dir_explicit_override() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
