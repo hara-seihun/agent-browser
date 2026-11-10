@@ -3138,6 +3138,7 @@ mod tests {
             Some("password")
         );
         let obs = Observation {
+            live_nodes: None,
             frame_sessions: HashSet::new(),
             controls: HashMap::new(),
             private_text_nodes: HashSet::new(),
