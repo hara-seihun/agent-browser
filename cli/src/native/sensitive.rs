@@ -3155,6 +3155,7 @@ mod tests {
         );
         let obs = Observation {
             frame_sessions: HashSet::new(),
+            live_nodes: None,
             controls: HashMap::new(),
             private_text_nodes: HashSet::new(),
             expiry_echoes: Vec::new(),
