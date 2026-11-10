@@ -14,6 +14,8 @@ pub(crate) enum Phase {
     CommandAction,
     EvaluationScript,
     EvaluationMetadata,
+
+    ResponseFinalization,
     NavigationRequest,
     NavigationLifecycle,
     NavigationMetadata,
@@ -275,6 +277,36 @@ impl ObservationProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn new_cdp_connection_preserves_completed_and_inflight_command_phases() {
+        let progress = ObservationProgress::default();
+        let mut client = None;
+        let mut server = None;
+        let diagnostic = COMMAND_PROGRESS.scope(progress.clone(), async {
+            progress.before(Instant::now() + std::time::Duration::from_secs(2), async {
+                progress.track(Phase::CommandAction, async {}).await;
+                let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+                let connection = fixture.manager.client.clone();
+                client = Some(connection.clone());
+                server = Some(fixture.server);
+                // This is the same handle used by navigation, inventory and cleanup
+                // after a preparatory launch replaces the connection.
+                connection.observation_progress.track(
+                    Phase::ResponseFinalization, std::future::pending::<()>(),
+                ).await;
+            }).await.unwrap_err()
+        }).await;
+        let phases = serde_json::to_value(&diagnostic).unwrap();
+        let phases = phases["phases"].as_array().unwrap();
+        assert!(phases.iter().any(|p| p["phase"] == "command_action" && p["completed"] == 1));
+        assert!(phases.iter().any(|p| p["phase"] == "response_finalization" && p["inFlight"] == 1));
+        client.unwrap().close().await;
+        server.unwrap().await.unwrap();
+        assert!(matches!(*progress.0.lock().unwrap(), State::Unset));
+        // Other sessions and work outside the command cannot inherit its phases.
+        assert!(!Arc::ptr_eq(&progress.0, &connection_progress().0));
+    }
 
     #[tokio::test]
     async fn expired_deadline_wins_over_ready_nested_result() {
