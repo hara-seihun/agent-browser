@@ -4333,7 +4333,7 @@ Options:
                              Includes lock admission, events, observation and action.
                              Socket receive budget: max(timeout+10000,30000) ms.
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
-                             (default: 1h; 0 disables; dashboard input resets the timer)
+                             (default: 5m; 0 disables; dashboard input resets the timer)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -4412,7 +4412,7 @@ Environment:
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
   AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
                                  Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
-  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 300000 = 5m; 0 disables)
                                  Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
                                  Provider-owned cloud browsers remain eligible for default cleanup
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
