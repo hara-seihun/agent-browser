@@ -43,6 +43,19 @@ pub async fn click(
     )
     .await?;
     require_click_enabled(client, &object_session, &object).await?;
+    let prepared = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
+                "returnByValue": true, "awaitPromise": true
+            })),
+            Some(&object_session),
+        )
+        .await?;
+    if prepared.get("exceptionDetails").is_some() || prepared["result"]["value"] != "ready" {
+        return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into());
+    }
     let (x, y, effective_session_id) = if let Some((x, y)) = resolve_checkbox_point(
         client, &object_session, &object, selector_or_ref,
     ).await? {
@@ -71,6 +84,29 @@ pub async fn click(
     })), Some(&object_session)).await.map_err(|_| "click_state_unavailable: click identity unavailable before dispatch")?;
     if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
         return Err("click_target_changed: pinned click element changed before dispatch".into());
+    }
+    // Recheck the actual dispatch point after identity and geometry reads. A
+    // moving drawer can otherwise put that point outside the viewport entirely.
+    let hit = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object,
+                "functionDeclaration": r#"function(x,y) {
+            let doc = this.ownerDocument;
+            while (doc.defaultView.frameElement) doc = doc.defaultView.frameElement.ownerDocument;
+            let node = doc.elementFromPoint(x,y);
+            while (node && node.contentDocument) node = node.contentDocument.elementFromPoint(
+                x - node.getBoundingClientRect().left, y - node.getBoundingClientRect().top);
+            return node === this || this.contains(node);
+        }"#,
+                "arguments": [{"value": x}, {"value": y}], "returnByValue": true
+            })),
+            Some(&object_session),
+        )
+        .await?;
+    if hit.get("exceptionDetails").is_some() || hit["result"]["value"] != true {
+        return Err("click_target_changed: dispatch point no longer hits the pinned target; no pointer events dispatched".into());
     }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
