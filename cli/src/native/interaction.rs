@@ -93,7 +93,12 @@ pub async fn click(
         "functionDeclaration": r#"function(expected) {
             if (!this.isConnected) return false;
             const r = this.getBoundingClientRect();
-            return [r.left,r.top,r.width,r.height].every((v,i) => Math.abs(v-expected[i]) < 0.25);
+            const view = this.ownerDocument.defaultView;
+            const centerX = r.left + r.width / 2, centerY = r.top + r.height / 2;
+            return r.width > 0 && r.height > 0
+                && centerX >= 0 && centerX < view.innerWidth
+                && centerY >= 0 && centerY < view.innerHeight
+                && [r.left,r.top,r.width,r.height].every((v,i) => Number.isFinite(v) && Math.abs(v-expected[i]) < 0.25);
         }"#,
         "arguments": [{"value": prepared["result"]["value"]}], "returnByValue": true
     })), Some(&object_session)).await?;

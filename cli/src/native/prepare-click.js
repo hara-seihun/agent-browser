@@ -20,7 +20,12 @@ function() {
             if (!target.isConnected) return finish('detached');
             const r = target.getBoundingClientRect();
             const geometry = [r.left, r.top, r.width, r.height];
-            stable = geometry.every(Number.isFinite) && previous && geometry.every((v, i) => Math.abs(v - previous[i]) < 0.25)
+            const centerX = r.left + r.width / 2;
+            const centerY = r.top + r.height / 2;
+            const valid = geometry.every(Number.isFinite) && r.width > 0 && r.height > 0
+                && centerX >= 0 && centerX < view.innerWidth
+                && centerY >= 0 && centerY < view.innerHeight;
+            stable = valid && previous && geometry.every((v, i) => Math.abs(v - previous[i]) < 0.25)
                 ? stable + 1 : 0;
             previous = geometry;
             if (stable >= 2) return finish(geometry);

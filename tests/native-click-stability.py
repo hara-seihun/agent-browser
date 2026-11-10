@@ -60,5 +60,11 @@ try:
     assert refusal['data']['effectDispatched'] is False, refusal
     assert evaluate('({hits:window.hits,misses:window.misses})') == {'hits': 0, 'misses': 0}
     print('PASS: unending animation refuses without dispatch')
+    page('<style>html,body{overflow:hidden}</style><button id="target" style="position:fixed;left:1500px;top:100px;width:200px;height:60px" onclick="window.hits++">Offscreen</button>')
+    refusal = run('click', '#target', success=False)
+    assert refusal['code'] == 'click_target_unstable', refusal
+    assert refusal['data']['effectDispatched'] is False, refusal
+    assert evaluate('({hits:window.hits,misses:window.misses})') == {'hits': 0, 'misses': 0}
+    print('PASS: stable offscreen target refuses without dispatch')
 finally:
     run('close')
