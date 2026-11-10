@@ -1772,6 +1772,7 @@ Usage: agent-browser dblclick <selector>
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
+Native clicks wait for stable geometry before dispatch (two-second bound).
 Native disabled controls refuse with click_disabled and effectDispatched=false
 before pointer input, using the same admission as click.
 

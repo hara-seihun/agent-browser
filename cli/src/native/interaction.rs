@@ -53,7 +53,7 @@ pub async fn click(
             Some(&object_session),
         )
         .await?;
-    if prepared.get("exceptionDetails").is_some() || prepared["result"]["value"] != "ready" {
+    if prepared.get("exceptionDetails").is_some() || !prepared["result"]["value"].is_array() {
         return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into());
     }
     let (x, y, effective_session_id) = if let Some((x, y)) = resolve_checkbox_point(
@@ -85,28 +85,20 @@ pub async fn click(
     if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
         return Err("click_target_changed: pinned click element changed before dispatch".into());
     }
-    // Recheck the actual dispatch point after identity and geometry reads. A
-    // moving drawer can otherwise put that point outside the viewport entirely.
-    let hit = client
-        .send_command(
-            "Runtime.callFunctionOn",
-            Some(serde_json::json!({
-                "objectId": object,
-                "functionDeclaration": r#"function(x,y) {
-            let doc = this.ownerDocument;
-            while (doc.defaultView.frameElement) doc = doc.defaultView.frameElement.ownerDocument;
-            let node = doc.elementFromPoint(x,y);
-            while (node && node.contentDocument) node = node.contentDocument.elementFromPoint(
-                x - node.getBoundingClientRect().left, y - node.getBoundingClientRect().top);
-            return node === this || this.contains(node);
+    // Compare local geometry in the pinned object's own realm. Existing center
+    // resolution owns frame offsets and shadow/label-aware interception; do not
+    // replace those semantics with a second top-document hit test.
+    let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object,
+        "functionDeclaration": r#"function(expected) {
+            if (!this.isConnected) return false;
+            const r = this.getBoundingClientRect();
+            return [r.left,r.top,r.width,r.height].every((v,i) => Math.abs(v-expected[i]) < 0.25);
         }"#,
-                "arguments": [{"value": x}, {"value": y}], "returnByValue": true
-            })),
-            Some(&object_session),
-        )
-        .await?;
-    if hit.get("exceptionDetails").is_some() || hit["result"]["value"] != true {
-        return Err("click_target_changed: dispatch point no longer hits the pinned target; no pointer events dispatched".into());
+        "arguments": [{"value": prepared["result"]["value"]}], "returnByValue": true
+    })), Some(&object_session)).await?;
+    if stable.get("exceptionDetails").is_some() || stable["result"]["value"] != true {
+        return Err("click_target_changed: pinned geometry changed before dispatch; no pointer events dispatched".into());
     }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
