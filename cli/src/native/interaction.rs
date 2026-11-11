@@ -42,35 +42,54 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
-    require_click_enabled(client, &object_session, &object).await?;
-    let (x, y, effective_session_id) = if let Some((x, y)) = resolve_checkbox_point(
+    let fast = super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?;
+    let (x, y, effective_session_id) = if let Some((x,y)) = fast {
+        (x, y, object_session.clone())
+    } else {
+        require_click_enabled(client, &object_session, &object).await?;
+        if let Some((x, y)) = resolve_checkbox_point(
         client, &object_session, &object, selector_or_ref,
     ).await? {
         (x, y, object_session.clone())
     } else {
         resolve_element_center(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?
+        }
     };
     if effective_session_id != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    let (current, current_session) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+    // A backend-node ref pins a Chrome node, not a selector that can start
+    // matching a replacement. Re-resolving that same immutable backend id adds
+    // two remote reads but no identity information. The final synchronous check
+    // below still requires the pinned node to be connected and enabled.
+    let pinned_ref = super::element::parse_ref(selector_or_ref)
+        .and_then(|id| ref_map.get(&id))
+        .is_some_and(|entry| entry.backend_node_id.is_some());
+    let (current, current_session) = if pinned_ref {
+        (object.clone(), object_session.clone())
+    } else {
+        resolve_element_object_id(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?
+    };
     if current_session != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    require_click_enabled(client, &current_session, &current).await?;
     let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId":object, "functionDeclaration":"function(current) { return this.isConnected && this === current; }",
+        "objectId":object, "functionDeclaration":r#"function(current) {
+            if (!this.isConnected || this !== current) return 'changed';
+            for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
+                if (node.matches(':disabled') || (node.getAttribute('aria-disabled') || '').trim().toLowerCase()==='true') return 'disabled';
+            }
+            return 'enabled';
+        }"#,
         "arguments":[{"objectId":current}], "returnByValue":true
     })), Some(&object_session)).await.map_err(|_| "click_state_unavailable: click identity unavailable before dispatch")?;
-    if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
-        return Err("click_target_changed: pinned click element changed before dispatch".into());
+    if same.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click identity unavailable before dispatch".into());
+    }
+    match same["result"]["value"].as_str() {
+        Some("enabled") => {},
+        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
+        _ => return Err("click_target_changed: pinned click element changed before dispatch".into()),
     }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any

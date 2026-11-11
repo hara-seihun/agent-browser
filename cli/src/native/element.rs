@@ -497,6 +497,39 @@ async fn document_viewport_anchor(
 /// Native checkboxes often have a clipped, offscreen input and a painted label.
 /// Pick an actually hit-testable part of the input or its associated label before
 /// any pointer event. Never activate with JavaScript or retry a dispatched click.
+/// Top-document targets need one synchronous point/overlay/disabled check,
+/// not serial CDP box-model and document-anchor reads. Framed targets keep the
+/// existing coordinate conversion path; the caller still revalidates identity.
+pub(super) async fn fast_click_point(
+    client: &CdpClient, session: &str, object: &str, target: &str,
+) -> Result<Option<(f64, f64)>, String> {
+    let function = include_str!("click_point.js")
+        .replace("CHECKBOX_POINT", include_str!("checkbox_point.js"))
+        .replace("BLOCKER_AT", BLOCKER_AT_JS);
+    let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object, "functionDeclaration": function, "returnByValue": true,
+    })), Some(session)).await.map_err(|_| "click_state_unavailable: click point unavailable before dispatch")?;
+    if result.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click point unavailable before dispatch".into());
+    }
+    let value = &result["result"]["value"];
+    if value["framed"] == true { return Ok(None); }
+    if let Some(blocker) = value["blocker"].as_str() {
+        return Err(intercepted_error(target, blocker));
+    }
+    if let Some(error) = value["error"].as_str() {
+        return Err(match error {
+            "disabled" => "click_disabled: target or containing control is disabled; no pointer events dispatched",
+            "changed" => "click_target_changed: pinned click target detached before dispatch",
+            _ => "click_not_hittable: target has no unobstructed activation point; no pointer events dispatched",
+        }.into());
+    }
+    match (value["x"].as_f64(), value["y"].as_f64()) {
+        (Some(x), Some(y)) => Ok(Some((x,y))),
+        _ => Err("click_state_unavailable: click point unavailable before dispatch".into()),
+    }
+}
+
 pub(super) async fn resolve_checkbox_point(
     client: &CdpClient,
     session_id: &str,
