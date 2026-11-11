@@ -14430,6 +14430,9 @@ fn error_response(id: &str, error: &str) -> Value {
     if error.starts_with("selector_invalid: ") {
         resp["code"] = json!("selector_invalid");
         resp["data"] = json!({"effectDispatched":false});
+    } else if let Some(code) = ["click_target_unstable", "click_target_changed", "click_not_hittable"].into_iter().find(|code| error.starts_with(&format!("{code}: "))) {
+        resp["code"] = json!(code);
+        resp["data"] = json!({"effectDispatched":false});
     } else if error.starts_with("click_disabled: ") {
         resp["code"] = json!("click_disabled");
         resp["data"] = json!({"effectDispatched":false});
