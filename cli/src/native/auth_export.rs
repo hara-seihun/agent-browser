@@ -352,11 +352,10 @@ fn normalize_card_expiry(raw: &str, decorated: bool) -> Result<String, String> {
     let invalid = || "auth_export_card_expiry_invalid: invalid or ambiguous private expiry".to_string();
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
     let compact = if decorated {
-        let pattern = regex::Regex::new(r"[0-9]{4}-[0-9]{2}|[0-9]{2}/(?:[0-9]{4}|[0-9]{2})").unwrap();
-        let matches: Vec<_> = pattern.find_iter(&compact).collect();
-        let [date] = matches.as_slice() else { return Err(invalid()) };
-        if compact[..date.start()].chars().chain(compact[date.end()..].chars()).any(char::is_numeric) { return Err(invalid()); }
-        date.as_str().to_string()
+        let tokens: Vec<_> = compact.split(|c: char| !c.is_ascii_digit() && c != '/' && c != '-')
+            .filter(|token| token.chars().any(char::is_numeric)).collect();
+        let [date] = tokens.as_slice() else { return Err(invalid()) };
+        date.to_string()
     } else { compact };
     let expiry = if compact.len() == 7 && compact.as_bytes()[4] == b'-'
         && compact.bytes().enumerate().all(|(i,b)| i == 4 || b.is_ascii_digit()) {
