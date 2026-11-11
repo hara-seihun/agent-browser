@@ -266,6 +266,7 @@ pub struct CdpClient {
     socket: socket2::Socket,
     closed: Arc<AtomicBool>,
     close_complete: AtomicBool,
+    last_response: std::sync::Mutex<Option<std::time::Instant>>,
     close_lock: Mutex<()>,
     cancel_tx: watch::Sender<bool>,
     next_id: AtomicU64,
@@ -538,6 +539,7 @@ impl CdpClient {
             socket,
             closed,
             close_complete: AtomicBool::new(false),
+            last_response: std::sync::Mutex::new(None),
             close_lock: Mutex::new(()),
             cancel_tx,
             next_id: AtomicU64::new(1),
@@ -561,6 +563,14 @@ impl CdpClient {
             .unwrap_or_else(|e| e.into_inner())
             .entry(session.to_owned())
             .or_default()
+    }
+
+    /// A just-completed command already demonstrated transport responsiveness.
+    /// A close event always overrides the freshness window.
+    pub(crate) fn recently_responsive(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
+            && self.last_response.lock().unwrap_or_else(|e| e.into_inner())
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
     }
 
     fn ensure_open(&self) -> Result<(), String> {
@@ -774,7 +784,13 @@ impl CdpClient {
         expression: String,
         return_by_value: bool,
     ) -> Result<super::types::EvaluateResult, String> {
-        let context = self.dom_world(session, None).await?;
+        self.evaluate_dom_in_frame(session, None, expression, return_by_value).await
+    }
+
+    pub async fn evaluate_dom_in_frame(
+        &self, session: &str, frame: Option<&str>, expression: String, return_by_value: bool,
+    ) -> Result<super::types::EvaluateResult, String> {
+        let context = self.dom_world(session, frame).await?;
         self.send_command_typed(
             "Runtime.evaluate",
             &json!({
@@ -855,6 +871,7 @@ impl CdpClient {
             }
         };
 
+        *self.last_response.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         if let Some(error) = response.error {
             return Err(CommandError::Protocol {
                 method: method.to_owned(),
@@ -1054,6 +1071,31 @@ mod tests {
 
     const TEST_CERT_DER: &str = "MIIBPDCB46ADAgECAgkA9xwXmIhbzQIwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgzMDA1NTU0NFoXDTM2MDgyNzA1NTU0NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQdmPO0sXXFRmVn7+8MViXGom2rYy8aV3Oc0pNZhUmFGaPl4MRFzc1G0yaV/WRBPF/BUh2LGsXCvUsn7NqaYkFaMeMBwwGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0gAMEUCIQC32oureGNAupABEmonQPAQBD7OdJjXmUxoVQNr0UB+6AIgb23GMwxTjwHyLG4tZcJST7r3cCW8K/Y+1h618j2f+Uw=";
     const TEST_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIVZST8Vhc5f3OW+4kF78f8o1nQCRwjW/Yo8CXQ35Y9uhRANCAARB2Y87SxdcVGZWfv7wxWJcaibatjLxpXc5zSk1mFSYUZo+XgxEXNzUbTJpX9ZEE8X8FSHYsaxcK9Syfs2ppiQV";
+
+    #[tokio::test]
+    async fn recent_responsiveness_expires_and_never_overrides_close() {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let raw = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let id = serde_json::from_str::<Value>(&raw).unwrap()["id"].as_u64().unwrap();
+            ws.send(Message::Text(json!({"id":id,"result":{}}).to_string())).await.unwrap();
+            let _ = ws.next().await;
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        assert!(!client.recently_responsive());
+        client.send_command_no_params("Browser.getVersion", None).await.unwrap();
+        assert!(client.recently_responsive());
+        *client.last_response.lock().unwrap() = Some(std::time::Instant::now()-Duration::from_secs(2));
+        assert!(!client.recently_responsive());
+        *client.last_response.lock().unwrap() = Some(std::time::Instant::now());
+        client.close().await;
+        assert!(!client.recently_responsive());
+        server.await.unwrap();
+    }
 
     #[test]
     fn dom_revisions_track_mutations_per_session() {

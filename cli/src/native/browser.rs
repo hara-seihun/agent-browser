@@ -1573,9 +1573,12 @@ impl BrowserManager {
         self.default_timeout_ms
     }
 
-    /// Checks if the CDP connection is alive by sending a simple command.
-    /// Returns false if the command times out or fails.
+    /// Reuse a response from the last second, otherwise probe the CDP transport.
+    /// Closed transports are never admitted by the freshness window.
     pub async fn is_connection_alive(&self) -> bool {
+        if self.client.recently_responsive() {
+            return true;
+        }
         let timeout = tokio::time::Duration::from_secs(3);
         let result = tokio::time::timeout(
             timeout,

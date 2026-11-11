@@ -345,6 +345,7 @@ async fn collect_snapshot_batch(
                     find_cursor_interactive_elements(
                         client,
                         session,
+                        cursor_context.document_frames.get(*session).ok_or("Cursor document frame unavailable")?,
                         cursor_context
                             .cursor_nodes
                             .get(*session)
@@ -856,6 +857,7 @@ fn label_dom_controls(nodes: &mut [AXNode]) {
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
+    document_frame: &str,
     inventoried_nodes: &HashMap<String, i64>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
@@ -962,8 +964,9 @@ async fn find_cursor_interactive_elements(
     // Synthetic shadow polyfills rewrite ancestry and selectors in the page's
     // world. The inventory comes from Chrome, so project from that same DOM.
     let result = client
-        .evaluate_dom(
+        .evaluate_dom_in_frame(
             session_id,
+            Some(document_frame),
             js.replace("/* SHADOW_DOM_HELPERS */", include_str!("shadow_dom.js")),
             true,
         )

@@ -1610,6 +1610,7 @@ pub async fn observe(
 }
 
 pub(crate) struct InventoryContext {
+    pub(crate) document_frames: HashMap<String, String>,
     pub(crate) cursor_nodes: HashMap<String, HashMap<String, i64>>,
     pub(crate) frame_paths: HashMap<String, HashMap<String, i64>>,
     pub(crate) dialog_roots: HashMap<String, HashSet<i64>>,
@@ -2410,6 +2411,7 @@ where
         ..Observation::default()
     };
     let mut context = InventoryContext {
+        document_frames: documents.iter().map(|document| (document.session.clone(), document.bindings.root.clone())).collect(),
         frame_paths: HashMap::new(),
         dialog_roots: HashMap::new(),
         cursor_nodes: documents
