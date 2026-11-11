@@ -20,22 +20,32 @@ fn useful_secret(value: &str) -> bool {
         && value.chars().take(MIN_SECRET_CHARS).count() == MIN_SECRET_CHARS
 }
 
-// Stripe secret/restricted keys and webhook signing secrets are credentials even
-// without a nearby label (the dashboard exposes them through names/data attrs).
-// Publishable pk_ keys deliberately remain ordinary public text.
-const STRIPE_SECRET_PREFIXES: &[&str] = &["sk_test_", "sk_live_", "rk_test_", "rk_live_", "whsec_"];
+// Always-private token families are credentials even without a nearby label.
+// The boolean selects URL-safe base64 characters rather than alphanumerics.
+// Publishable pk_ keys deliberately remain ordinary public text. Keep the same
+// table in Rust response filtering and generated execution-time DOM guards.
+const PRIVATE_TOKEN_PATTERNS: &[(&str, usize, bool)] = &[
+    ("sk_test_", 8, false),
+    ("sk_live_", 8, false),
+    ("rk_test_", 8, false),
+    ("rk_live_", 8, false),
+    ("whsec_", 8, false),
+    ("bu_", 20, true),
+];
 
-fn stripe_secret_length(text: &str) -> Option<usize> {
-    STRIPE_SECRET_PREFIXES.iter().find_map(|prefix| {
+fn private_token_length(text: &str) -> Option<usize> {
+    PRIVATE_TOKEN_PATTERNS.iter().find_map(|(prefix, minimum, url_safe)| {
         let rest = text.strip_prefix(prefix)?;
-        let length = rest.bytes().take_while(u8::is_ascii_alphanumeric).count();
-        (length >= 8).then_some(prefix.len() + length)
+        let length = rest.bytes().take_while(|byte| {
+            byte.is_ascii_alphanumeric() || (*url_safe && matches!(*byte, b'_' | b'-'))
+        }).count();
+        (length >= *minimum).then_some(prefix.len() + length)
     })
 }
 
-fn has_stripe_secret(text: &str) -> bool {
+fn has_private_token(text: &str) -> bool {
     text.char_indices()
-        .any(|(start, _)| stripe_secret_length(&text[start..]).is_some())
+        .any(|(start, _)| private_token_length(&text[start..]).is_some())
 }
 
 const AUTOCOMPLETE: &[(&str, &str)] = &[
@@ -293,7 +303,7 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         if node["nodeName"] == "#text" {
             let text = node["nodeValue"].as_str().unwrap_or("");
-            if has_stripe_secret(text) {
+            if has_private_token(text) {
                 if let Some(parent) = parent {
                     found.insert(parent);
                 }
@@ -363,7 +373,7 @@ const PRIVATE_TEXT_LABELS: &[&str] = &[
 ];
 
 fn private_text(attributes: &HashMap<String, String>) -> bool {
-    attributes.values().any(|value| has_stripe_secret(value))
+    attributes.values().any(|value| has_private_token(value))
         || attributes
             .get("data-private")
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
@@ -485,11 +495,13 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 pub fn classifier_js() -> String {
     format!(
         r#"const apiLabels = {};
-    const stripePrefixes = {};
-    const stripeSecret = text => stripePrefixes.some(prefix => {{
+    const privateTokenPatterns = {};
+    const privateToken = text => privateTokenPatterns.some(([prefix, minimum, urlSafe]) => {{
       let at = -1;
       while ((at = text.indexOf(prefix, at + 1)) !== -1) {{
-        if (/^[A-Za-z0-9]{{8}}/.test(text.slice(at + prefix.length))) return true;
+        const rest = text.slice(at + prefix.length);
+        const token = rest.match(urlSafe ? /^[A-Za-z0-9_-]+/ : /^[A-Za-z0-9]+/);
+        if (token && token[0].length >= minimum) return true;
       }}
       return false;
     }});
@@ -525,7 +537,7 @@ pub fn classifier_js() -> String {
           if (node.nodeType === 1 && ['SCRIPT','STYLE'].includes(node.tagName)) return [0, []];
           if (node.nodeType === 3) {{
             const text = (node.textContent || '').trim();
-            if (stripeSecret(text)) {{
+            if (privateToken(text)) {{
               if (node.parentElement) found.add(node.parentElement);
               return [0, []];
             }}
@@ -555,7 +567,7 @@ pub fn classifier_js() -> String {
       }}
       return apiRoots.get(root).has(el);
     }};
-    const privateText = el => Array.from(el.attributes).some(a => stripeSecret(a.value))
+    const privateText = el => Array.from(el.attributes).some(a => privateToken(a.value))
       || (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
       || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
       || ['aria-label', 'title', 'id', 'name'].some(key => apiLabel(el.getAttribute(key)))
@@ -626,7 +638,7 @@ pub fn classifier_js() -> String {
       return null;
     }};"#,
         serde_json::to_string(API_TEXT_LABELS).unwrap(),
-        serde_json::to_string(STRIPE_SECRET_PREFIXES).unwrap(),
+        serde_json::to_string(PRIVATE_TOKEN_PATTERNS).unwrap(),
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
@@ -908,7 +920,7 @@ impl Observation {
             {
                 out.push_str(marker);
                 start += secret.len();
-            } else if let Some(length) = stripe_secret_length(&text[start..]) {
+            } else if let Some(length) = private_token_length(&text[start..]) {
                 out.push_str(&marker("credential"));
                 start += length;
             } else if let Some((length, marker)) =
@@ -2110,11 +2122,13 @@ async fn inventory_control(
                 "functionDeclaration": if control.text {
                     // Keep both rendered text and individual fragments private, including
                     // short descendants whose AX parent may be omitted by Chrome.
-                    r#"function(prefixes) {
-                        const stripeSecret = text => prefixes.some(prefix => {
+                    r#"function(patterns) {
+                        const privateToken = text => patterns.some(([prefix, minimum, urlSafe]) => {
                             let at = -1;
                             while ((at = text.indexOf(prefix, at + 1)) !== -1) {
-                                if (/^[A-Za-z0-9]{8}/.test(text.slice(at + prefix.length))) return true;
+                                const rest = text.slice(at + prefix.length);
+                                const token = rest.match(urlSafe ? /^[A-Za-z0-9_-]+/ : /^[A-Za-z0-9]+/);
+                                if (token && token[0].length >= minimum) return true;
                             }
                             return false;
                         });
@@ -2126,7 +2140,7 @@ async fn inventory_control(
                                 // Attributes can be the only full copy of a displayed
                                 // credential; retain them privately to protect echoes.
                                 for (const attr of node.attributes) {
-                                    if (stripeSecret(attr.value)) values.push(attr.value);
+                                    if (privateToken(attr.value)) values.push(attr.value);
                                 }
                                 if (node.shadowRoot) scan(node.shadowRoot);
                                 if (node.content) scan(node.content);
@@ -2141,7 +2155,7 @@ async fn inventory_control(
                 } else {
                     "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }"
                 },
-                "arguments": [{"value": STRIPE_SECRET_PREFIXES}],
+                "arguments": [{"value": PRIVATE_TOKEN_PATTERNS}],
                 "returnByValue": true,
             })), Some(&control.session)),
         ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
@@ -2674,6 +2688,26 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_use_tokens_are_always_private_and_url_safe() {
+        use super::*;
+        let secret = format!("bu_{}", "Ab_9-".repeat(9));
+        assert!(has_private_token(&secret));
+        assert!(!has_private_token(&format!("bu_{}", "x".repeat(19))));
+        assert!(has_private_token(&format!("bu_{}", "x".repeat(20))));
+        assert!(!has_private_token("pk_test_public_1234567890"));
+        assert!(has_private_token("sk_test_12345678"));
+        let observed = Observation::default();
+        assert_eq!(observed.protect_text(&format!("é[{secret}]!")), "é[[redacted: credential]]!");
+        let root = json!({"nodeName":"DIV", "backendNodeId":1, "children":[
+            {"nodeName":"DIV", "backendNodeId":2, "children":[
+                {"nodeName":"#text", "nodeValue":secret}
+            ]}
+        ]});
+        assert_eq!(api_display_nodes(&root), HashSet::from([2]));
+        assert!(private_text(&HashMap::from([("data-key".into(), secret)])));
+    }
+
     #[test]
     fn secret_fragments_never_poison_metadata_and_cleanup_preserves_full_values() {
         use super::*;

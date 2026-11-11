@@ -2904,7 +2904,8 @@ Private card to Proton Pass (Kenan's Agent vault):
   Output is saved/vault/item only. Stop captures first. Never automatically replay.
   On timeout or uncertain vault creation inspect the item before another attempt.
 
-Stripe sk_/rk_ test/live keys and whsec_ secrets in names, text and DOM
+Browser Use bu_ keys (20+ URL-safe characters), Stripe sk_/rk_ test/live
+  keys and whsec_ secrets in names, text and DOM
   attributes are private: snapshots/getters redact; screenshots mask; eval refuses.
   Backup/recovery-code labels protect displayed values too.
   Publishable pk_ keys remain readable. CLI and MCP share this protection.
