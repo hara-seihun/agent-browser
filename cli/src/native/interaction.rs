@@ -65,7 +65,7 @@ async fn click_once(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
-    let (object, object_session, ref_refreshed) = super::element::resolve_element_object_id_report(
+    let (object, object_session, ref_refreshed) = super::element::resolve_click_object_id_report(
         client,
         session_id,
         ref_map,
@@ -74,6 +74,24 @@ async fn click_once(
     )
     .await?;
     let outcome: Result<ClickResult, String> = async {
+    // Recompute only pre-dispatch geometry, retaining the same pinned object.
+    // Point resolution may itself scroll, and remote page layout may settle
+    // between CDP reads. Never retry transport errors or any pointer input.
+    for _ in 0..4 {
+    require_click_enabled(client, &object_session, &object).await?;
+    let prepared = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
+        "returnByValue": true, "awaitPromise": true
+    })), Some(&object_session)).await?;
+    if prepared.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
+    }
+    match prepared["result"]["value"].as_str() {
+        Some("detached") => return Err("click_target_changed: pinned click target detached before dispatch".into()),
+        Some(_) => return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into()),
+        None if prepared["result"]["value"].is_array() => {},
+        None => return Err("click_state_unavailable: click geometry unavailable before dispatch".into()),
+    }
     let fast = super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?;
     let (x, y, effective_session_id) = if let Some((x,y)) = fast {
         (x, y, object_session.clone())
@@ -123,6 +141,14 @@ async fn click_once(
         Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
         _ => return Err("click_target_changed: pinned click element changed before dispatch".into()),
     }
+    let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
+        "arguments": [{"value": prepared["result"]["value"]}], "returnByValue": true
+    })), Some(&object_session)).await?;
+    if stable.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
+    }
+    if stable["result"]["value"] != true { continue; }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
@@ -137,7 +163,9 @@ async fn click_once(
     )
     .await?;
     result.ref_refreshed = ref_refreshed;
-    Ok(result)
+    return Ok(result);
+    }
+    Err("click_target_unstable: pinned geometry kept changing before dispatch; no pointer events dispatched".into())
     }.await;
     outcome.map_err(|error| if ref_refreshed && error.starts_with("click_target_changed:") {
         "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no pointer events dispatched".into()

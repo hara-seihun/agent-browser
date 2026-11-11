@@ -744,6 +744,29 @@ pub(super) async fn resolve_element_object_id_report(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String, bool), String> {
+    resolve_element_object_id_report_inner(client, session_id, ref_map, selector_or_ref, iframe_sessions, true).await
+}
+
+/// Click point acquisition checks connection before returning any coordinates,
+/// and the dispatch boundary checks it again. Do not add a separate remote read.
+pub(super) async fn resolve_click_object_id_report(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String, bool), String> {
+    resolve_element_object_id_report_inner(client, session_id, ref_map, selector_or_ref, iframe_sessions, false).await
+}
+
+async fn resolve_element_object_id_report_inner(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    validate_connection: bool,
+) -> Result<(String, String, bool), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
@@ -768,7 +791,7 @@ pub(super) async fn resolve_element_object_id_report(
 
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
-                    if is_connected(client, effective_session_id, &object_id).await {
+                    if !validate_connection || is_connected(client, effective_session_id, &object_id).await {
                         return Ok((object_id, effective_session_id.to_string(), false));
                     }
                 }

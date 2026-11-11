@@ -3,7 +3,6 @@ function() {
     // Framed targets retain CDP box-model conversion, including cross-origin
     // same-process frame offsets. In the top document DOM and input coordinates
     // are both viewport CSS pixels, so no remote anchor/conversion is needed.
-    if (!win || win !== win.top) return {framed:true};
     const enabled = () => {
         if (!this.isConnected) return 'changed';
         for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
@@ -13,6 +12,7 @@ function() {
     };
     let error = enabled();
     if (error) return {error};
+    if (!win || win !== win.top) return {framed:true};
     const checkbox = CHECKBOX_POINT;
     let point = checkbox.call(this);
     if (point && point.error) return {error:'not_hittable'};
