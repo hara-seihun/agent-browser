@@ -978,8 +978,15 @@ mod tests {
                     continue;
                 }
                 let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(request["method"], "Page.getFrameTree");
                 let session = request["sessionId"].as_str().unwrap().to_string();
+                if request["method"] == "DOM.getFrameOwner" {
+                    let owned = session == "left-session" && request["params"]["frameId"] == "nested";
+                    socket.send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"id":request["id"],"result":if owned {json!({"backendNodeId":42})} else {json!({})}}).to_string().into()
+                    )).await.unwrap();
+                    continue;
+                }
+                assert_eq!(request["method"], "Page.getFrameTree");
                 seen.insert(session.clone());
                 // Like a suspended foreign renderer: it never answers.
                 if session == "background-session" {

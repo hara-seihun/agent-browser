@@ -1427,6 +1427,10 @@ mod tests {
                                 json!({"frameTree":{"frame":{"id":"root", "loaderId":if work {format!("topdoc{}",server_generation.load(Ordering::SeqCst))}else{"topdoc".to_string()}, "url":if work {"https://accounts.google.com/v3/signin/challenge/pwd"}else{"https://fixture.test"}}}})
                             }
                         }
+                        "Page.createIsolatedWorld" => {
+                            assert_eq!(cmd["params"]["worldName"], "agent-browser-dom");
+                            json!({"executionContextId":1})
+                        }
                         "Runtime.evaluate" => {
                             json!({"result":{"objectId":"input-object", "type":"object"}})
                         }

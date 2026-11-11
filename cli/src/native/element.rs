@@ -1726,7 +1726,9 @@ mod tests {
     #[test]
     fn test_build_count_elements_js_css() {
         let js = build_count_elements_js(".item");
-        assert!(js.contains("document.querySelectorAll(\".item\").length"));
+        assert!(js.contains("root.querySelectorAll(\".item\").length"));
+        assert!(js.contains("total += count(host.shadowRoot)"));
+        assert!(js.contains("return count(document)"));
         assert!(!js.contains("document.evaluate"));
     }
 

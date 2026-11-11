@@ -3123,10 +3123,15 @@ mod tests {
             "fill_render_timeout: Fill dispatched but rendering did not complete; do not replay",
             "auth_fill_target_changed: timeout after input dispatch",
             "tab_state_unavailable: element is not visible",
-            "SENSITIVE_OUTPUT_UNSUPPORTED: timeout observing protected controls",
         ] {
             assert_eq!(to_ai_friendly_error(error), error);
         }
+        let protected = "SENSITIVE_OUTPUT_UNSUPPORTED: timeout observing protected controls";
+        let friendly = to_ai_friendly_error(protected);
+        assert!(friendly.starts_with(protected));
+        assert!(friendly.contains("auth fill --credential-provider"));
+        assert!(friendly.contains("select frame main"));
+        assert!(friendly.ends_with("do not bypass redaction."));
     }
 
     #[test]
@@ -4022,7 +4027,7 @@ mod tests {
         mgr.remove_page_by_target_id(TARGET_A);
 
         assert!(!mgr.bound_target_is_gone());
-        assert_eq!(mgr.bound_target_id(), None);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_B));
         assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
     }
 

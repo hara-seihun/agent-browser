@@ -540,6 +540,10 @@ impl CdpFixture {
                     "Page.getFrameTree" => {
                         json!({"frameTree":{"frame":{"id":"synthetic-frame", "loaderId":format!("document-{generation}"), "url":"http://synthetic.test/"}}})
                     }
+                    "Page.createIsolatedWorld" => {
+                        assert_eq!(command["params"]["worldName"], "agent-browser-dom");
+                        json!({"executionContextId":1})
+                    }
                     "Runtime.evaluate" => {
                         json!({"result":{"objectId":"synthetic-field", "type":"object"}})
                     }

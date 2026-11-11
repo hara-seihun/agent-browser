@@ -132,6 +132,10 @@ impl Fixture {
                         "Page.getFrameTree" => {
                             json!({"frameTree":{"frame":{"id":"root","loaderId":format!("loader-{generation}"),"url":url}}})
                         }
+                        "Page.createIsolatedWorld" => {
+                            assert_eq!(cmd["params"]["worldName"], "agent-browser-dom");
+                            json!({"executionContextId":1})
+                        }
                         "DOM.getDocument" => {
                             json!({"root":{"nodeId":1,"backendNodeId":100,"nodeType":9,"nodeName":"#document","documentURL":url,"children":[{"nodeId":2,"backendNodeId":7,"nodeType":1,"nodeName":"INPUT","localName":"input","attributes":["type","password","name","Passwd","autocomplete","current-password"]}]}})
                         }

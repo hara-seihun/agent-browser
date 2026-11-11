@@ -14642,7 +14642,7 @@ mod tests {
             response["data"]["result"]["data"]["closed"], true,
             "{response}"
         );
-        assert_eq!(response["data"]["result"]["data"]["saveStatus"], "timeout");
+        assert_eq!(response["data"]["result"]["data"]["saveStatus"], "not_configured");
         assert!(state.pending_confirmation.is_none());
         assert!(state.browser.is_none());
         fixture.server.await.unwrap();
@@ -15533,7 +15533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unreadable_inventory_keeps_content_free_commands_and_guards_the_rest() {
-        let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
+        let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
         fixture.frame_inventory.lock().unwrap().documents.insert(
             "synthetic-top".into(),
             json!({"root":{"nodeName":"#document","children":protected_inventory_controls()}}),
@@ -15554,13 +15554,15 @@ mod tests {
             .unwrap()
             .unreadable
             .insert("synthetic-top".into());
+        while fixture.commands.try_recv().is_ok() {}
         let resp = execute_command(&json!({"id":"u", "action":"url"}), &mut state).await;
         assert_eq!(resp["success"], true, "{resp}");
-        assert_eq!(resp["data"]["guard"]["observation"]["status"], "incomplete");
-        assert!(resp["data"]["guard"]["observation"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("pierced DOM unavailable"));
+        assert_eq!(resp["data"]["url"], "about:blank");
+        // The content-free URL route reads target metadata, not the unreadable renderer.
+        while let Ok(command) = fixture.commands.try_recv() {
+            let method = command["method"].as_str().unwrap();
+            assert!(!method.starts_with("Runtime.") && !method.starts_with("DOM.") && !method.starts_with("Input."));
+        }
         for command in [
             json!({"id":"e", "action":"evaluate", "script":"1"}),
             json!({"id":"g", "action":"gettext", "selector":"input"}),
@@ -15943,7 +15945,7 @@ mod tests {
                     !method.starts_with("Input.")
                         && !matches!(
                             method,
-                            "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                            "Page.navigate" | "Target.attachToTarget"
                         )
                 );
                 if method == "DOM.getDocument" {
@@ -16544,7 +16546,7 @@ mod tests {
                 !method.starts_with("Input.")
                     && !matches!(
                         method,
-                        "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                        "Page.navigate" | "Target.attachToTarget"
                     )
             );
             *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
@@ -17011,7 +17013,7 @@ mod tests {
                     !method.starts_with("Input.")
                         && !matches!(
                             method,
-                            "Page.navigate" | "Page.createIsolatedWorld" | "Target.attachToTarget"
+                            "Page.navigate" | "Target.attachToTarget"
                         )
                 );
                 *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
