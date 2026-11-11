@@ -3,7 +3,7 @@ function() {
     // Framed targets retain CDP box-model conversion, including cross-origin
     // same-process frame offsets. In the top document DOM and input coordinates
     // are both viewport CSS pixels, so no remote anchor/conversion is needed.
-    const enabled = () => (CLICK_GUARD).call(this);
+    const enabled = () => (CLICK_GUARD)(this);
     let error = enabled();
     if (error) return {error};
     if (!win || win !== win.top) return {framed:true};

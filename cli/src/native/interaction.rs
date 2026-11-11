@@ -170,7 +170,7 @@ pub(crate) async fn require_click_enabled(
 ) -> Result<(), String> {
     let result=client.send_command("Runtime.callFunctionOn",Some(serde_json::json!({
         "objectId":object,
-        "functionDeclaration":format!("function() {{ return ({}).call(this) || 'enabled'; }}", include_str!("click_guard.js")),
+        "functionDeclaration":format!("function() {{ return ({})(this) || 'enabled'; }}", include_str!("click_guard.js")),
         "returnByValue":true
     })),Some(session)).await.map_err(|_| "click_state_unavailable: click enabled state unavailable before dispatch")?;
     if result.get("exceptionDetails").is_some() {

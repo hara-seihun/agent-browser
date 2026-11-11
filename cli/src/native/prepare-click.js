@@ -1,6 +1,6 @@
 function(expected, current) {
     const target = this;
-    const state = (CLICK_GUARD).call(target, current);
+    const state = (CLICK_GUARD)(target, current);
     if (state) return state;
     const doc = target.ownerDocument, view = doc.defaultView;
     // Point resolution owns scrolling, frame coordinates, clipping and label
