@@ -9,7 +9,7 @@ use tokio::time::Instant;
 const INVALID: &str = "auth_export_invalid_request: explicit CSS selector, target, frame and absolute output are required";
 const BINDING: &str =
     "auth_export_binding_changed: pinned target, frame, document or field changed; not replayed";
-const FIELD: &str = "auth_export_field_unavailable: selector must identify one visible input, textarea or text-only element";
+const FIELD: &str = "auth_export_field_unavailable: selector must identify one visible input, textarea or text container";
 const PAGE: &str = "auth_export_page_error: private read failed; no value returned";
 
 /// Reconstruct setup failures as metadata, never preserve foreign error text.
@@ -390,14 +390,14 @@ const PIN_FIELD: &str = r#"function(selector,index,container) {
     const d=this.ownerDocument;
     const matches=d.querySelectorAll(selector);
     if (!this.isConnected || (index===null ? matches.length!==1 || matches[0]!==this : matches[index]!==this) || !this.getClientRects().length) return null;
-    if (!['INPUT','TEXTAREA'].includes(this.tagName) && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return null;
+
     return d;
 }"#;
 const READ_FIELD: &str = r#"function(document, selector,index,container) {
     const valid=()=>{const m=document.querySelectorAll(selector); return this.isConnected && this.ownerDocument===document && this.getClientRects().length && (index===null ? m.length===1 && m[0]===this : m[index]===this)};
     if (!valid()) return {status:'changed'};
     const control=['INPUT','TEXTAREA'].includes(this.tagName);
-    if (!control && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return {status:'unavailable'};
+
     const value=control ? this.value : this.textContent;
     if (typeof value!=='string' || value.length===0) return {status:'unavailable'};
     if (!valid()) return {status:'changed',value};
