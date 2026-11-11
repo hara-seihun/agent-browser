@@ -2912,14 +2912,14 @@ Stripe sk_/rk_ test/live keys and whsec_ secrets in names, text and DOM
 Private export:
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]
-  One unique visible input/textarea value (readonly allowed) or text-only element.
+  One unique visible input/textarea value (readonly allowed) or text container.
   Pins live target/frame/document/field; existing browser required, no navigation.
   Preserves selected bytes; layout-only whitespace never becomes a global secret.
   Linux nonroot daemon only. No symlink path components; output parent must be
   owned by the daemon UID with exact0700 permissions. New file is exclusive0600.
   Receipt contains only path and byteCount; never prints or hashes the value.
   Stop captures first. Values are registered for scoped and global redaction.
-  Text-only field names/descendants protected before snapshot text aggregation;
+  Text-container names/descendants protected before snapshot text aggregation;
   short values stay scoped and ordinary input labels remain unchanged.
   Same total deadline/IPC margin as private fill; no overwrite or replay.
   Lost response/commit uncertainty: inspect path existence without reading value.

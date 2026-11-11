@@ -1541,7 +1541,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_EXPORT,
             "Private field export",
-            "Privately export one unique visible input, textarea or text-only field from the exact active target/frame/document to a new own-UID 0600 file. Linux nonroot daemon only; absolute nonsymlink path with own-UID 0700 parent required. Receipt path and byteCount only. Stop captures first; never overwrites or retries.",
+            "Privately export one unique visible input, textarea or text container from the exact active target/frame/document to a new own-UID 0600 file. Linux nonroot daemon only; absolute nonsymlink path with own-UID 0700 parent required. Receipt path and byteCount only. Stop captures first; never overwrites or retries.",
             json!({
                 "selector":{"type":"string","minLength":1},
                 "target":{"type":"string","minLength":1},
