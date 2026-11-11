@@ -77,17 +77,18 @@ async fn click_once(
     // Recompute only pre-dispatch geometry, retaining the same pinned object.
     // Point resolution may itself scroll, and remote page layout may settle
     // between CDP reads. Never retry transport errors or any pointer input.
+    let preparation = include_str!("prepare-click.js").replace("CLICK_GUARD", include_str!("click_guard.js"));
     for _ in 0..4 {
-    require_click_enabled(client, &object_session, &object).await?;
     let prepared = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
+        "objectId": object, "functionDeclaration": &preparation,
         "returnByValue": true, "awaitPromise": true
     })), Some(&object_session)).await?;
     if prepared.get("exceptionDetails").is_some() {
         return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
     }
     match prepared["result"]["value"].as_str() {
-        Some("detached") => return Err("click_target_changed: pinned click target detached before dispatch".into()),
+        Some("detached" | "changed") => return Err("click_target_changed: pinned click target detached before dispatch".into()),
+        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
         Some(_) => return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into()),
         None if prepared["result"]["value"].is_array() => {},
         None => return Err("click_state_unavailable: click geometry unavailable before dispatch".into()),
@@ -123,32 +124,20 @@ async fn click_once(
     if current_session != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId":object, "functionDeclaration":r#"function(current) {
-            if (!this.isConnected || this !== current) return 'changed';
-            for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
-                if (node.matches(':disabled') || (node.getAttribute('aria-disabled') || '').trim().toLowerCase()==='true') return 'disabled';
-            }
-            return 'enabled';
-        }"#,
-        "arguments":[{"objectId":current}], "returnByValue":true
-    })), Some(&object_session)).await.map_err(|_| "click_state_unavailable: click identity unavailable before dispatch")?;
-    if same.get("exceptionDetails").is_some() {
-        return Err("click_state_unavailable: click identity unavailable before dispatch".into());
-    }
-    match same["result"]["value"].as_str() {
-        Some("enabled") => {},
-        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
-        _ => return Err("click_target_changed: pinned click element changed before dispatch".into()),
-    }
     let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
-        "arguments": [{"value": prepared["result"]["value"]}], "returnByValue": true
+        "objectId": object, "functionDeclaration": &preparation,
+        "arguments": [{"value": prepared["result"]["value"]}, {"objectId": current}], "returnByValue": true
     })), Some(&object_session)).await?;
     if stable.get("exceptionDetails").is_some() {
         return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
     }
-    if stable["result"]["value"] != true { continue; }
+    let valid = match stable["result"]["value"].as_str() {
+        Some("changed") => return Err("click_target_changed: pinned click element changed before dispatch".into()),
+        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
+        Some(_) => return Err("click_state_unavailable: final click validation unavailable before dispatch".into()),
+        None => stable["result"]["value"].as_bool().ok_or("click_state_unavailable: final click validation unavailable before dispatch")?,
+    };
+    if !valid { continue; }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
@@ -181,13 +170,7 @@ pub(crate) async fn require_click_enabled(
 ) -> Result<(), String> {
     let result=client.send_command("Runtime.callFunctionOn",Some(serde_json::json!({
         "objectId":object,
-        "functionDeclaration":r#"function() {
-            if (!this.isConnected) return 'changed';
-            for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
-                if (node.matches(':disabled') || (node.getAttribute('aria-disabled') || '').trim().toLowerCase()==='true') return 'disabled';
-            }
-            return 'enabled';
-        }"#,
+        "functionDeclaration":format!("function() {{ return ({}).call(this) || 'enabled'; }}", include_str!("click_guard.js")),
         "returnByValue":true
     })),Some(session)).await.map_err(|_| "click_state_unavailable: click enabled state unavailable before dispatch")?;
     if result.get("exceptionDetails").is_some() {

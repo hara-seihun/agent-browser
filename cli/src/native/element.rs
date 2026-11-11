@@ -505,7 +505,8 @@ pub(super) async fn fast_click_point(
 ) -> Result<Option<(f64, f64)>, String> {
     let function = include_str!("click_point.js")
         .replace("CHECKBOX_POINT", include_str!("checkbox_point.js"))
-        .replace("BLOCKER_AT", BLOCKER_AT_JS);
+        .replace("BLOCKER_AT", BLOCKER_AT_JS)
+        .replace("CLICK_GUARD", include_str!("click_guard.js"));
     let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
         "objectId": object, "functionDeclaration": function, "returnByValue": true,
     })), Some(session)).await.map_err(|_| "click_state_unavailable: click point unavailable before dispatch")?;

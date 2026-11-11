@@ -1,5 +1,8 @@
-function(expected) {
-    const target = this, doc = target.ownerDocument, view = doc.defaultView;
+function(expected, current) {
+    const target = this;
+    const state = (CLICK_GUARD).call(target, current);
+    if (state) return state;
+    const doc = target.ownerDocument, view = doc.defaultView;
     // Point resolution owns scrolling, frame coordinates, clipping and label
     // activation. Observe only: another scroll here would invalidate its point.
     const geometry = () => {
