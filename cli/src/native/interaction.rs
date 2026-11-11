@@ -14,6 +14,7 @@ use super::element::{resolve_checkbox_point, resolve_element_center, resolve_ele
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
+    pub ref_refreshed: bool,
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
 }
@@ -34,7 +35,31 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
-    let (object, object_session) = resolve_element_object_id(
+    let result = click_once(client, session_id, ref_map, selector_or_ref, button, click_count, iframe_sessions).await;
+    match result {
+        Ok(result) => Ok(result),
+        // Every click_target_changed exit is before dispatch_click. Never retry
+        // transport errors, timeouts, disabled/intercepted controls or any input.
+        Err(error) if error.starts_with("click_target_changed:") && super::element::parse_ref(selector_or_ref).is_some() => {
+            let fresh = super::element::click_ref_map(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?;
+            let mut result = click_once(client, session_id, fresh.as_ref().unwrap_or(ref_map), selector_or_ref, button, click_count, iframe_sessions).await?;
+            result.ref_refreshed = true;
+            Ok(result)
+        },
+        Err(error) => Err(error),
+    }
+}
+
+async fn click_once(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    button: &str,
+    click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ClickResult, String> {
+    let (object, object_session, ref_refreshed) = super::element::resolve_element_object_id_report(
         client,
         session_id,
         ref_map,
@@ -42,6 +67,7 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
+    let outcome: Result<ClickResult, String> = async {
     let fast = super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?;
     let (x, y, effective_session_id) = if let Some((x,y)) = fast {
         (x, y, object_session.clone())
@@ -94,7 +120,7 @@ pub async fn click(
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    dispatch_click(
+    let mut result = dispatch_click(
         client,
         &effective_session_id,
         &[effective_session_id.as_str(), session_id],
@@ -103,7 +129,13 @@ pub async fn click(
         button,
         click_count,
     )
-    .await
+    .await?;
+    result.ref_refreshed = ref_refreshed;
+    Ok(result)
+    }.await;
+    outcome.map_err(|error| if ref_refreshed && error.starts_with("click_target_changed:") {
+        "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no pointer events dispatched".into()
+    } else { error })
 }
 
 /// Known disabled controls refuse before any pointer event. This is not a claim
@@ -1181,6 +1213,7 @@ async fn dispatch_click(
     {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
+            ref_refreshed: false,
             dialog_opened: true,
             pending_release: None,
         });
@@ -1215,6 +1248,7 @@ async fn dispatch_click(
         // release will never arrive on its own. Hand the caller what it needs
         // to release once the dialog is resolved.
         return Ok(ClickResult {
+            ref_refreshed: false,
             dialog_opened: true,
             pending_release: Some(PendingRelease {
                 session_id: session_id.to_string(),
@@ -1245,6 +1279,7 @@ async fn dispatch_click(
     )
     .await?;
     Ok(ClickResult {
+        ref_refreshed: false,
         dialog_opened,
         pending_release: None,
     })

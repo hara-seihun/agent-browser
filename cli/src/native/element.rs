@@ -709,6 +709,23 @@ async fn is_connected(client: &CdpClient, session_id: &str, object_id: &str) -> 
         .is_ok_and(|r| r["result"]["value"] == true)
 }
 
+/// Refresh only a known ref in its original frame, before any click dispatch.
+/// A vanished role/name or duplicate match is a refusal, never an ordinal guess.
+pub(super) async fn click_ref_map(
+    client: &CdpClient, session: &str, refs: &RefMap, selector: &str,
+    frames: &HashMap<String, String>,
+) -> Result<Option<RefMap>, String> {
+    let Some(id) = parse_ref(selector) else { return Ok(None) };
+    let entry = refs.get(&id).ok_or_else(|| format!("Unknown ref: {}", id))?;
+    if entry.name.is_empty() || entry.selector.is_some() {
+        return Err("ref_refresh_ambiguous: this detached ref has no unique accessibility name; run snapshot -i and choose a fresh ref; no pointer events dispatched".into());
+    }
+    let node = find_node_id_by_role_name(client, session, &entry.role, &entry.name, None, entry.frame_id.as_deref(), frames).await?;
+    let mut fresh = refs.clone();
+    fresh.map.get_mut(&id).unwrap().backend_node_id = Some(node);
+    Ok(Some(fresh))
+}
+
 pub async fn resolve_element_object_id(
     client: &CdpClient,
     session_id: &str,
@@ -716,6 +733,17 @@ pub async fn resolve_element_object_id(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
+    let (object, session, _) = resolve_element_object_id_report(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?;
+    Ok((object, session))
+}
+
+pub(super) async fn resolve_element_object_id_report(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String, bool), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
@@ -741,7 +769,7 @@ pub async fn resolve_element_object_id(
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
                     if is_connected(client, effective_session_id, &object_id).await {
-                        return Ok((object_id, effective_session_id.to_string()));
+                        return Ok((object_id, effective_session_id.to_string(), false));
                     }
                 }
             }
@@ -775,7 +803,7 @@ pub async fn resolve_element_object_id(
             .object
             .object_id
             .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok((object_id, effective_session_id.to_string()));
+        return Ok((object_id, effective_session_id.to_string(), true));
     }
 
     // Selector fallback (CSS or XPath): honor an active `frame <sel>` selection.
@@ -792,12 +820,12 @@ pub async fn resolve_element_object_id(
                 .result
                 .object_id
                 .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-            return Ok((object_id, frame_session.clone()));
+            return Ok((object_id, frame_session.clone(), false));
         }
         let object_id =
             resolve_object_in_same_process_frame(client, session_id, &frame_id, selector_or_ref)
                 .await?;
-        return Ok((object_id, session_id.to_string()));
+        return Ok((object_id, session_id.to_string(), false));
     }
 
     let js = build_find_element_js(selector_or_ref);
@@ -812,7 +840,7 @@ pub async fn resolve_element_object_id(
         .result
         .object_id
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
-    Ok((object_id, session_id.to_string()))
+    Ok((object_id, session_id.to_string(), false))
 }
 
 /// Determine which CDP session and parameters to use for an AX tree query.
@@ -871,32 +899,15 @@ async fn find_node_id_by_role_name(
         )
         .await?;
 
-    let nth_index = nth.unwrap_or(0);
-    let mut match_count: usize = 0;
-
-    for node in &ax_tree.nodes {
-        if node.ignored.unwrap_or(false) {
-            continue;
-        }
-        let node_role = extract_ax_string(&node.role);
-        let node_name = extract_ax_string(&node.name);
-        if node_role == role && node_name == name {
-            if match_count == nth_index {
-                return node.backend_d_o_m_node_id.ok_or_else(|| {
-                    format!(
-                        "AX node has no backendDOMNodeId for role={} name={}",
-                        role, name
-                    )
-                });
-            }
-            match_count += 1;
-        }
+    let _ = nth; // An ordinal is not stable identity after DOM replacement.
+    let matches: Vec<_> = ax_tree.nodes.iter().filter(|node|
+        !node.ignored.unwrap_or(false) && extract_ax_string(&node.role) == role && extract_ax_string(&node.name) == name
+    ).collect();
+    match matches.as_slice() {
+        [node] => node.backend_d_o_m_node_id.ok_or_else(|| "ref_refresh_unavailable: matching element has no backend node; run snapshot -i; no pointer events dispatched".into()),
+        [] => Err("ref_refresh_missing: the old role/name is absent in a fresh accessibility snapshot of its original frame; run snapshot -i and choose a new ref; no pointer events dispatched".into()),
+        _ => Err("ref_refresh_ambiguous: multiple elements now have the old role/name; run snapshot -i and choose a specific ref; no pointer events dispatched".into()),
     }
-
-    Err(format!(
-        "Could not locate element with role={} name={}",
-        role, name
-    ))
 }
 
 pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {

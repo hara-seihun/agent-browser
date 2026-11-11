@@ -194,6 +194,12 @@ fn active_page_index_after_add(
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
+    if error.starts_with("SENSITIVE_OUTPUT_UNSUPPORTED") {
+        return format!("{error}. This page has protected controls or private text, so arbitrary evaluation, raw logs and unprotected reads are unavailable. Use snapshot -i or get text; for selector metadata use get attr @REF id|name|type|autocomplete. Fill secrets with auth fill --credential-provider proton-pass --item TITLE --field FIELD --selector CSS after selecting the intended tab/frame. If snapshot itself is incomplete, select frame main and observe again; do not bypass redaction.");
+    }
+    if error.starts_with("Unknown ref:") {
+        return format!("{error}. This ref has no retained role/name identity, so it cannot be safely recovered. Run snapshot -i in this tab/frame and use its new @ref; nothing was clicked.");
+    }
     if error.split_once(": ").is_some_and(|(code, _)| {
         code.starts_with(|ch: char| ch.is_ascii_alphabetic())
             && code

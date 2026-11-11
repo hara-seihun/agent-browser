@@ -3933,6 +3933,9 @@ async fn execute_command_inner(
         Ok(data) => success_response(&id, data),
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
+    if resp["data"]["refRefreshed"] == true {
+        resp["warning"] = json!("The stale or detached ref was re-resolved once against a fresh accessibility snapshot by its unique role and name in the original frame, before pointer dispatch. No dispatched click was repeated.");
+    }
     attach_tab_gone_data(&mut resp, state);
 
     // A failed binding write is retried on the next command, but a pinned
@@ -7293,9 +7296,9 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        return Ok(json!({ "clicked": selector, "dialogOpened": true, "refRefreshed": result.ref_refreshed }));
     }
-    Ok(json!({ "clicked": selector }))
+    Ok(json!({ "clicked": selector, "refRefreshed": result.ref_refreshed }))
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7316,9 +7319,9 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
-        return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+        return Ok(json!({ "clicked": selector, "dialogOpened": true, "refRefreshed": result.ref_refreshed }));
     }
-    Ok(json!({ "clicked": selector }))
+    Ok(json!({ "clicked": selector, "refRefreshed": result.ref_refreshed }))
 }
 
 async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -11067,9 +11070,9 @@ async fn execute_subaction(
             .await?;
             if result.dialog_opened {
                 state.pending_pointer_release = result.pending_release;
-                return Ok(json!({ "clicked": selector, "dialogOpened": true }));
+                return Ok(json!({ "clicked": selector, "dialogOpened": true, "refRefreshed": result.ref_refreshed }));
             }
-            Ok(json!({ "clicked": selector }))
+            Ok(json!({ "clicked": selector, "refRefreshed": result.ref_refreshed }))
         }
         "fill" => {
             let value = cmd
@@ -14393,6 +14396,11 @@ fn inject_lifecycle(
 }
 
 fn error_response(id: &str, error: &str) -> Value {
+    let guidance;
+    let error = if error.starts_with("SENSITIVE_OUTPUT_UNSUPPORTED") && !error.contains("This page has protected") {
+        guidance = super::browser::to_ai_friendly_error(error);
+        guidance.as_str()
+    } else { error };
     let mut resp = json!({
         "id": id,
         "success": false,

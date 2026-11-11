@@ -795,7 +795,7 @@ where
     )
     .await
     .map_err(|_| {
-        "auth_fill_input_unavailable: CSS selector did not resolve in the selected frame"
+        "auth_fill_input_unavailable: CSS selector did not resolve in the selected frame; use snapshot -i and get attr @REF id|name|type to find the actual input CSS selector; select its iframe with frame CSS first (frame main resets it); auth fill does not accept @refs"
     })?;
     if object_session != bound.frame_session.as_deref().unwrap_or(&bound.session) {
         return Err(BINDING.into());
@@ -821,7 +821,7 @@ where
     }
     let document = probe["result"]["objectId"]
         .as_str()
-        .ok_or("auth_fill_input_unavailable: selected element is not a visible editable input")?
+        .ok_or("auth_fill_input_unavailable: selected element is not a visible editable input; select the actual input or textarea, not its custom-element wrapper; use get attr @REF id|name|type and select the owning iframe with frame CSS")?
         .to_string();
     let node = mgr
         .client
@@ -868,7 +868,11 @@ where
     }
     let value = resolve(deadline, format)
         .await
-        .map_err(|_| "auth_fill_lookup_failed: credential field could not be resolved")?;
+        .map_err(|error| if error.starts_with("credential_field_metadata:") {
+            format!("auth_fill_lookup_failed: {}", error)
+        } else {
+            "auth_fill_lookup_failed: credential field could not be resolved; check the configured --credential-provider, exact --item title and --field name (email and username are distinct)".into()
+        })?;
     if value.is_empty() {
         return Err("auth_fill_lookup_failed: credential field is empty".into());
     }
