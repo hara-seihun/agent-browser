@@ -3504,14 +3504,19 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["click", "move", "down", "up", "wheel"];
 
     match rest.first().copied() {
-        // A selector/ref click retains normal hit-testing and all click guards.
-        // Coordinate clicks are deliberately not inferred from numeric arguments.
         Some("click") => {
+            if let (Some(x), Some(y)) = (rest.get(1).and_then(|s| s.parse::<f64>().ok()), rest.get(2).and_then(|s| s.parse::<f64>().ok())) {
+                let button = rest.get(3).copied().unwrap_or("left");
+                if rest.len() > 4 || !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || !["left", "right", "middle"].contains(&button) {
+                    return Err(ParseError::MissingArguments { context: "mouse click".into(), usage: "mouse click <nonnegative-x> <nonnegative-y> [left|right|middle]" });
+                }
+                return Ok(json!({"id":id,"action":"click","x":x,"y":y,"button":button}));
+            }
             let selector = rest.get(1).ok_or(ParseError::MissingArguments {
                 context: "mouse click".to_string(), usage: "mouse click <selector-or-ref> [left|right|middle]",
             })?;
             if rest.get(2).is_some_and(|b| !["left", "right", "middle"].contains(b)) {
-                return Err(ParseError::MissingArguments { context: "mouse click".to_string(), usage: "mouse click <selector-or-ref> [left|right|middle]; use mouse move <x> <y>, mouse down, mouse up for coordinates" });
+                return Err(ParseError::MissingArguments { context: "mouse click".to_string(), usage: "mouse click <selector-or-ref> [left|right|middle] or mouse click <x> <y> [left|right|middle]" });
             }
             Ok(json!({"id":id,"action":"click","selector":selector,"button":rest.get(2).unwrap_or(&"left")}))
         }
@@ -7204,7 +7209,9 @@ mod tests {
             let cmd = parse_command(&args(input), &default_flags()).unwrap();
             assert_eq!(cmd["action"], action);
         }
-        assert!(parse_command(&args("mouse click 20 30"), &default_flags()).is_err());
+        let point = parse_command(&args("mouse click 20 30"), &default_flags()).unwrap();
+        assert_eq!(point["x"], 20.0);
+        assert_eq!(point["y"], 30.0);
     }
 
 }

@@ -26,6 +26,12 @@ pub struct PendingRelease {
     pub button: String,
 }
 
+/// Explicit viewport coordinates use the same single-dispatch gesture and
+/// dialog-aware release as selector clicks; there is no coordinate retry.
+pub async fn click_coordinates(client: &CdpClient, session: &str, x: f64, y: f64, button: &str) -> Result<ClickResult, String> {
+    dispatch_click(client, session, &[session], x, y, button, 1).await
+}
+
 pub async fn click(
     client: &CdpClient,
     session_id: &str,

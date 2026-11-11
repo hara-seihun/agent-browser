@@ -7190,6 +7190,17 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if cmd.get("selector").is_none() {
+        let x = cmd.get("x").and_then(Value::as_f64).filter(|n| n.is_finite() && *n >= 0.0).ok_or("mouse_click_invalid: pass nonnegative viewport x and y coordinates")?;
+        let y = cmd.get("y").and_then(Value::as_f64).filter(|n| n.is_finite() && *n >= 0.0).ok_or("mouse_click_invalid: pass nonnegative viewport x and y coordinates")?;
+        let button = cmd.get("button").and_then(Value::as_str).unwrap_or("left");
+        if !["left", "right", "middle"].contains(&button) { return Err("mouse_click_invalid: button must be left, right or middle".into()); }
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let session = mgr.active_session_id()?.to_string();
+        let result = interaction::click_coordinates(&mgr.client, &session, x, y, button).await?;
+        if result.dialog_opened { state.pending_pointer_release = result.pending_release; }
+        return Ok(json!({"clicked":{"x":x,"y":y},"dialogOpened":result.dialog_opened}));
+    }
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
