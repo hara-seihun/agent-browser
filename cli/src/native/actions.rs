@@ -3933,6 +3933,9 @@ async fn execute_command_inner(
         Ok(data) => success_response(&id, data),
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
+    if resp["data"]["inputRebound"] == true {
+        resp["warning"] = json!("The selector's first match was not editable. Before private lookup or input, the sole matching editable control in the same document was pinned instead. No dispatched input was repeated.");
+    }
     if resp["data"]["refRefreshed"] == true {
         resp["warning"] = json!("The stale or detached ref was re-resolved once against a fresh accessibility snapshot by its unique role and name in the original frame, before pointer dispatch. No dispatched click was repeated.");
     }

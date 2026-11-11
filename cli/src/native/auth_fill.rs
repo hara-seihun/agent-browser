@@ -786,7 +786,7 @@ where
     });
     let mgr = state.browser.as_ref().ok_or(BINDING)?;
     // An empty RefMap makes selector lookup incapable of following a stale ref.
-    let (object, object_session) = resolve_element_object_id(
+    let (mut object, object_session) = resolve_element_object_id(
         &mgr.client,
         &bound.session,
         &RefMap::new(),
@@ -810,7 +810,7 @@ where
             return Err(BINDING.into());
         }
     }
-    let probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
+    let mut probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
         "objectId": object,
         "functionDeclaration": if work_password { WORK_PASSWORD_PROBE } else { FILL_PROBE },
         "arguments": [{"value": req.field}],
@@ -818,6 +818,34 @@ where
     })), Some(&object_session)).await.map_err(|_| PAGE)?;
     if probe.get("exceptionDetails").is_some() {
         return Err(PAGE.into());
+    }
+    let mut input_rebound = false;
+    // The ordinary CSS fast path is unchanged. Before looking up any secret,
+    // recover the common broad-selector trap: hidden/readonly/type=submit
+    // inputs can precede the sole editable input. Never enter another frame,
+    // choose between editable controls, or repeat a dispatched private input.
+    if !work_password && probe["result"]["objectId"].as_str().is_none() {
+        let replacement = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
+            "objectId": object,
+            "functionDeclaration": UNIQUE_EDITABLE_MATCH.replace("EDITABLE_PROBE", FILL_PROBE),
+            "arguments": [{"value": req.selector}, {"value": req.field}],
+            "returnByValue": false
+        })), Some(&object_session)).await.map_err(|_| PAGE)?;
+        if replacement.get("exceptionDetails").is_some() { return Err(PAGE.into()); }
+        if let Some(candidates) = replacement["result"]["value"].as_str() {
+            return Err(format!("auth_fill_input_unavailable: the selector's first match is not editable, and multiple editable matches remain in this document. Choose one exact CSS selector from these structural candidates (no field values): {}; snapshot -i and get attr @REF id|name|type can identify the intended field", candidates));
+        }
+        if replacement["result"]["subtype"] == "node" {
+            if let Some(candidate) = replacement["result"]["objectId"].as_str() {
+                object = candidate.to_string();
+                probe = mgr.client.send_command("Runtime.callFunctionOn", Some(json!({
+                    "objectId": object, "functionDeclaration": FILL_PROBE,
+                    "arguments": [{"value": req.field}], "returnByValue": false
+                })), Some(&object_session)).await.map_err(|_| PAGE)?;
+                if probe.get("exceptionDetails").is_some() { return Err(PAGE.into()); }
+                input_rebound = true;
+            }
+        }
     }
     let document = probe["result"]["objectId"]
         .as_str()
@@ -1029,7 +1057,7 @@ where
     } else if filled["result"]["value"]["status"].as_str() == Some("filled") {
         return Err(PAGE.into());
     }
-    match filled["result"]["value"]["status"].as_str() {
+    let outcome = match filled["result"]["value"]["status"].as_str() {
         Some("submitted") if work_password => Ok(
             json!({"submitted":true,"authentication":"not-established","target":req.target,"frame":req.frame,"field":req.field}),
         ),
@@ -1057,7 +1085,12 @@ where
             "auth_fill_not_retained: input did not retain the private value; not replayed".into(),
         ),
         _ => Err(PAGE.into()),
-    }
+    };
+    outcome.map(|mut metadata| {
+        if input_rebound { metadata["inputRebound"] = json!(true); }
+        metadata
+    })
+
 }
 
 const SEGMENT_GROUP: &str = r#"function(count, field) {
@@ -1145,6 +1178,35 @@ const FILL_PROBE: &str = r#"function(field) {
         ['text','password','email','tel','url','search','number','date','month'].includes(this.type));
     if (!text && !(this.tagName === 'SELECT' && !this.multiple && field === 'expiration_date')) return null;
     return this.ownerDocument;
+}"#;
+
+// This read-only fallback uses the exact original FILL_PROBE predicate. It
+// returns a DOM handle only for one eligible match, or structural selectors
+// (never names, labels, text, values or selector attributes) for ambiguity.
+const UNIQUE_EDITABLE_MATCH: &str = r#"function(selector,field) {
+    if (!this.isConnected) return null;
+    const doc = this.ownerDocument, probe = EDITABLE_PROBE;
+    const matches = [], seen = new Set();
+    const visit = root => {
+        for (const el of root.querySelectorAll(selector)) {
+            if (!seen.has(el) && probe.call(el,field) === doc) { seen.add(el); matches.push(el); }
+        }
+        for (const el of root.querySelectorAll('*')) if (el.shadowRoot) visit(el.shadowRoot);
+    };
+    visit(doc);
+    if (matches.length === 1) return matches[0];
+    if (matches.length === 0) return null;
+    const path = el => {
+        const parts = [];
+        for (let node=el; node; node=node.parentElement) {
+            const siblings = Array.from(node.parentNode?.children || []).filter(other => other.localName === node.localName && other.namespaceURI === node.namespaceURI);
+            parts.unshift(CSS.escape(node.localName) + ':nth-of-type(' + (siblings.indexOf(node)+1) + ')');
+        }
+        return parts.join(' > ');
+    };
+    return JSON.stringify({count:matches.length,candidates:matches.slice(0,8).map(el => ({
+        selector:path(el), scope:el.getRootNode() === doc ? 'document' : 'open shadow root; identify its field with a fresh snapshot'
+    })),remaining:Math.max(0,matches.length-8)});
 }"#;
 
 /// Which `EXPIRY_FORMATS` entry an expiry control wants, from its own metadata only
