@@ -8271,6 +8271,16 @@ async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
     Ok(state.event_tracker.get_errors_json())
 }
 
+fn effective_browser_launch(state: &DaemonState) -> Value {
+    let manager = state.browser.as_ref();
+    let connected = manager.is_some() || state.webdriver_backend.is_some();
+    let launched = manager.is_some_and(|mgr| !mgr.is_cdp_connection());
+    let connection = if manager.is_some_and(|mgr| mgr.is_cdp_connection()) { "cdp" }
+        else if launched { "local" } else if state.webdriver_backend.is_some() { "webdriver" } else { "none" };
+    json!({"browserConnected":connected,"browserLaunched":launched,"connectionType":connection,
+        "engine":state.engine,"launchHash":state.launch_hash})
+}
+
 /// Recorded daemon metadata only; never probe CDP or advance restore state.
 /// Global secret fragments are retired in memory without touching control guards.
 fn session_info(state: &mut DaemonState) -> Value {
@@ -8282,6 +8292,7 @@ fn session_info(state: &mut DaemonState) -> Value {
         }
         retained += observation.secret_count();
     }
+    let effective = effective_browser_launch(state);
     json!({
         "sensitiveSecretMaintenance": {
             "minimumCharacters": super::sensitive::MIN_SECRET_CHARS,
@@ -8293,16 +8304,14 @@ fn session_info(state: &mut DaemonState) -> Value {
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
         "daemonOwner": match env::var("AGENT_BROWSER_SERVICE_UNIT") { Ok(unit) => json!({"kind":"systemd-user-service", "unit":unit}), Err(_) => json!({"kind":"process-session"}) },
-        "browserLaunched": state.browser.is_some(),
+        "browserConnected": effective["browserConnected"],
+        "browserLaunched": effective["browserLaunched"],
+        "connectionType": effective["connectionType"],
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,
         "launchHash": state.launch_hash,
         "compatibilityStatus": "current",
-        "effectiveLaunch": {
-            "browserLaunched": state.browser.is_some(),
-            "engine": state.engine,
-            "launchHash": state.launch_hash,
-        },
+        "effectiveLaunch": effective,
         "restoreKey": state.session_name,
         "restoreStatus": state.restore_status,
         "restoreStatusDetail": state.restore_status_detail,
@@ -14397,11 +14406,7 @@ fn inject_lifecycle(
             "restartedBackground": false,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
-            "effectiveLaunch": {
-                "browserLaunched": state.browser.is_some(),
-                "engine": state.engine,
-                "launchHash": state.launch_hash,
-            }
+            "effectiveLaunch": effective_browser_launch(state)
         }),
     );
 }
