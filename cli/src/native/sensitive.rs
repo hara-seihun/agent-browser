@@ -959,7 +959,10 @@ impl Observation {
             if let Some((secret, marker)) = self
                 .secrets
                 .iter()
-                .find(|(s, _)| useful_secret(s) && text[start..].starts_with(s))
+                // Most positions cannot match a remembered value. Test the cheap
+                // byte prefix first, rather than trimming/counting every secret
+                // at every character of every AX field and assembled subtree.
+                .find(|(s, _)| text[start..].starts_with(s) && useful_secret(s))
             {
                 out.push_str(marker);
                 start += secret.len();
