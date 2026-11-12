@@ -10866,6 +10866,26 @@ console.log('cross-frame-log');</script></body></html>"#
     (port, handle)
 }
 
+/// Text waits must use the selected document for both same-process and OOPIF frames.
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_text_obeys_selected_frame() {
+    let (port, server) = start_frame_eval_server().await;
+    let mut state = DaemonState::new();
+    assert_success(&execute_command(&json!({"id":"launch", "action":"launch", "headless":true}), &mut state).await);
+    assert_success(&execute_command(&json!({"id":"nav", "action":"navigate", "url":format!("http://localhost:{port}/top")}), &mut state).await);
+    for (selector, expected) in [("#same", "Same"), ("#cross", "Card probe")] {
+        assert_success(&execute_command(&json!({"id":"frame", "action":"frame", "selector":selector}), &mut state).await);
+        assert_success(&execute_command(&json!({"id":"wait", "action":"wait", "text":expected, "timeout":2000}), &mut state).await);
+        let absent = execute_command(&json!({"id":"absent", "action":"wait", "text":"Top", "timeout":200}), &mut state).await;
+        assert_eq!(absent["success"], json!(false), "top-frame text must not satisfy a frame wait: {absent}");
+    }
+    assert_success(&execute_command(&json!({"id":"main", "action":"mainframe"}), &mut state).await);
+    assert_success(&execute_command(&json!({"id":"top", "action":"wait", "text":"Top", "timeout":2000}), &mut state).await);
+    let _ = execute_command(&json!({"id":"close", "action":"close"}), &mut state).await;
+    server.abort();
+}
+
 /// `frame <sel>` used to set the active frame while `eval` kept running in the
 /// top document, so a script aimed at an embedded app silently read the host
 /// page instead. Both frame kinds are covered because they take different code

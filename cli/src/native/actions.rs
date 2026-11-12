@@ -7605,7 +7605,17 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let timeout_ms = state.timeout_ms(cmd);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        match state.active_frame_id.as_deref() {
+            Some(frame_id) => match state.iframe_sessions.get(frame_id) {
+                Some(frame_session) => wait_for_text(&mgr.client, frame_session, text, timeout_ms).await?,
+                None => {
+                    let text = serde_json::to_string(text).map_err(|e| e.to_string())?;
+                    let check = format!("(doc.body?.innerText || '').includes({text})");
+                    poll_frame_document(&mgr.client, &session_id, frame_id, &check, timeout_ms).await?;
+                }
+            },
+            None => wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?,
+        }
         return Ok(json!({ "waited": "text", "text": text }));
     }
 
@@ -8057,6 +8067,16 @@ async fn wait_for_selector_in_frame(
         ),
         _ => return Err("Invalid wait element state".into()),
     };
+    poll_frame_document(client, session_id, frame_id, &check, timeout_ms).await
+}
+
+async fn poll_frame_document(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    frame_id: &str,
+    check: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
     let function = format!("function() {{ const doc = this; return {check}; }}");
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
     loop {
