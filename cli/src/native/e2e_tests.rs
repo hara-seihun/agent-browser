@@ -2242,7 +2242,7 @@ async fn e2e_fill_controlled_temporal_inputs_deferred_rejection() {
 
 #[tokio::test]
 #[ignore]
-async fn e2e_fill_controlled_render_barrier_incomplete() {
+async fn e2e_fill_controlled_render_barrier_obeys_command_deadline() {
     let mut state = DaemonState::new();
     let (url, _server) = temporal_fixture().await;
     for mode in ["missing", "delayed"] {
@@ -2268,7 +2268,7 @@ async fn e2e_fill_controlled_render_barrier_incomplete() {
             window.requestAnimationFrame = callback => {{
                 window.fillBarrier.requested++;
                 const id = ++next;
-                pending.set(id, mode === 'delayed' ? setTimeout(() => callback(performance.now()), 250) : null);
+                pending.set(id, mode === 'delayed' ? setTimeout(() => callback(performance.now()), 2000) : null);
                 return id;
             }};
             window.cancelAnimationFrame = id => {{
@@ -2283,28 +2283,32 @@ async fn e2e_fill_controlled_render_barrier_incomplete() {
             }};
         }})()"#
         );
-        let resp = execute_command(
-            &json!({"id":"control-frames", "action":"evaluate", "script":script}),
-            &mut state,
-        )
-        .await;
-        assert_success(&resp);
+        // Element handles now belong to Chrome's isolated DOM world. Patch
+        // that same fixture realm, never weaken production world isolation.
+        let mgr = state.browser.as_ref().unwrap();
+        let session = mgr.active_session_id().unwrap().to_owned();
+        let client = mgr.client.clone();
+        let controlled = client.evaluate_dom(&session, script, true).await.unwrap();
+        assert!(controlled.exception_details.is_none());
         let route = if mode == "missing" {
             "direct"
         } else {
             "semantic"
         };
-        let cmd = temporal_fill_command(&mut state, route, "date", "Start", "2030-01-01").await;
+        let mut cmd = temporal_fill_command(&mut state, route, "date", "Start", "2030-01-01").await;
+        cmd["timeout"] = json!(500);
         let resp = execute_command(&cmd, &mut state).await;
         assert_eq!(resp["success"], false, "{mode}: {resp}");
-        assert_eq!(resp["code"], "fill_render_timeout", "{mode}: {resp}");
-        assert_eq!(resp["data"]["effectDispatched"], true);
-        assert_eq!(resp["data"]["retention"], "unknown");
-        assert_evaluate(&mut state, "single-effect", r#"(() => {
-            window.restoreFillFrames();
-            return {inputEvents: window.fillEvents.filter(e => e.id === 'date' && e.kind === 'input').length,
-                    requested: window.fillBarrier.requested, cancelled: window.fillBarrier.cancelled};
-        })()"#, json!({"inputEvents":1, "requested":1, "cancelled":1})).await;
+        assert_eq!(resp["code"], "command_deadline", "{mode}: {resp}");
+        assert!(resp["error"].as_str().unwrap().contains("outcome unknown"), "{resp}");
+        assert!(resp["error"].as_str().unwrap().contains("not replayed"), "{resp}");
+        let barrier = client.evaluate_dom(&session,
+            "(() => { const requested = window.fillBarrier.requested; window.restoreFillFrames(); return requested; })()".into(),
+            true).await.unwrap();
+        assert_eq!(barrier.result.value, Some(json!(1)), "one barrier wait, never a replay");
+        assert_evaluate(&mut state, "single-effect",
+            "window.fillEvents.filter(e => e.id === 'date' && e.kind === 'input').length",
+            json!(1)).await;
     }
     close_current_browser(&mut state).await.unwrap();
 }
@@ -8072,6 +8076,14 @@ async fn e2e_click_opening_popup_follows_it() {
     let popup_url = format!("{}/popup", base_url);
     let mut followed = false;
     for attempt in 0..20 {
+        // URL is intentionally renderer-independent metadata and defers page
+        // setup. A content observation reconciles the session's own popup.
+        let observation = execute_command(
+            &json!({ "id": format!("snapshot-{attempt}"), "action": "snapshot" }),
+            &mut state,
+        ).await;
+        assert_success(&observation);
+        reported |= get_data(&observation).get("activeTab").is_some();
         let resp = execute_command(
             &json!({ "id": format!("url-{attempt}"), "action": "url" }),
             &mut state,
