@@ -744,9 +744,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "keyboard" => {
             let sub = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "keyboard".to_string(),
-                usage: "keyboard <type|inserttext> <text>",
+                usage: "keyboard <press|type|inserttext> <key-or-text>",
             })?;
             match *sub {
+                "press" => {
+                    let key = rest.get(1).ok_or(ParseError::MissingArguments {
+                        context: "keyboard press".to_string(), usage: "keyboard press <key>",
+                    })?;
+                    Ok(json!({"id":id,"action":"press","key":key}))
+                }
                 "type" => {
                     let text: String = rest[1..].join(" ");
                     if text.is_empty() {
@@ -771,7 +777,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: &["type", "inserttext"],
+                    valid_options: &["press", "type", "inserttext"],
                 }),
             }
         }
@@ -3236,7 +3242,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             })?;
             Ok(json!({ "id": id, "action": "inputvalue", "selector": sel }))
         }
-        Some("attr") => {
+        Some("attr" | "attribute") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get attr".to_string(),
                 usage: "get attr <selector> <attribute>",
@@ -3495,9 +3501,25 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["move", "down", "up", "wheel"];
+    const VALID: &[&str] = &["click", "move", "down", "up", "wheel"];
 
     match rest.first().copied() {
+        Some("click") => {
+            if let (Some(x), Some(y)) = (rest.get(1).and_then(|s| s.parse::<f64>().ok()), rest.get(2).and_then(|s| s.parse::<f64>().ok())) {
+                let button = rest.get(3).copied().unwrap_or("left");
+                if rest.len() > 4 || !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || !["left", "right", "middle"].contains(&button) {
+                    return Err(ParseError::MissingArguments { context: "mouse click".into(), usage: "mouse click <nonnegative-x> <nonnegative-y> [left|right|middle]" });
+                }
+                return Ok(json!({"id":id,"action":"click","x":x,"y":y,"button":button}));
+            }
+            let selector = rest.get(1).ok_or(ParseError::MissingArguments {
+                context: "mouse click".to_string(), usage: "mouse click <selector-or-ref> [left|right|middle]",
+            })?;
+            if rest.get(2).is_some_and(|b| !["left", "right", "middle"].contains(b)) {
+                return Err(ParseError::MissingArguments { context: "mouse click".to_string(), usage: "mouse click <selector-or-ref> [left|right|middle] or mouse click <x> <y> [left|right|middle]" });
+            }
+            Ok(json!({"id":id,"action":"click","selector":selector,"button":rest.get(2).unwrap_or(&"left")}))
+        }
         Some("move") => {
             let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "mouse move".to_string(),
@@ -7181,4 +7203,15 @@ mod tests {
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
     }
+    #[test]
+    fn test_browser_fit_aliases() {
+        for (input, action) in [("get attribute @e1 name", "getattribute"), ("keyboard press Enter", "press"), ("mouse click @e1", "click")] {
+            let cmd = parse_command(&args(input), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], action);
+        }
+        let point = parse_command(&args("mouse click 20 30"), &default_flags()).unwrap();
+        assert_eq!(point["x"], 20.0);
+        assert_eq!(point["y"], 30.0);
+    }
+
 }

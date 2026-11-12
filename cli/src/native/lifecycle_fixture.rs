@@ -27,7 +27,11 @@ fn fixture_structural_selector(document: &Value, backend: i64) -> Option<String>
             if tag.starts_with('#') {
                 continue;
             }
+            if child["nodeType"].as_i64().is_some_and(|kind| kind != 1) {
+                continue;
+            }
             index += 1;
+            // Shadow DOM selectors use element positions, not tag-local counts.
             let step = format!("*:nth-child({index})");
             let selector = if path.is_empty() {
                 step
@@ -52,6 +56,7 @@ pub(crate) struct FrameInventory {
     pub frame_trees: HashMap<String, Value>,
     pub changed_frame_trees: HashMap<String, Value>,
     frame_tree_reads: HashMap<String, usize>,
+    dom_worlds: HashMap<(String, i64), String>,
     pub unreadable: HashSet<String>,
     pub hold_method: Option<String>,
     pub failed_session_methods: HashSet<(String, String)>,
@@ -146,10 +151,9 @@ impl SyntheticCdp {
                         let (response, released, delay) = {
                             let mut inventory = inventory_server.lock().unwrap();
                             let session = command["sessionId"].as_str().unwrap_or("");
-                            let root_frame = inventory
-                                .session_roots
-                                .get(session)
-                                .cloned()
+                            let root_frame = command["params"]["contextId"].as_i64()
+                                .and_then(|context| inventory.dom_worlds.get(&(session.into(), context)).cloned())
+                                .or_else(|| inventory.session_roots.get(session).cloned())
                                 .unwrap_or_else(|| "synthetic-top".into());
                             let result = match method {
                                 "Target.getTargets" => {
@@ -163,6 +167,9 @@ impl SyntheticCdp {
                                     })));
                                     json!({"targetInfos": targets})
                                 }
+                                "Target.getTargetInfo" => {
+                                    json!({"targetInfo":{"targetId":"synthetic-page","type":"page","url":"about:blank","title":"synthetic"}})
+                                }
                                 "Target.attachToTarget" => {
                                     let target = command["params"]["targetId"].as_str().unwrap();
                                     if target == "synthetic-page" {
@@ -173,7 +180,15 @@ impl SyntheticCdp {
                                         json!({"sessionId": sid})
                                     }
                                 }
-                                "Page.createIsolatedWorld" => json!({"executionContextId": 1}),
+                                "Page.createIsolatedWorld" => {
+                                    assert_eq!(command["params"]["worldName"], "agent-browser-dom");
+                                    let frame = command["params"]["frameId"].as_str().unwrap().to_string();
+                                    let context = inventory.dom_worlds.iter()
+                                        .find_map(|((sid, id), owned)| (sid == session && owned == &frame).then_some(*id))
+                                        .unwrap_or(inventory.dom_worlds.len() as i64 + 1);
+                                    inventory.dom_worlds.insert((session.into(), context), frame);
+                                    json!({"executionContextId":context})
+                                }
                                 "Page.getFrameTree" => {
                                     // Kernel can omit the OOPIF from the parent's tree
                                     // and omit parentId from the OOPIF's own root.
@@ -306,7 +321,7 @@ impl SyntheticCdp {
                                 "Runtime.evaluate"
                                     if command["params"]["expression"]
                                         .as_str()
-                                        .is_some_and(|js| js.contains("textNodes: textNodes")) =>
+                                        .is_some_and(|js| js.contains("for (const el of shadowElements(document.body))")) =>
                                 {
                                     if inventory.cursor_frames.contains(&root_frame) {
                                         match inventory.documents.get(&root_frame).and_then(
@@ -319,7 +334,7 @@ impl SyntheticCdp {
                                                 {
                                                     selector.push_str(" > missing:nth-of-type(1)");
                                                 }
-                                                json!({"result":{"type":"object","value":[{"selector":selector,"textNodes":[{"text":format!("cursor-{root_frame}"),"ancestors":[selector.clone()]}],"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
+                                                json!({"result":{"type":"object","value":[{"selector":selector,"textNodes":[{"ancestors":[selector],"text":format!("cursor-{root_frame}")}],"tagName":"div","hasCursorPointer":true,"hasOnClick":false,"hasTabIndex":false,"isEditable":false}]}})
                                             }
                                             None => {
                                                 json!({"exceptionDetails":{"text":"synthetic cursor DOM unavailable"}})
@@ -327,6 +342,15 @@ impl SyntheticCdp {
                                         }
                                     } else {
                                         json!({"result":{"type":"object","value":[]}})
+                                    }
+                                }
+                                "Runtime.evaluate" if command["params"]["returnByValue"] == false
+                                    && command["params"]["expression"].as_str().is_some_and(|js| js.contains("querySelector")) => {
+                                    let missing = command["params"]["expression"].as_str().unwrap().contains("missing:nth-of-type");
+                                    if missing {
+                                        json!({"result":{"type":"object","subtype":"null","value":null}})
+                                    } else {
+                                        json!({"result":{"type":"object","subtype":"node","objectId":format!("{session}-400")}})
                                     }
                                 }
                                 "DOM.querySelector" => json!({"nodeId":400}),

@@ -464,7 +464,26 @@ pub async fn resolve_credential_field_with_plugins(
     )
     .await
     .map_err(|_| "credential_field_lookup_failed: private lookup failed")?;
+    // Only our fixed local provider may return nonsecret vault metadata.
+    // Arbitrary plugins and their error strings remain completely suppressed.
+    if plugin.name == "proton-pass" && plugin.command == "/home/kenan/tools/agent-browser-pass-cli/main" && plugin.args.is_empty() {
+        if let Some(diagnostic) = credential_lookup_diagnostic(&response) {
+            return Err(diagnostic);
+        }
+    }
     parse_credential_field_response(&response)
+}
+
+fn credential_lookup_diagnostic(response: &serde_json::Value) -> Option<String> {
+    if response["protocol"].as_str()? != PROTOCOL_VERSION || response["success"] != true { return None; }
+    let data = response.get("lookupDiagnostic")?;
+    let titles = data["itemTitles"].as_array()?;
+    let fields = data["fields"].as_array()?;
+    if titles.len() > 8 || fields.len() > 20 { return None; }
+    let titles: Option<Vec<&str>> = titles.iter().map(|v| v.as_str().filter(|s| s.chars().count() <= 256 && !s.chars().any(char::is_control))).collect();
+    let allowed = ["username", "email", "password", "totp", "cardholder_name", "number", "verification_number", "expiration_date", "passport_number", "phone_number", "recovery_code"];
+    let fields: Option<Vec<&str>> = fields.iter().map(|v| v.as_str().filter(|s| allowed.contains(s))).collect();
+    Some(format!("credential_field_metadata: available item titles {}; populated field names {}. Pass --item with an exact title and --field with an available name; [] means none found. No field values were read into this error.", serde_json::to_string(&titles?).ok()?, serde_json::to_string(&fields?).ok()?))
 }
 
 fn parse_credential_field_response(response: &serde_json::Value) -> Result<String, String> {
@@ -1874,4 +1893,15 @@ printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"user
         assert!(err.contains("unsupported protocol"));
         assert!(!err.contains("secret-token-value"));
     }
+    #[test]
+    fn test_browser_fit_lookup_metadata_is_closed() {
+        let response = json!({"protocol":PROTOCOL_VERSION,"success":true,"lookupDiagnostic":{"itemTitles":["Fixture"],"fields":["email","password"]},"error":"secret-token-value"});
+        let message = credential_lookup_diagnostic(&response).unwrap();
+        assert!(message.contains("Fixture"));
+        assert!(message.contains("email"));
+        assert!(!message.contains("secret-token-value"));
+        let malicious = json!({"protocol":PROTOCOL_VERSION,"success":true,"lookupDiagnostic":{"itemTitles":["Fixture"],"fields":["secret-token-value"]}});
+        assert!(credential_lookup_diagnostic(&malicious).is_none());
+    }
+
 }

@@ -14,6 +14,7 @@ use super::element::{resolve_checkbox_point, resolve_element_center, resolve_ele
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
+    pub ref_refreshed: bool,
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
 }
@@ -25,6 +26,12 @@ pub struct PendingRelease {
     pub button: String,
 }
 
+/// Explicit viewport coordinates use the same single-dispatch gesture and
+/// dialog-aware release as selector clicks; there is no coordinate retry.
+pub async fn click_coordinates(client: &CdpClient, session: &str, x: f64, y: f64, button: &str) -> Result<ClickResult, String> {
+    dispatch_click(client, session, &[session], x, y, button, 1).await
+}
+
 pub async fn click(
     client: &CdpClient,
     session_id: &str,
@@ -34,7 +41,31 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
-    let (object, object_session) = resolve_element_object_id(
+    let result = click_once(client, session_id, ref_map, selector_or_ref, button, click_count, iframe_sessions).await;
+    match result {
+        Ok(result) => Ok(result),
+        // Every click_target_changed exit is before dispatch_click. Never retry
+        // transport errors, timeouts, disabled/intercepted controls or any input.
+        Err(error) if error.starts_with("click_target_changed:") && super::element::parse_ref(selector_or_ref).is_some() => {
+            let fresh = super::element::click_ref_map(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?;
+            let mut result = click_once(client, session_id, fresh.as_ref().unwrap_or(ref_map), selector_or_ref, button, click_count, iframe_sessions).await?;
+            result.ref_refreshed = true;
+            Ok(result)
+        },
+        Err(error) => Err(error),
+    }
+}
+
+async fn click_once(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    button: &str,
+    click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ClickResult, String> {
+    let (object, object_session, ref_refreshed) = super::element::resolve_click_object_id_report(
         client,
         session_id,
         ref_map,
@@ -42,73 +73,75 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
-    require_click_enabled(client, &object_session, &object).await?;
-    let prepared = client
-        .send_command(
-            "Runtime.callFunctionOn",
-            Some(serde_json::json!({
-                "objectId": object, "functionDeclaration": include_str!("prepare-click.js"),
-                "returnByValue": true, "awaitPromise": true
-            })),
-            Some(&object_session),
-        )
-        .await?;
-    if prepared.get("exceptionDetails").is_some() || !prepared["result"]["value"].is_array() {
-        return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into());
+    let outcome: Result<ClickResult, String> = async {
+    // Recompute only pre-dispatch geometry, retaining the same pinned object.
+    // Point resolution may itself scroll, and remote page layout may settle
+    // between CDP reads. Never retry transport errors or any pointer input.
+    let preparation = include_str!("prepare-click.js").replace("CLICK_GUARD", include_str!("click_guard.js"));
+    for _ in 0..4 {
+    let prepared = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+        "objectId": object, "functionDeclaration": &preparation,
+        "returnByValue": true, "awaitPromise": true
+    })), Some(&object_session)).await?;
+    if prepared.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
     }
-    let (x, y, effective_session_id) = if let Some((x, y)) = resolve_checkbox_point(
+    match prepared["result"]["value"].as_str() {
+        Some("detached" | "changed") => return Err("click_target_changed: pinned click target detached before dispatch".into()),
+        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
+        Some(_) => return Err("click_target_unstable: target did not settle before dispatch; no pointer events dispatched".into()),
+        None if prepared["result"]["value"].is_array() => {},
+        None => return Err("click_state_unavailable: click geometry unavailable before dispatch".into()),
+    }
+    let fast = super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?;
+    let (x, y, effective_session_id) = if let Some((x,y)) = fast {
+        (x, y, object_session.clone())
+    } else {
+        require_click_enabled(client, &object_session, &object).await?;
+        if let Some((x, y)) = resolve_checkbox_point(
         client, &object_session, &object, selector_or_ref,
     ).await? {
         (x, y, object_session.clone())
     } else {
         resolve_element_center(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?
+        }
     };
     if effective_session_id != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    let (current, current_session) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+    // A backend-node ref pins a Chrome node, not a selector that can start
+    // matching a replacement. Re-resolving that same immutable backend id adds
+    // two remote reads but no identity information. The final synchronous check
+    // below still requires the pinned node to be connected and enabled.
+    let pinned_ref = super::element::parse_ref(selector_or_ref)
+        .and_then(|id| ref_map.get(&id))
+        .is_some_and(|entry| entry.backend_node_id.is_some());
+    let (current, current_session) = if pinned_ref {
+        (object.clone(), object_session.clone())
+    } else {
+        resolve_element_object_id(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?
+    };
     if current_session != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    require_click_enabled(client, &current_session, &current).await?;
-    let same = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId":object, "functionDeclaration":"function(current) { return this.isConnected && this === current; }",
-        "arguments":[{"objectId":current}], "returnByValue":true
-    })), Some(&object_session)).await.map_err(|_| "click_state_unavailable: click identity unavailable before dispatch")?;
-    if same.get("exceptionDetails").is_some() || same["result"]["value"] != true {
-        return Err("click_target_changed: pinned click element changed before dispatch".into());
-    }
-    // Compare local geometry in the pinned object's own realm. Existing center
-    // resolution owns frame offsets and shadow/label-aware interception; do not
-    // replace those semantics with a second top-document hit test.
     let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId": object,
-        "functionDeclaration": r#"function(expected) {
-            if (!this.isConnected) return false;
-            const r = this.getBoundingClientRect();
-            const view = this.ownerDocument.defaultView;
-            const centerX = r.left + r.width / 2, centerY = r.top + r.height / 2;
-            return r.width > 0 && r.height > 0
-                && centerX >= 0 && centerX < view.innerWidth
-                && centerY >= 0 && centerY < view.innerHeight
-                && [r.left,r.top,r.width,r.height].every((v,i) => Number.isFinite(v) && Math.abs(v-expected[i]) < 0.25);
-        }"#,
-        "arguments": [{"value": prepared["result"]["value"]}], "returnByValue": true
+        "objectId": object, "functionDeclaration": &preparation,
+        "arguments": [{"value": prepared["result"]["value"]}, {"objectId": current}], "returnByValue": true
     })), Some(&object_session)).await?;
-    if stable.get("exceptionDetails").is_some() || stable["result"]["value"] != true {
-        return Err("click_target_changed: pinned geometry changed before dispatch; no pointer events dispatched".into());
+    if stable.get("exceptionDetails").is_some() {
+        return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
     }
+    let valid = match stable["result"]["value"].as_str() {
+        Some("changed") => return Err("click_target_changed: pinned click element changed before dispatch".into()),
+        Some("disabled") => return Err("click_disabled: target or containing control is disabled; no pointer events dispatched".into()),
+        Some(_) => return Err("click_state_unavailable: final click validation unavailable before dispatch".into()),
+        None => stable["result"]["value"].as_bool().ok_or("click_state_unavailable: final click validation unavailable before dispatch")?,
+    };
+    if !valid { continue; }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    dispatch_click(
+    let mut result = dispatch_click(
         client,
         &effective_session_id,
         &[effective_session_id.as_str(), session_id],
@@ -117,7 +150,15 @@ pub async fn click(
         button,
         click_count,
     )
-    .await
+    .await?;
+    result.ref_refreshed = ref_refreshed;
+    return Ok(result);
+    }
+    Err("click_target_unstable: pinned geometry kept changing before dispatch; no pointer events dispatched".into())
+    }.await;
+    outcome.map_err(|error| if ref_refreshed && error.starts_with("click_target_changed:") {
+        "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no pointer events dispatched".into()
+    } else { error })
 }
 
 /// Known disabled controls refuse before any pointer event. This is not a claim
@@ -129,13 +170,7 @@ pub(crate) async fn require_click_enabled(
 ) -> Result<(), String> {
     let result=client.send_command("Runtime.callFunctionOn",Some(serde_json::json!({
         "objectId":object,
-        "functionDeclaration":r#"function() {
-            if (!this.isConnected) return 'changed';
-            for (let node=this; node; node=node.parentElement || (node.getRootNode().host || null)) {
-                if (node.matches(':disabled') || (node.getAttribute('aria-disabled') || '').trim().toLowerCase()==='true') return 'disabled';
-            }
-            return 'enabled';
-        }"#,
+        "functionDeclaration":format!("function() {{ return ({})(this) || 'enabled'; }}", include_str!("click_guard.js")),
         "returnByValue":true
     })),Some(session)).await.map_err(|_| "click_state_unavailable: click enabled state unavailable before dispatch")?;
     if result.get("exceptionDetails").is_some() {
@@ -1195,6 +1230,7 @@ async fn dispatch_click(
     {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
+            ref_refreshed: false,
             dialog_opened: true,
             pending_release: None,
         });
@@ -1229,6 +1265,7 @@ async fn dispatch_click(
         // release will never arrive on its own. Hand the caller what it needs
         // to release once the dialog is resolved.
         return Ok(ClickResult {
+            ref_refreshed: false,
             dialog_opened: true,
             pending_release: Some(PendingRelease {
                 session_id: session_id.to_string(),
@@ -1259,6 +1296,7 @@ async fn dispatch_click(
     )
     .await?;
     Ok(ClickResult {
+        ref_refreshed: false,
         dialog_opened,
         pending_release: None,
     })

@@ -9,7 +9,7 @@ use tokio::time::Instant;
 const INVALID: &str = "auth_export_invalid_request: explicit CSS selector, target, frame and absolute output are required";
 const BINDING: &str =
     "auth_export_binding_changed: pinned target, frame, document or field changed; not replayed";
-const FIELD: &str = "auth_export_field_unavailable: selector must identify one visible input, textarea or text-only element";
+const FIELD: &str = "auth_export_field_unavailable: selector must identify one visible input, textarea or text container";
 const PAGE: &str = "auth_export_page_error: private read failed; no value returned";
 
 /// Reconstruct setup failures as metadata, never preserve foreign error text.
@@ -280,39 +280,7 @@ async fn save_card(
     } else {
         required("expirationDate")?.to_owned()
     };
-    let compact: String = expiry_raw.chars().filter(|c| !c.is_whitespace()).collect();
-    let expiry = if compact.len() == 7
-        && compact.as_bytes()[4] == b'-'
-        && compact
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| i == 4 || b.is_ascii_digit())
-    {
-        compact
-    } else {
-        let parts: Vec<_> = compact.split('/').collect();
-        if parts.len() != 2
-            || parts[0].len() != 2
-            || !parts[0].bytes().all(|b| b.is_ascii_digit())
-            || ![2, 4].contains(&parts[1].len())
-            || !parts[1].bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err("auth_export_card_expiry_invalid: invalid private expiry".into());
-        }
-        format!(
-            "{}{}-{}",
-            if parts[1].len() == 2 { "20" } else { "" },
-            parts[1],
-            parts[0]
-        )
-    };
-    if !expiry[5..]
-        .parse::<u8>()
-        .ok()
-        .is_some_and(|m| (1..=12).contains(&m))
-    {
-        return Err("auth_export_card_expiry_invalid: invalid private expiry".into());
-    }
+    let expiry = normalize_card_expiry(&expiry_raw, expiry_selector.is_some())?;
     if bind_location(state, &location).await.map_err(|_| BINDING)? != original {
         return Err(BINDING.into());
     }
@@ -336,6 +304,8 @@ async fn save_card(
         .entry(original.session.clone())
         .or_default()
         .remember_private_value(&original.session, 0, "credential", &cvv);
+    state.sensitive_observations.entry(original.session.clone()).or_default()
+        .remember_private_value(&original.session, 0, "credential", &expiry);
     let template = json!({"title":item,"cardholder_name":holder,"number":number,
         "cvv":cvv,"expiration_date":expiry});
     if Instant::now() >= deadline {
@@ -376,18 +346,58 @@ async fn save_card(
     Ok(json!({"saved":true,"vault":"Agent","item":item}))
 }
 
+/// A selected private expiry button may include copy-label decoration. Keep
+/// exactly one date token and reject any other digits, rather than guessing.
+fn normalize_card_expiry(raw: &str, decorated: bool) -> Result<String, String> {
+    let invalid = || "auth_export_card_expiry_invalid: invalid or ambiguous private expiry".to_string();
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let compact = if decorated {
+        let tokens: Vec<_> = compact.split(|c: char| !c.is_ascii_digit() && c != '/' && c != '-')
+            .filter(|token| token.chars().any(char::is_numeric)).collect();
+        let [date] = tokens.as_slice() else { return Err(invalid()) };
+        date.to_string()
+    } else { compact };
+    let expiry = if compact.len() == 7 && compact.as_bytes()[4] == b'-'
+        && compact.bytes().enumerate().all(|(i,b)| i == 4 || b.is_ascii_digit()) {
+        compact
+    } else {
+        let parts: Vec<_> = compact.split('/').collect();
+        if parts.len() != 2 || parts[0].len() != 2 || !parts[0].bytes().all(|b| b.is_ascii_digit())
+            || ![2,4].contains(&parts[1].len()) || !parts[1].bytes().all(|b| b.is_ascii_digit()) { return Err(invalid()); }
+        format!("{}{}-{}", if parts[1].len() == 2 { "20" } else { "" }, parts[1], parts[0])
+    };
+    if !expiry[5..].parse::<u8>().ok().is_some_and(|m| (1..=12).contains(&m)) { return Err(invalid()); }
+    Ok(expiry)
+}
+
+#[cfg(test)]
+mod browser_fit_expiry_tests {
+    use super::normalize_card_expiry;
+    #[test]
+    fn browser_fit_expiry_decoration_is_unique_and_private() {
+        for value in ["Click to copy 11/31", "Copy 11 / 2031", "Expiry 2031-11", "11/31"] {
+            assert_eq!(normalize_card_expiry(value, true).unwrap(), "2031-11");
+        }
+        for value in ["Copy 11/31 or 12/31", "Card 123 11/31", "11/310", "13/31", "Copy 2031-00"] {
+            let error = normalize_card_expiry(value, true).unwrap_err();
+            assert!(!error.contains(value));
+        }
+        assert!(normalize_card_expiry("Click to copy 11/31", false).is_err());
+    }
+}
+
 const PIN_FIELD: &str = r#"function(selector,index,container) {
     const d=this.ownerDocument;
     const matches=d.querySelectorAll(selector);
     if (!this.isConnected || (index===null ? matches.length!==1 || matches[0]!==this : matches[index]!==this) || !this.getClientRects().length) return null;
-    if (!['INPUT','TEXTAREA'].includes(this.tagName) && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return null;
+
     return d;
 }"#;
 const READ_FIELD: &str = r#"function(document, selector,index,container) {
     const valid=()=>{const m=document.querySelectorAll(selector); return this.isConnected && this.ownerDocument===document && this.getClientRects().length && (index===null ? m.length===1 && m[0]===this : m[index]===this)};
     if (!valid()) return {status:'changed'};
     const control=['INPUT','TEXTAREA'].includes(this.tagName);
-    if (!control && this.children.length!==0 && !(container && this.tagName==='BUTTON')) return {status:'unavailable'};
+
     const value=control ? this.value : this.textContent;
     if (typeof value!=='string' || value.length===0) return {status:'unavailable'};
     if (!valid()) return {status:'changed',value};

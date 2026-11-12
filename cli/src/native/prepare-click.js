@@ -1,36 +1,41 @@
-function() {
+function(expected, current) {
     const target = this;
-    const view = target.ownerDocument.defaultView;
-    // Scroll once without smooth scrolling. Never replay a pointer gesture.
-    target.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'instant'});
+    const state = (CLICK_GUARD)(target, current);
+    if (state) return state;
+    const doc = target.ownerDocument, view = doc.defaultView;
+    // Point resolution owns scrolling, frame coordinates, clipping and label
+    // activation. Observe only: another scroll here would invalidate its point.
+    const geometry = () => {
+        if (!target.isConnected) return null;
+        const nodes = [target, ...(target.labels || []), doc.documentElement];
+        const values = [view.innerWidth, view.innerHeight, view.scrollX, view.scrollY];
+        for (const node of nodes) {
+            const r = node.getBoundingClientRect();
+            values.push(r.left, r.top, r.width, r.height);
+        }
+        return values.every(Number.isFinite) ? values : null;
+    };
+    const equal = (a, b) => a && b && a.length === b.length
+        && a.every((v, i) => Math.abs(v - b[i]) < 0.25);
+    // Final validation is synchronous in the pinned object's own document.
+    if (expected !== undefined) return !!equal(geometry(), expected);
     return new Promise(resolve => {
-        let previous;
-        let stable = 0;
-        let finished = false;
+        let previous, stable = 0, sampleTimer;
         const finish = value => {
-            if (finished) return;
-            finished = true;
-            view.clearTimeout(timer);
+            view.clearTimeout(deadlineTimer);
+            view.clearTimeout(sampleTimer);
             resolve(value);
         };
-        // Background or frozen renderers must also settle within a finite budget.
-        const timer = view.setTimeout(() => finish('unstable'), 2000);
+        const deadlineTimer = view.setTimeout(() => finish('unstable'), 2000);
         const sample = () => {
-            if (finished) return;
-            if (!target.isConnected) return finish('detached');
-            const r = target.getBoundingClientRect();
-            const geometry = [r.left, r.top, r.width, r.height];
-            const centerX = r.left + r.width / 2;
-            const centerY = r.top + r.height / 2;
-            const valid = geometry.every(Number.isFinite) && r.width > 0 && r.height > 0
-                && centerX >= 0 && centerX < view.innerWidth
-                && centerY >= 0 && centerY < view.innerHeight;
-            stable = valid && previous && geometry.every((v, i) => Math.abs(v - previous[i]) < 0.25)
-                ? stable + 1 : 0;
-            previous = geometry;
-            if (stable >= 2) return finish(geometry);
-            view.requestAnimationFrame(sample);
+            const current = geometry();
+            if (!current) return finish('detached');
+            stable = equal(current, previous) ? stable + 1 : 0;
+            previous = current;
+            if (stable >= 2) return finish(current);
+            // Background tabs can suspend animation frames indefinitely.
+            sampleTimer = view.setTimeout(sample, 32);
         };
-        view.requestAnimationFrame(sample);
+        sample();
     });
 }

@@ -178,7 +178,7 @@ pub async fn run_daemon(session: &str) {
 /// Safari and iOS WebDriver sessions) or a user-attached browser because those
 /// may be in direct human use that the daemon cannot observe. Provider-owned
 /// CDP browsers remain eligible for cleanup.
-pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone, Copy)]
 struct IdleTimeout {
@@ -1194,6 +1194,10 @@ mod tests {
     fn test_resolve_idle_timeout_unset_applies_default() {
         let t = resolve_idle_timeout(None).expect("default should apply when unset");
         assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
+        assert_eq!(
+            t.ms, 300_000,
+            "orphaned headless browsers must close within five minutes"
+        );
         assert!(t.is_default);
     }
 

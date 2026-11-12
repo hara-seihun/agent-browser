@@ -14,7 +14,6 @@ pub(crate) enum Phase {
     CommandAction,
     EvaluationScript,
     EvaluationMetadata,
-
     ResponseFinalization,
     NavigationRequest,
     NavigationLifecycle,

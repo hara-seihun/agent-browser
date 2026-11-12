@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic local Chromium regression for native click stabilization.
-Usage: python3 native-click-regression.py /absolute/path/to/agent-browser
+Usage: python3 tests/native-click-stability.py /absolute/path/to/agent-browser
 No profiles, external navigation, dependencies, or sleep-based retries.
 """
 import json
@@ -62,7 +62,7 @@ try:
     print('PASS: unending animation refuses without dispatch')
     page('<style>html,body{overflow:hidden}</style><button id="target" style="position:fixed;left:1500px;top:100px;width:200px;height:60px" onclick="window.hits++">Offscreen</button>')
     refusal = run('click', '#target', success=False)
-    assert refusal['code'] == 'click_target_unstable', refusal
+    assert refusal['code'] == 'click_not_hittable', refusal
     assert refusal['data']['effectDispatched'] is False, refusal
     assert evaluate('({hits:window.hits,misses:window.misses})') == {'hits': 0, 'misses': 0}
     print('PASS: stable offscreen target refuses without dispatch')

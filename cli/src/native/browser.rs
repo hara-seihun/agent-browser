@@ -194,6 +194,12 @@ fn active_page_index_after_add(
 
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
+    if error.starts_with("SENSITIVE_OUTPUT_UNSUPPORTED") {
+        return format!("{error}. This page has protected controls or private text, so arbitrary evaluation, raw logs and unprotected reads are unavailable. Use snapshot -i or get text; for selector metadata use get attr @REF id|name|type|autocomplete. Fill secrets with auth fill --credential-provider proton-pass --item TITLE --field FIELD --selector CSS after selecting the intended tab/frame. If snapshot itself is incomplete, select frame main and observe again; do not bypass redaction.");
+    }
+    if error.starts_with("Unknown ref:") {
+        return format!("{error}. This ref has no retained role/name identity, so it cannot be safely recovered. Run snapshot -i in this tab/frame and use its new @ref; nothing was clicked.");
+    }
     if error.split_once(": ").is_some_and(|(code, _)| {
         code.starts_with(|ch: char| ch.is_ascii_alphabetic())
             && code
@@ -1573,9 +1579,12 @@ impl BrowserManager {
         self.default_timeout_ms
     }
 
-    /// Checks if the CDP connection is alive by sending a simple command.
-    /// Returns false if the command times out or fails.
+    /// Reuse a response from the last second, otherwise probe the CDP transport.
+    /// Closed transports are never admitted by the freshness window.
     pub async fn is_connection_alive(&self) -> bool {
+        if self.client.recently_responsive() {
+            return true;
+        }
         let timeout = tokio::time::Duration::from_secs(3);
         let result = tokio::time::timeout(
             timeout,
@@ -3114,10 +3123,15 @@ mod tests {
             "fill_render_timeout: Fill dispatched but rendering did not complete; do not replay",
             "auth_fill_target_changed: timeout after input dispatch",
             "tab_state_unavailable: element is not visible",
-            "SENSITIVE_OUTPUT_UNSUPPORTED: timeout observing protected controls",
         ] {
             assert_eq!(to_ai_friendly_error(error), error);
         }
+        let protected = "SENSITIVE_OUTPUT_UNSUPPORTED: timeout observing protected controls";
+        let friendly = to_ai_friendly_error(protected);
+        assert!(friendly.starts_with(protected));
+        assert!(friendly.contains("auth fill --credential-provider"));
+        assert!(friendly.contains("select frame main"));
+        assert!(friendly.ends_with("do not bypass redaction."));
     }
 
     #[test]
@@ -4013,7 +4027,7 @@ mod tests {
         mgr.remove_page_by_target_id(TARGET_A);
 
         assert!(!mgr.bound_target_is_gone());
-        assert_eq!(mgr.bound_target_id(), None);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_B));
         assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
     }
 

@@ -846,7 +846,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with stable element refs, including native and Salesforce synthetic shadow controls. Failed iframe setup without network controls still attempts validated live inventory; unreadable live frames return incomplete metadata without content or refs.",
+            "Return an accessibility-tree snapshot with stable element refs, including native and Salesforce synthetic shadow controls. Browser Use bu_ keys and other always-private credentials share the CLI redaction boundary. Failed iframe setup without network controls still attempts validated live inventory; unreadable live frames return incomplete metadata without content or refs.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Include interactive elements plus alerts and status messages; retain protected field descriptions and invalid state." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
@@ -1541,7 +1541,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_EXPORT,
             "Private field export",
-            "Privately export one unique visible input, textarea or text-only field from the exact active target/frame/document to a new own-UID 0600 file. Linux nonroot daemon only; absolute nonsymlink path with own-UID 0700 parent required. Receipt path and byteCount only. Stop captures first; never overwrites or retries.",
+            "Privately export one unique visible input, textarea or text container from the exact active target/frame/document to a new own-UID 0600 file. Linux nonroot daemon only; absolute nonsymlink path with own-UID 0700 parent required. Receipt path and byteCount only. Stop captures first; never overwrites or retries.",
             json!({
                 "selector":{"type":"string","minLength":1},
                 "target":{"type":"string","minLength":1},
@@ -2087,7 +2087,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "idleTimeout".to_string(),
         json!({
             "type": "string",
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown."
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 5m; 0 disables idle shutdown."
         }),
     );
     props.insert(

@@ -2905,7 +2905,8 @@ Private card to Proton Pass (Kenan's Agent vault):
   Output is saved/vault/item only. Stop captures first. Never automatically replay.
   On timeout or uncertain vault creation inspect the item before another attempt.
 
-Stripe sk_/rk_ test/live keys and whsec_ secrets in names, text and DOM
+Browser Use bu_ keys (20+ URL-safe characters), Stripe sk_/rk_ test/live
+  keys and whsec_ secrets in names, text and DOM
   attributes are private: snapshots/getters redact; screenshots mask; eval refuses.
   Backup/recovery-code labels protect displayed values too.
   Publishable pk_ keys remain readable. CLI and MCP share this protection.
@@ -2913,14 +2914,14 @@ Stripe sk_/rk_ test/live keys and whsec_ secrets in names, text and DOM
 Private export:
   auth export --selector <css> [--target <tab>] [--frame <frame-id|main>]
               --output <absolute-path> [--timeout <ms>]
-  One unique visible input/textarea value (readonly allowed) or text-only element.
+  One unique visible input/textarea value (readonly allowed) or text container.
   Pins live target/frame/document/field; existing browser required, no navigation.
   Preserves selected bytes; layout-only whitespace never becomes a global secret.
   Linux nonroot daemon only. No symlink path components; output parent must be
   owned by the daemon UID with exact0700 permissions. New file is exclusive0600.
   Receipt contains only path and byteCount; never prints or hashes the value.
   Stop captures first. Values are registered for scoped and global redaction.
-  Text-only field names/descendants protected before snapshot text aggregation;
+  Text-container names/descendants protected before snapshot text aggregation;
   short values stay scoped and ordinary input labels remain unchanged.
   Same total deadline/IPC margin as private fill; no overwrite or replay.
   Lost response/commit uncertainty: inspect path existence without reading value.
@@ -4334,7 +4335,7 @@ Options:
                              Includes lock admission, events, observation and action.
                              Socket receive budget: max(timeout+10000,30000) ms.
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
-                             (default: 1h; 0 disables; dashboard input resets the timer)
+                             (default: 5m; 0 disables; dashboard input resets the timer)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -4414,7 +4415,7 @@ Environment:
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
   AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
                                  Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
-  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 300000 = 5m; 0 disables)
                                  Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
                                  Provider-owned cloud browsers remain eligible for default cleanup
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name

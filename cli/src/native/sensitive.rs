@@ -20,22 +20,32 @@ fn useful_secret(value: &str) -> bool {
         && value.chars().take(MIN_SECRET_CHARS).count() == MIN_SECRET_CHARS
 }
 
-// Stripe secret/restricted keys and webhook signing secrets are credentials even
-// without a nearby label (the dashboard exposes them through names/data attrs).
-// Publishable pk_ keys deliberately remain ordinary public text.
-const STRIPE_SECRET_PREFIXES: &[&str] = &["sk_test_", "sk_live_", "rk_test_", "rk_live_", "whsec_"];
+// Always-private token families are credentials even without a nearby label.
+// The boolean selects URL-safe base64 characters rather than alphanumerics.
+// Publishable pk_ keys deliberately remain ordinary public text. Keep the same
+// table in Rust response filtering and generated execution-time DOM guards.
+const PRIVATE_TOKEN_PATTERNS: &[(&str, usize, bool)] = &[
+    ("sk_test_", 8, false),
+    ("sk_live_", 8, false),
+    ("rk_test_", 8, false),
+    ("rk_live_", 8, false),
+    ("whsec_", 8, false),
+    ("bu_", 20, true),
+];
 
-fn stripe_secret_length(text: &str) -> Option<usize> {
-    STRIPE_SECRET_PREFIXES.iter().find_map(|prefix| {
+fn private_token_length(text: &str) -> Option<usize> {
+    PRIVATE_TOKEN_PATTERNS.iter().find_map(|(prefix, minimum, url_safe)| {
         let rest = text.strip_prefix(prefix)?;
-        let length = rest.bytes().take_while(u8::is_ascii_alphanumeric).count();
-        (length >= 8).then_some(prefix.len() + length)
+        let length = rest.bytes().take_while(|byte| {
+            byte.is_ascii_alphanumeric() || (*url_safe && matches!(*byte, b'_' | b'-'))
+        }).count();
+        (length >= *minimum).then_some(prefix.len() + length)
     })
 }
 
-fn has_stripe_secret(text: &str) -> bool {
+fn has_private_token(text: &str) -> bool {
     text.char_indices()
-        .any(|(start, _)| stripe_secret_length(&text[start..]).is_some())
+        .any(|(start, _)| private_token_length(&text[start..]).is_some())
 }
 
 const AUTOCOMPLETE: &[(&str, &str)] = &[
@@ -293,7 +303,7 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         if node["nodeName"] == "#text" {
             let text = node["nodeValue"].as_str().unwrap_or("");
-            if has_stripe_secret(text) {
+            if has_private_token(text) {
                 if let Some(parent) = parent {
                     found.insert(parent);
                 }
@@ -344,8 +354,45 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         (labels, values)
     }
+    // A recovery-code dialog often separates its heading from a deeply nested
+    // list. Protect list items as a group, regardless of token shape or depth.
+    fn recovery_dialogs(node: &Value, found: &mut HashSet<i64>) {
+        fn attrs(node: &Value) -> HashMap<String, String> {
+            node["attributes"].as_array().into_iter().flatten().collect::<Vec<_>>()
+                .chunks_exact(2).filter_map(|pair| Some((pair[0].as_str()?.to_ascii_lowercase(), pair[1].as_str()?.to_ascii_lowercase()))).collect()
+        }
+        fn heading(node: &Value) -> bool {
+            let name = node["nodeName"].as_str().unwrap_or("");
+            let a = attrs(node);
+            let is_heading = matches!(name, "H1" | "H2" | "H3" | "H4" | "H5" | "H6") || a.get("role").is_some_and(|r| r == "heading");
+            fn text(node: &Value, out: &mut String) {
+                if let Some(t) = node["nodeValue"].as_str() { out.push_str(t); }
+                for child in node["children"].as_array().into_iter().flatten() { text(child, out); }
+            }
+            if is_heading {
+                let mut value = String::new(); text(node, &mut value);
+                let value = normalize(&value);
+                if value.contains("backupcode") || value.contains("recoverycode") { return true; }
+            }
+            node["children"].as_array().into_iter().flatten().any(heading)
+        }
+        fn items(node: &Value, found: &mut HashSet<i64>) {
+            let a = attrs(node);
+            if node["nodeName"] == "LI" || a.get("role").is_some_and(|r| r == "listitem") {
+                if let Some(id) = node["backendNodeId"].as_i64() { found.insert(id); }
+            }
+            for child in node["children"].as_array().into_iter().flatten() { items(child, found); }
+        }
+        let a = attrs(node);
+        if (node["nodeName"] == "DIALOG" || a.get("role").is_some_and(|r| r == "dialog" || r == "alertdialog")) && heading(node) { items(node, found); }
+        for key in ["children", "shadowRoots", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() { recovery_dialogs(child, found); }
+        }
+        for key in ["contentDocument", "templateContent"] { if let Some(child) = node.get(key) { recovery_dialogs(child, found); } }
+    }
     let mut found = HashSet::new();
     walk(root, None, &mut found);
+    recovery_dialogs(root, &mut found);
     found
 }
 
@@ -363,7 +410,7 @@ const PRIVATE_TEXT_LABELS: &[&str] = &[
 ];
 
 fn private_text(attributes: &HashMap<String, String>) -> bool {
-    attributes.values().any(|value| has_stripe_secret(value))
+    attributes.values().any(|value| has_private_token(value))
         || attributes
             .get("data-private")
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
@@ -485,11 +532,13 @@ pub fn classify(attributes: &HashMap<String, String>) -> Option<&'static str> {
 pub fn classifier_js() -> String {
     format!(
         r#"const apiLabels = {};
-    const stripePrefixes = {};
-    const stripeSecret = text => stripePrefixes.some(prefix => {{
+    const privateTokenPatterns = {};
+    const privateToken = text => privateTokenPatterns.some(([prefix, minimum, urlSafe]) => {{
       let at = -1;
       while ((at = text.indexOf(prefix, at + 1)) !== -1) {{
-        if (/^[A-Za-z0-9]{{8}}/.test(text.slice(at + prefix.length))) return true;
+        const rest = text.slice(at + prefix.length);
+        const token = rest.match(urlSafe ? /^[A-Za-z0-9_-]+/ : /^[A-Za-z0-9]+/);
+        if (token && token[0].length >= minimum) return true;
       }}
       return false;
     }});
@@ -525,7 +574,7 @@ pub fn classifier_js() -> String {
           if (node.nodeType === 1 && ['SCRIPT','STYLE'].includes(node.tagName)) return [0, []];
           if (node.nodeType === 3) {{
             const text = (node.textContent || '').trim();
-            if (stripeSecret(text)) {{
+            if (privateToken(text)) {{
               if (node.parentElement) found.add(node.parentElement);
               return [0, []];
             }}
@@ -551,11 +600,17 @@ pub fn classifier_js() -> String {
           return [labels, values];
         }};
         walk(root);
+        for (const dialog of root.querySelectorAll('dialog,[role="dialog"],[role="alertdialog"]')) {{
+          const headings = dialog.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]');
+          if (Array.from(headings).some(h => /(?:backup|recovery)code/.test((h.textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '')))) {{
+            for (const item of dialog.querySelectorAll('li,[role="listitem"]')) found.add(item);
+          }}
+        }}
         apiRoots.set(root, found);
       }}
       return apiRoots.get(root).has(el);
     }};
-    const privateText = el => Array.from(el.attributes).some(a => stripeSecret(a.value))
+    const privateText = el => Array.from(el.attributes).some(a => privateToken(a.value))
       || (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
       || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
       || ['aria-label', 'title', 'id', 'name'].some(key => apiLabel(el.getAttribute(key)))
@@ -626,7 +681,7 @@ pub fn classifier_js() -> String {
       return null;
     }};"#,
         serde_json::to_string(API_TEXT_LABELS).unwrap(),
-        serde_json::to_string(STRIPE_SECRET_PREFIXES).unwrap(),
+        serde_json::to_string(PRIVATE_TOKEN_PATTERNS).unwrap(),
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
@@ -886,6 +941,15 @@ impl Observation {
     pub fn protect_text(&self, text: &str) -> String {
         // Single pass over the ORIGINAL string: replacement markers are never
         // themselves re-redacted (important for short expiry and CVC values).
+        // Skip the remembered-value search at positions whose first byte cannot
+        // match any secret. This is only a rejection prefilter: candidates still
+        // use exact, longest-first string matching and the same usefulness check.
+        let mut secret_initials = [false; 256];
+        for (secret, _) in &self.secrets {
+            if let Some(first) = secret.as_bytes().first() {
+                secret_initials[*first as usize] = true;
+            }
+        }
         let mut public_ids = public_social_id_spans(text);
         public_ids.extend(cdp_browser_id_spans(text));
         let mut out = String::new();
@@ -901,14 +965,19 @@ impl Observation {
                     }
                 }
             }
-            if let Some((secret, marker)) = self
-                .secrets
-                .iter()
-                .find(|(s, _)| useful_secret(s) && text[start..].starts_with(s))
-            {
+            let remembered = if secret_initials[text.as_bytes()[start] as usize] {
+                self.secrets
+                    .iter()
+                    // Most candidates do not match. Only classify a secret after
+                    // its cheap byte-prefix comparison succeeds.
+                    .find(|(s, _)| text[start..].starts_with(s) && useful_secret(s))
+            } else {
+                None
+            };
+            if let Some((secret, marker)) = remembered {
                 out.push_str(marker);
                 start += secret.len();
-            } else if let Some(length) = stripe_secret_length(&text[start..]) {
+            } else if let Some(length) = private_token_length(&text[start..]) {
                 out.push_str(&marker("credential"));
                 start += length;
             } else if let Some((length, marker)) =
@@ -1435,9 +1504,24 @@ fn collect_nodes(
         for root in node["shadowRoots"].as_array().into_iter().flatten() {
             collect_nodes(root, session, controls, seen);
         }
-        for key in ["contentDocument", "templateContent"] {
-            if let Some(root) = node.get(key) {
-                collect_nodes(root, session, controls, seen);
+        if let Some(root) = node.get("contentDocument") {
+            collect_nodes(root, session, controls, seen);
+        }
+        if let Some(root) = node.get("templateContent") {
+            // Inert template descendants belong to a separate document. Chrome
+            // cannot resolve their backend IDs in the live document, but the
+            // owning template element can safely expose its content for private
+            // inventory. Never publish a partial inventory of those descendants.
+            let mut nested = Vec::new();
+            collect_nodes(root, session, &mut nested, &mut HashSet::new());
+            if !nested.is_empty() {
+                // An absent owner identity must fail resolution, never silently
+                // drop a sensitive subtree from the inventory.
+                let backend = node["backendNodeId"].as_i64().unwrap_or(0);
+                controls.push(Control {
+                    session: session.to_owned(), backend, kind: "credential",
+                    display: false, text: true,
+                });
             }
         }
     }
@@ -1595,6 +1679,7 @@ pub async fn observe(
 }
 
 pub(crate) struct InventoryContext {
+    pub(crate) document_frames: HashMap<String, String>,
     pub(crate) cursor_nodes: HashMap<String, HashMap<String, i64>>,
     pub(crate) frame_paths: HashMap<String, HashMap<String, i64>>,
     pub(crate) dialog_roots: HashMap<String, HashSet<i64>>,
@@ -2094,11 +2179,13 @@ async fn inventory_control(
                 "functionDeclaration": if control.text {
                     // Keep both rendered text and individual fragments private, including
                     // short descendants whose AX parent may be omitted by Chrome.
-                    r#"function(prefixes) {
-                        const stripeSecret = text => prefixes.some(prefix => {
+                    r#"function(patterns) {
+                        const privateToken = text => patterns.some(([prefix, minimum, urlSafe]) => {
                             let at = -1;
                             while ((at = text.indexOf(prefix, at + 1)) !== -1) {
-                                if (/^[A-Za-z0-9]{8}/.test(text.slice(at + prefix.length))) return true;
+                                const rest = text.slice(at + prefix.length);
+                                const token = rest.match(urlSafe ? /^[A-Za-z0-9_-]+/ : /^[A-Za-z0-9]+/);
+                                if (token && token[0].length >= minimum) return true;
                             }
                             return false;
                         });
@@ -2110,13 +2197,14 @@ async fn inventory_control(
                                 // Attributes can be the only full copy of a displayed
                                 // credential; retain them privately to protect echoes.
                                 for (const attr of node.attributes) {
-                                    if (stripeSecret(attr.value)) values.push(attr.value);
+                                    if (privateToken(attr.value)) values.push(attr.value);
                                 }
                                 if (node.shadowRoot) scan(node.shadowRoot);
+                                if (node.content) scan(node.content);
                             }
                             for (const child of node.childNodes) scan(child);
                         };
-                        scan(this);
+                        scan(this.content || this);
                         return values;
                     }"#
                 } else if control.display {
@@ -2124,7 +2212,7 @@ async fn inventory_control(
                 } else {
                     "function() { return [String(this.value || ''), this.getAttribute('value') || '', (this.tagName === 'TEXTAREA' || this.isContentEditable) ? this.textContent : '']; }"
                 },
-                "arguments": [{"value": STRIPE_SECRET_PREFIXES}],
+                "arguments": [{"value": PRIVATE_TOKEN_PATTERNS}],
                 "returnByValue": true,
             })), Some(&control.session)),
         ).await.map_err(|_| format!("{UNSUPPORTED}: sensitive control observation failed"))?;
@@ -2394,6 +2482,7 @@ where
         ..Observation::default()
     };
     let mut context = InventoryContext {
+        document_frames: documents.iter().map(|document| (document.session.clone(), document.bindings.root.clone())).collect(),
         frame_paths: HashMap::new(),
         dialog_roots: HashMap::new(),
         cursor_nodes: documents
@@ -2657,6 +2746,46 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn browser_use_tokens_are_always_private_and_url_safe() {
+        use super::*;
+        let secret = format!("bu_{}", "Ab_9-".repeat(9));
+        assert!(has_private_token(&secret));
+        assert!(!has_private_token(&format!("bu_{}", "x".repeat(19))));
+        assert!(has_private_token(&format!("bu_{}", "x".repeat(20))));
+        assert!(!has_private_token("pk_test_public_1234567890"));
+        assert!(has_private_token("sk_test_12345678"));
+        let observed = Observation::default();
+        assert_eq!(observed.protect_text(&format!("é[{secret}]!")), "é[[redacted: credential]]!");
+        let root = json!({"nodeName":"DIV", "backendNodeId":1, "children":[
+            {"nodeName":"DIV", "backendNodeId":2, "children":[
+                {"nodeName":"#text", "nodeValue":secret}
+            ]}
+        ]});
+        assert_eq!(api_display_nodes(&root), HashSet::from([2]));
+        assert!(private_text(&HashMap::from([("data-key".into(), secret)])));
+    }
+
+    #[test]
+    fn recovery_dialog_protects_deep_list_items_only() {
+        use super::*;
+        let root = json!({"nodeName":"DIV","backendNodeId":1,"children":[
+          {"nodeName":"DIV","backendNodeId":2,"attributes":["role","dialog"],"children":[
+            {"nodeName":"H2","backendNodeId":3,"children":[{"nodeName":"#text","nodeValue":"Save your backup codes"}]},
+            {"nodeName":"DIV","backendNodeId":4,"children":[{"nodeName":"DIV","backendNodeId":5,"children":[
+              {"nodeName":"UL","backendNodeId":6,"children":[
+                {"nodeName":"LI","backendNodeId":7,"children":[{"nodeName":"SPAN","backendNodeId":8,"children":[{"nodeName":"#text","nodeValue":"dummy-code-one"}]}]},
+                {"nodeName":"LI","backendNodeId":9,"children":[{"nodeName":"#text","nodeValue":"dummy-code-two"}]}
+              ]}
+            ]}]}
+          ]},
+          {"nodeName":"LI","backendNodeId":10,"children":[{"nodeName":"#text","nodeValue":"public-item"}]}
+        ]});
+        let found = api_display_nodes(&root);
+        assert!(found.contains(&7) && found.contains(&9));
+        assert!(!found.contains(&10));
+    }
+
+    #[test]
     fn secret_fragments_never_poison_metadata_and_cleanup_preserves_full_values() {
         use super::*;
         let mut observed = Observation::default();
@@ -2693,6 +2822,30 @@ mod tests {
         observed.secrets.push(("O".into(), marker("credential")));
         observed.merge(incoming);
         assert_eq!(observed.secret_count(), 2);
+    }
+
+    #[test]
+    fn remembered_prefix_prefilter_keeps_unicode_longest_matches_and_token_families() {
+        let mut observed = Observation::default();
+        for (backend, kind, value) in [
+            (1, "credential", "secret"),
+            (2, "password", "secret-tail"),
+            (3, "credential", "é界abc"),
+            (4, "password", "🔑abc"),
+        ] {
+            observed.remember_private_value("session", backend, kind, value);
+        }
+        // Legacy short and empty fragments are still excluded, even if their
+        // first byte matches. Global token rules do not depend on this index.
+        observed.secrets.extend([
+            ("".into(), marker("credential")),
+            ("x".into(), marker("credential")),
+        ]);
+        assert_eq!(
+            observed.protect_text("x secret-tail secret é界abc 🔑abc bu_01234567890123456789"),
+            "x [redacted: password] [redacted: credential] [redacted: credential] [redacted: password] [redacted: credential]"
+        );
+        assert_eq!(observed.protect_text("plain text 界🔑"), "plain text 界🔑");
     }
 
     #[test]
@@ -3138,8 +3291,8 @@ mod tests {
             Some("password")
         );
         let obs = Observation {
-            live_nodes: None,
             frame_sessions: HashSet::new(),
+            live_nodes: None,
             controls: HashMap::new(),
             private_text_nodes: HashSet::new(),
             expiry_echoes: Vec::new(),
