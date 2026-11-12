@@ -11380,6 +11380,37 @@ fn pixel_is_black(path: &std::path::Path, x: f64, y: f64) -> bool {
     pixel.0[..3] == [0, 0, 0]
 }
 
+/// Real Chrome benchmark: 300 DOM levels, a closed shadow root and an OOPIF.
+/// Timing is reported for comparison, not asserted as a correctness gate.
+#[tokio::test]
+#[ignore]
+async fn benchmark_deep_cross_origin_snapshot() {
+    let (base_url, _server) = start_deep_page_server().await;
+    let mut state = DaemonState::new();
+    assert_success(&sensitive_test_command(
+        &json!({"id":"launch", "action":"launch", "headless":true, "engine":"chrome",
+            "args":["--no-sandbox", "--disable-dev-shm-usage", "--site-per-process"]}),
+        &mut state,
+    ).await);
+    assert_success(&sensitive_test_command(
+        &json!({"id":"open", "action":"navigate", "url":format!("{base_url}/deep")}),
+        &mut state,
+    ).await);
+    for round in 0..12 {
+        let start = std::time::Instant::now();
+        let response = sensitive_test_command(
+            &json!({"id":format!("snapshot-{round}"), "action":"snapshot"}), &mut state,
+        ).await;
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert_success(&response);
+        assert_eq!(get_data(&response)["observation"]["status"], "complete", "{response}");
+        assert!(get_data(&response)["snapshot"].as_str().unwrap().contains("deep-text"));
+        assert!(!response.to_string().contains("deep-secret-"));
+        eprintln!("deep_cross_origin_snapshot_ms={ms}");
+    }
+    close_current_browser(&mut state).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_deep_shadow_and_cross_origin_page_stays_observable() {

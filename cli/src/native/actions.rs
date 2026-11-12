@@ -15846,7 +15846,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_protected_inventory_full_snapshot_remote_frames_refs_cursor_links_fit_deadline() {
+    async fn test_protected_inventory_full_snapshot_remote_frames_refs_cursor_links_work_bound() {
+        full_snapshot_remote_work(false, 2).await;
+    }
+
+    /// Transport latency is a benchmark, never a scheduler-dependent unit gate.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_protected_inventory_full_snapshot_remote() {
+        full_snapshot_remote_work(true, 12).await;
+    }
+
+    async fn full_snapshot_remote_work(latency: bool, rounds: usize) {
         let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
         let client = fixture.manager.client.clone();
         let session = fixture.manager.active_session_id().unwrap().to_owned();
@@ -15854,7 +15865,7 @@ mod tests {
         {
             let mut inventory = fixture.frame_inventory.lock().unwrap();
             configure_full_snapshot_fixture(&mut inventory, &mut state);
-            for method in [
+            for method in if latency { vec![
                 "Page.getFrameTree",
                 "DOM.resolveNode",
                 "Runtime.callFunctionOn",
@@ -15863,14 +15874,14 @@ mod tests {
                 "Runtime.evaluate",
                 "DOM.querySelector",
                 "DOM.describeNode",
-            ] {
+            ] } else { vec![] } {
                 inventory
                     .reply_delays
                     .insert(method.into(), std::time::Duration::from_millis(100));
             }
             inventory.reply_delays.insert(
                 "DOM.getDocument".into(),
-                std::time::Duration::from_millis(300),
+                std::time::Duration::from_millis(if latency { 300 } else { 0 }),
             );
         }
         state.browser = Some(fixture.manager);
@@ -15879,13 +15890,14 @@ mod tests {
             ..SnapshotOptions::default()
         };
         let mut previous = None;
-        for reverse in [false, true] {
+        for round in 0..rounds {
+            let reverse = round % 2 == 1;
             {
                 let mut inventory = fixture.frame_inventory.lock().unwrap();
                 for n in 1..=25 {
                     inventory.session_reply_delays.insert(
                         (format!("session-{n}"), "Accessibility.getFullAXTree".into()),
-                        std::time::Duration::from_millis(if (n % 2 == 0) == reverse {
+                        std::time::Duration::from_millis(if !latency { 0 } else if (n % 2 == 0) == reverse {
                             120
                         } else {
                             100
@@ -15894,10 +15906,20 @@ mod tests {
                 }
             }
             let start = std::time::Instant::now();
-            let (tree, refs) = protected_snapshot(&mut state, &session, &options, None)
-                .await
-                .unwrap();
-            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            let mut received = Vec::new();
+            let (tree, refs) = {
+                let snapshot = protected_snapshot(&mut state, &session, &options, None);
+                tokio::pin!(snapshot);
+                loop {
+                    tokio::select! {
+                        result = &mut snapshot => break result.unwrap(),
+                        Some(command) = fixture.commands.recv() => {
+                            received.push((start.elapsed().as_millis(), command));
+                        }
+                    }
+                }
+            };
+            if latency { eprintln!("remote_snapshot_ms={}", start.elapsed().as_secs_f64() * 1000.0); }
             assert!(!tree.contains("Synthetic-"));
             assert!(tree.contains("https://fixture.invalid/pay"));
             assert_eq!(tree.matches("cursor:pointer").count(), 26);
@@ -15938,6 +15960,18 @@ mod tests {
             let mut deep = 0;
             let mut shallow = 0;
             while let Ok(command) = fixture.commands.try_recv() {
+                received.push((start.elapsed().as_millis(), command));
+            }
+            if latency && round == 0 {
+                let mut spans = std::collections::BTreeMap::new();
+                for (ms, command) in &received {
+                    let key = format!("{}:{}:{}", command["sessionId"].as_str().unwrap_or(""), command["method"].as_str().unwrap(), command["params"]["depth"]);
+                    let span = spans.entry(key).or_insert((*ms, *ms));
+                    span.1 = *ms;
+                }
+                eprintln!("remote_snapshot_timeline={spans:?}");
+            }
+            for (_, command) in received {
                 let method = command["method"].as_str().unwrap();
                 *calls.entry(method.into()).or_insert(0) += 1;
                 assert_ne!(command["sessionId"], "unrepresented-session");
@@ -15966,6 +16000,9 @@ mod tests {
                 }
             }
             assert_eq!((deep, shallow), (26, 26));
+            if latency { eprintln!("remote_snapshot_calls={calls:?}"); }
+            assert_eq!(calls["Page.getFrameTree"], 52);
+            assert_eq!(calls.values().sum::<usize>(), 416, "unexpected protocol work: {calls:?}");
             for method in ["Accessibility.getFullAXTree", "Runtime.evaluate"] {
                 assert_eq!(calls[method], 26);
             }
