@@ -354,8 +354,45 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
         }
         (labels, values)
     }
+    // A recovery-code dialog often separates its heading from a deeply nested
+    // list. Protect list items as a group, regardless of token shape or depth.
+    fn recovery_dialogs(node: &Value, found: &mut HashSet<i64>) {
+        fn attrs(node: &Value) -> HashMap<String, String> {
+            node["attributes"].as_array().into_iter().flatten().collect::<Vec<_>>()
+                .chunks_exact(2).filter_map(|pair| Some((pair[0].as_str()?.to_ascii_lowercase(), pair[1].as_str()?.to_ascii_lowercase()))).collect()
+        }
+        fn heading(node: &Value) -> bool {
+            let name = node["nodeName"].as_str().unwrap_or("");
+            let a = attrs(node);
+            let is_heading = matches!(name, "H1" | "H2" | "H3" | "H4" | "H5" | "H6") || a.get("role").is_some_and(|r| r == "heading");
+            fn text(node: &Value, out: &mut String) {
+                if let Some(t) = node["nodeValue"].as_str() { out.push_str(t); }
+                for child in node["children"].as_array().into_iter().flatten() { text(child, out); }
+            }
+            if is_heading {
+                let mut value = String::new(); text(node, &mut value);
+                let value = normalize(&value);
+                if value.contains("backupcode") || value.contains("recoverycode") { return true; }
+            }
+            node["children"].as_array().into_iter().flatten().any(heading)
+        }
+        fn items(node: &Value, found: &mut HashSet<i64>) {
+            let a = attrs(node);
+            if node["nodeName"] == "LI" || a.get("role").is_some_and(|r| r == "listitem") {
+                if let Some(id) = node["backendNodeId"].as_i64() { found.insert(id); }
+            }
+            for child in node["children"].as_array().into_iter().flatten() { items(child, found); }
+        }
+        let a = attrs(node);
+        if (node["nodeName"] == "DIALOG" || a.get("role").is_some_and(|r| r == "dialog" || r == "alertdialog")) && heading(node) { items(node, found); }
+        for key in ["children", "shadowRoots", "pseudoElements"] {
+            for child in node[key].as_array().into_iter().flatten() { recovery_dialogs(child, found); }
+        }
+        for key in ["contentDocument", "templateContent"] { if let Some(child) = node.get(key) { recovery_dialogs(child, found); } }
+    }
     let mut found = HashSet::new();
     walk(root, None, &mut found);
+    recovery_dialogs(root, &mut found);
     found
 }
 
@@ -563,6 +600,12 @@ pub fn classifier_js() -> String {
           return [labels, values];
         }};
         walk(root);
+        for (const dialog of root.querySelectorAll('dialog,[role="dialog"],[role="alertdialog"]')) {{
+          const headings = dialog.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]');
+          if (Array.from(headings).some(h => /(?:backup|recovery)code/.test((h.textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '')))) {{
+            for (const item of dialog.querySelectorAll('li,[role="listitem"]')) found.add(item);
+          }}
+        }}
         apiRoots.set(root, found);
       }}
       return apiRoots.get(root).has(el);
@@ -2706,6 +2749,26 @@ mod tests {
         ]});
         assert_eq!(api_display_nodes(&root), HashSet::from([2]));
         assert!(private_text(&HashMap::from([("data-key".into(), secret)])));
+    }
+
+    #[test]
+    fn recovery_dialog_protects_deep_list_items_only() {
+        use super::*;
+        let root = json!({"nodeName":"DIV","backendNodeId":1,"children":[
+          {"nodeName":"DIV","backendNodeId":2,"attributes":["role","dialog"],"children":[
+            {"nodeName":"H2","backendNodeId":3,"children":[{"nodeName":"#text","nodeValue":"Save your backup codes"}]},
+            {"nodeName":"DIV","backendNodeId":4,"children":[{"nodeName":"DIV","backendNodeId":5,"children":[
+              {"nodeName":"UL","backendNodeId":6,"children":[
+                {"nodeName":"LI","backendNodeId":7,"children":[{"nodeName":"SPAN","backendNodeId":8,"children":[{"nodeName":"#text","nodeValue":"dummy-code-one"}]}]},
+                {"nodeName":"LI","backendNodeId":9,"children":[{"nodeName":"#text","nodeValue":"dummy-code-two"}]}
+              ]}
+            ]}]}
+          ]},
+          {"nodeName":"LI","backendNodeId":10,"children":[{"nodeName":"#text","nodeValue":"public-item"}]}
+        ]});
+        let found = api_display_nodes(&root);
+        assert!(found.contains(&7) && found.contains(&9));
+        assert!(!found.contains(&10));
     }
 
     #[test]
