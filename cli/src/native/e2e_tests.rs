@@ -11673,3 +11673,47 @@ async fn e2e_background_tab_rendering_defaults_do_not_steal_foreground() {
     }.await;
     host.close().await.unwrap();
 }
+
+// A drawer entering from outside the viewport must not click its backdrop.
+#[tokio::test]
+#[ignore]
+async fn e2e_click_waits_for_moving_drawer() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut state = DaemonState::new();
+    let response = execute_command(
+        &json!({"id":"launch", "action":"launch", "headless":true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let html = r#"<style>
+      @keyframes enter {from {transform:translateX(1600px)} to {transform:translateX(0)}}
+      button {position:fixed;left:200px;top:120px;width:200px;height:60px}
+      .enter {animation:enter 800ms linear both}
+      </style><button id='target' onclick="window.clicked=(window.clicked||0)+1">View source</button>
+      <script>window.clicked=0;window.missed=0;document.addEventListener('pointerdown',e=>{if(!e.target.closest('#target'))window.missed++})</script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    assert_success(
+        &execute_command(
+            &json!({"id":"nav","action":"navigate","url":url}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({"id":"start","action":"evaluate","script":"document.querySelector('button').className='enter';true"}), &mut state).await);
+    assert_success(
+        &execute_command(
+            &json!({"id":"click","action":"click","selector":"#target"}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "verify",
+        "({clicked:window.clicked,missed:window.missed})",
+        json!({"clicked":1,"missed":0}),
+    )
+    .await;
+    assert_success(&execute_command(&json!({"id":"close","action":"close"}), &mut state).await);
+}
