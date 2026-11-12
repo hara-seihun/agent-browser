@@ -941,6 +941,15 @@ impl Observation {
     pub fn protect_text(&self, text: &str) -> String {
         // Single pass over the ORIGINAL string: replacement markers are never
         // themselves re-redacted (important for short expiry and CVC values).
+        // Skip the remembered-value search at positions whose first byte cannot
+        // match any secret. This is only a rejection prefilter: candidates still
+        // use exact, longest-first string matching and the same usefulness check.
+        let mut secret_initials = [false; 256];
+        for (secret, _) in &self.secrets {
+            if let Some(first) = secret.as_bytes().first() {
+                secret_initials[*first as usize] = true;
+            }
+        }
         let mut public_ids = public_social_id_spans(text);
         public_ids.extend(cdp_browser_id_spans(text));
         let mut out = String::new();
@@ -956,14 +965,16 @@ impl Observation {
                     }
                 }
             }
-            if let Some((secret, marker)) = self
-                .secrets
-                .iter()
-                // Most positions cannot match a remembered value. Test the cheap
-                // byte prefix first, rather than trimming/counting every secret
-                // at every character of every AX field and assembled subtree.
-                .find(|(s, _)| text[start..].starts_with(s) && useful_secret(s))
-            {
+            let remembered = if secret_initials[text.as_bytes()[start] as usize] {
+                self.secrets
+                    .iter()
+                    // Most candidates do not match. Only classify a secret after
+                    // its cheap byte-prefix comparison succeeds.
+                    .find(|(s, _)| text[start..].starts_with(s) && useful_secret(s))
+            } else {
+                None
+            };
+            if let Some((secret, marker)) = remembered {
                 out.push_str(marker);
                 start += secret.len();
             } else if let Some(length) = private_token_length(&text[start..]) {
@@ -2811,6 +2822,30 @@ mod tests {
         observed.secrets.push(("O".into(), marker("credential")));
         observed.merge(incoming);
         assert_eq!(observed.secret_count(), 2);
+    }
+
+    #[test]
+    fn remembered_prefix_prefilter_keeps_unicode_longest_matches_and_token_families() {
+        let mut observed = Observation::default();
+        for (backend, kind, value) in [
+            (1, "credential", "secret"),
+            (2, "password", "secret-tail"),
+            (3, "credential", "é界abc"),
+            (4, "password", "🔑abc"),
+        ] {
+            observed.remember_private_value("session", backend, kind, value);
+        }
+        // Legacy short and empty fragments are still excluded, even if their
+        // first byte matches. Global token rules do not depend on this index.
+        observed.secrets.extend([
+            ("".into(), marker("credential")),
+            ("x".into(), marker("credential")),
+        ]);
+        assert_eq!(
+            observed.protect_text("x secret-tail secret é界abc 🔑abc bu_01234567890123456789"),
+            "x [redacted: password] [redacted: credential] [redacted: credential] [redacted: password] [redacted: credential]"
+        );
+        assert_eq!(observed.protect_text("plain text 界🔑"), "plain text 界🔑");
     }
 
     #[test]
