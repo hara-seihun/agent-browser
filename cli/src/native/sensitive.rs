@@ -1155,6 +1155,19 @@ fn public_social_id_spans(text: &str) -> Vec<(usize, usize)> {
             spans.push(span);
         }
     }
+    // LinkedIn uses this exact test-id prefix for a reaction facepile. Keep
+    // the boundary narrow; arbitrary text ending in a URN is not metadata.
+    let prefix = "ReactionFacepileCollection-urn:li:activity:";
+    for (offset, _) in text.match_indices(prefix) {
+        if text[..offset].chars().next_back().is_some_and(|ch| {
+            !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '(' | '[' | '{' | '<' | '=' | ':')
+        }) {
+            continue;
+        }
+        if let Some(span) = public_numeric_id_span(text, &text[offset + prefix.len()..]) {
+            spans.push(span);
+        }
+    }
     spans
 }
 
@@ -2745,6 +2758,21 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linkedin_facepile_id_is_public_but_cards_and_remembered_secrets_are_not() {
+        use super::*;
+        let id = "7526753488295477248";
+        let value = format!("ReactionFacepileCollection-urn:li:activity:{id}");
+        let observed = Observation::default();
+        assert_eq!(observed.protect_text(&value), value);
+        assert_eq!(observed.protect_text(&format!("x{value}")), "xReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+        assert_eq!(observed.protect_text("Card 4242424242424242"), "Card [redacted: cc-number]");
+        assert_eq!(observed.protect_control_name(&value, "[redacted: cc-number]"), "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+        let mut known = Observation::default();
+        known.secrets.push((id.to_string(), marker("cc-number")));
+        assert_eq!(known.protect_text(&value), "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+    }
+
     #[test]
     fn browser_use_tokens_are_always_private_and_url_safe() {
         use super::*;
