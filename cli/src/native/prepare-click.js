@@ -7,7 +7,9 @@ function(expected, current) {
     // activation. Observe only: another scroll here would invalidate its point.
     const geometry = () => {
         if (!target.isConnected) return null;
-        const nodes = [target, ...(target.labels || []), doc.documentElement];
+        // Document height can change independently of the target (live feeds,
+        // loading content); only geometry that affects this gesture belongs here.
+        const nodes = [target, ...(target.labels || [])];
         const values = [view.innerWidth, view.innerHeight, view.scrollX, view.scrollY];
         for (const node of nodes) {
             const r = node.getBoundingClientRect();
