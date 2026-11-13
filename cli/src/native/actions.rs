@@ -8878,8 +8878,9 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let scale = cmd
         .get("deviceScaleFactor")
         .and_then(|v| v.as_f64())
-        .unwrap_or(1.0);
-    let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
+        .unwrap_or_else(|| state.viewport.map(|v| v.2).unwrap_or(1.0));
+    let mobile = cmd.get("mobile").and_then(|v| v.as_bool())
+        .unwrap_or_else(|| state.viewport.map(|v| v.3).unwrap_or(false));
 
     mgr.set_viewport(width, height, scale, mobile).await?;
 
