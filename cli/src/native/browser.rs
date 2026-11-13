@@ -2066,6 +2066,17 @@ impl BrowserManager {
             )
             .await?;
 
+        self.client.send_command(
+            "Emulation.setTouchEmulationEnabled",
+            Some(json!({"enabled": mobile, "maxTouchPoints": if mobile { 5 } else { 1 }})),
+            Some(session_id),
+        ).await?;
+        let touch = self.evaluate_in_session(session_id, "navigator.maxTouchPoints", None).await?;
+        let points = touch.as_u64().ok_or("touch_emulation_unavailable: Chrome did not report touch points")?;
+        if mobile && points == 0 {
+            return Err("touch_emulation_not_applied: Chrome reported zero touch points".to_string());
+        }
+
         // Screencast captures the actual content area, not the emulated CSS
         // viewport, so resize the content area to match.
         if let Ok(target_id) = self.active_target_id() {
