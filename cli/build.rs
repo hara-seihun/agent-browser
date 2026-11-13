@@ -21,11 +21,21 @@ fn ensure_dashboard_dir() {
 /// The daemon identity is the package version plus the source commit, so a
 /// rebuilt binary at the same package version still replaces daemons that
 /// run older code. Builds outside a Git checkout (published npm sources)
-/// can pass AGENT_BROWSER_SOURCE_COMMIT; published npm sources otherwise use
-/// the package version alone.
+/// use UPSTREAM_COMMIT when present or the supported explicit override;
+/// npm sources without either retain the package version alone.
 fn emit_daemon_build_identity() {
+    let root = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let git = |args: &[&str]| {
         std::process::Command::new("git")
+            .current_dir(&root)
+            // A caller may be operating a different repository. Identity belongs
+            // to this source tree, never that caller's inherited Git context.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .args(args)
             .output()
             .ok()
@@ -34,26 +44,56 @@ fn emit_daemon_build_identity() {
     };
     let version = env::var("CARGO_PKG_VERSION").unwrap();
     println!("cargo:rerun-if-env-changed=AGENT_BROWSER_SOURCE_COMMIT");
+    // Relative metadata paths remain bound to the receiving checkout when a
+    // Cargo cache is reused. Watching only absolute donor paths retains a stale
+    // source stamp while recompiling new source in another checkout/worktree.
+    if root.join(".git").is_file() {
+        println!("cargo:rerun-if-changed=../.git");
+    } else if root.join(".git").is_dir() {
+        println!("cargo:rerun-if-changed=../.git/HEAD");
+    }
+    let own_git = git(&["rev-parse", "--show-toplevel"])
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        == std::fs::canonicalize(&root).ok();
+    let git_commit = if own_git {
+        for path in ["HEAD", "packed-refs"] {
+            if let Some(file) = git(&["rev-parse", "--git-path", path]) {
+                let file = root.join(file);
+                if file.exists() {
+                    println!("cargo:rerun-if-changed={}", file.display());
+                }
+            }
+        }
+        if let Some(file) = git(&["rev-parse", "--symbolic-full-name", "HEAD"])
+            .and_then(|reference| git(&["rev-parse", "--git-path", &reference]))
+        {
+            let file = root.join(file);
+            if file.exists() {
+                println!("cargo:rerun-if-changed={}", file.display());
+            }
+        }
+        git(&["rev-parse", "HEAD"])
+    } else {
+        None
+    };
+    let snapshot = root.join("UPSTREAM_COMMIT");
+    let snapshot_commit = if snapshot.is_file() {
+        println!("cargo:rerun-if-changed=../UPSTREAM_COMMIT");
+        std::fs::read_to_string(snapshot)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    } else {
+        None
+    };
     let commit = env::var("AGENT_BROWSER_SOURCE_COMMIT")
         .ok()
         .filter(|commit| !commit.trim().is_empty())
-        .or_else(|| git(&["rev-parse", "HEAD"]));
-    let identity = match commit {
-        Some(commit) => {
-            for path in ["HEAD", "packed-refs"] {
-                if let Some(file) = git(&["rev-parse", "--git-path", path]) {
-                    println!("cargo:rerun-if-changed={file}");
-                }
-            }
-            if let Some(file) = git(&["rev-parse", "--symbolic-full-name", "HEAD"])
-                .and_then(|reference| git(&["rev-parse", "--git-path", &reference]))
-            {
-                println!("cargo:rerun-if-changed={file}");
-            }
-            format!("{version}+{commit}")
-        }
-        None => version,
-    };
+        .or(git_commit)
+        .or(snapshot_commit);
+    let identity = commit
+        .map(|commit| format!("{version}+{commit}"))
+        .unwrap_or(version);
     println!("cargo:rustc-env=AGENT_BROWSER_DAEMON_BUILD={identity}");
 }
 
