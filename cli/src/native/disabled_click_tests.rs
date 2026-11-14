@@ -172,3 +172,36 @@ async fn disabled_click_guard_rejects_unknown_state_without_input_commands() {
         server.await.unwrap();
     }
 }
+
+/// Adjacent sidebar rows can move after hover but before mousePressed.
+#[tokio::test]
+#[ignore = "requires installed Chrome; run serially"]
+async fn adjacent_sidebar_hover_never_clicks_neighbor() {
+    let _env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_RESTORE", "AGENT_BROWSER_PLUGINS"]);
+    let mut state = DaemonState::new();
+    assert_eq!(execute_command(&json!({"id":"launch","action":"launch"}), &mut state).await["success"], true);
+    let html = r#"<style>button{display:block;width:180px;height:40px}nav{position:absolute;top:100px;left:100px}</style><nav><button id='account'>Account</button><button id='appearance'>Appearance</button></nav><script>
+    window.clicked=[]; document.addEventListener('click',e=>clicked.push(e.target.id));
+    document.querySelector('nav').addEventListener('mousemove',()=>{const a=document.querySelector('#account'); if(!window.shifted){window.shifted=true; a.parentNode.append(a)}}, {once:true});
+    </script>"#;
+    // Hex escapes avoid data-URL fragment parsing without another dependency.
+    let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+    assert_eq!(execute_command(&json!({"id":"nav","action":"navigate","url":format!("data:text/html,{encoded}"),"waitUntil":"load"}), &mut state).await["success"], true);
+    let reply = execute_command(&json!({"id":"click","action":"getbyrole","role":"button","name":"Account","exact":true,"subaction":"click"}), &mut state).await;
+    let observed = state.browser.as_ref().unwrap().evaluate("window.clicked", None).await.unwrap();
+    assert_eq!(observed, json!(["account"]), "neighbor was clicked: {reply} {observed}");
+    assert_eq!(reply["success"], true, "hover change must reposition before press: {reply}");
+    // Snapshot refs use the same pinned-node pre-press validation.
+    execute_command(&json!({"id":"snap","action":"snapshot","interactive":true}), &mut state).await;
+    let reference = state.ref_map.entries_sorted().into_iter().find(|(_, entry)| entry.name == "Appearance").map(|(key, _)| format!("@{key}")).unwrap();
+    let reply = execute_command(&json!({"id":"ref","action":"click","selector":reference}), &mut state).await;
+    assert_eq!(reply["success"], true, "{reply}");
+    assert_eq!(state.browser.as_ref().unwrap().evaluate("window.clicked", None).await.unwrap(), json!(["account", "appearance"]));
+    // A sidebar that keeps moving must fail without activating either row.
+    state.browser.as_ref().unwrap().evaluate("window.clicked=[]; document.querySelector('nav').addEventListener('mousemove',()=>{const nav=document.querySelector('nav'); nav.append(nav.firstElementChild)})", None).await.unwrap();
+    let reply = execute_command(&json!({"id":"unstable","action":"getbyrole","role":"button","name":"Account","exact":true,"subaction":"click"}), &mut state).await;
+    assert_eq!(reply["success"], false, "{reply}");
+    assert_eq!(reply["code"], "click_target_unstable", "{reply}");
+    assert_eq!(state.browser.as_ref().unwrap().evaluate("window.clicked", None).await.unwrap(), json!([]));
+    close_current_browser(&mut state).await.unwrap();
+}

@@ -29,7 +29,7 @@ pub struct PendingRelease {
 /// Explicit viewport coordinates use the same single-dispatch gesture and
 /// dialog-aware release as selector clicks; there is no coordinate retry.
 pub async fn click_coordinates(client: &CdpClient, session: &str, x: f64, y: f64, button: &str) -> Result<ClickResult, String> {
-    dispatch_click(client, session, &[session], x, y, button, 1).await
+    dispatch_click(client, session, &[session], x, y, button, 1, None).await
 }
 
 pub async fn click(
@@ -44,8 +44,8 @@ pub async fn click(
     let result = click_once(client, session_id, ref_map, selector_or_ref, button, click_count, iframe_sessions).await;
     match result {
         Ok(result) => Ok(result),
-        // Every click_target_changed exit is before dispatch_click. Never retry
-        // transport errors, timeouts, disabled/intercepted controls or any input.
+        // Every click_target_changed exit is before a button press. Never retry
+        // transport errors, timeouts, disabled/intercepted controls or a press.
         Err(error) if error.starts_with("click_target_changed:") && super::element::parse_ref(selector_or_ref).is_some() => {
             let fresh = super::element::click_ref_map(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?;
             let mut result = click_once(client, session_id, fresh.as_ref().unwrap_or(ref_map), selector_or_ref, button, click_count, iframe_sessions).await?;
@@ -76,7 +76,7 @@ async fn click_once(
     let outcome: Result<ClickResult, String> = async {
     // Recompute only pre-dispatch geometry, retaining the same pinned object.
     // Point resolution may itself scroll, and remote page layout may settle
-    // between CDP reads. Never retry transport errors or any pointer input.
+    // between CDP reads. Never retry transport errors or any button press.
     let preparation = include_str!("prepare-click.js").replace("CLICK_GUARD", include_str!("click_guard.js"));
     for _ in 0..4 {
     let prepared = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
@@ -141,7 +141,7 @@ async fn click_once(
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    let mut result = dispatch_click(
+    let result = dispatch_click(
         client,
         &effective_session_id,
         &[effective_session_id.as_str(), session_id],
@@ -149,12 +149,19 @@ async fn click_once(
         y,
         button,
         click_count,
+        Some((&object, &preparation, &prepared["result"]["value"])),
     )
-    .await?;
+    .await;
+    let mut result = match result {
+        // Only pointer movement occurred. Recompute this same pinned object's
+        // settled point; never reselect a neighbor or repeat a button press.
+        Err(error) if error.starts_with("click_hover_reposition:") => continue,
+        other => other?,
+    };
     result.ref_refreshed = ref_refreshed;
     return Ok(result);
     }
-    Err("click_target_unstable: pinned geometry kept changing before dispatch; no pointer events dispatched".into())
+    Err("click_target_unstable: pinned geometry kept changing before button press; no button press dispatched".into())
     }.await;
     outcome.map_err(|error| if ref_refreshed && error.starts_with("click_target_changed:") {
         "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no pointer events dispatched".into()
@@ -1208,6 +1215,7 @@ async fn dispatch_click(
     y: f64,
     button: &str,
     click_count: i32,
+    pinned: Option<(&str, &str, &Value)>,
 ) -> Result<ClickResult, String> {
     // Move
     if dispatch_mouse_or_dialog(
@@ -1234,6 +1242,28 @@ async fn dispatch_click(
             dialog_opened: true,
             pending_release: None,
         });
+    }
+
+    // Hover handlers run during mouseMoved and can reorder adjacent sidebar
+    // rows. The point was validated before that event, not after it. Return
+    // to the bounded point-resolution loop before pressing if geometry moved;
+    // never activate a neighbor or replay a dispatched button gesture.
+    if let Some((object, preparation, expected)) = pinned {
+        let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+            "objectId": object, "functionDeclaration": preparation,
+            "arguments": [{"value": expected}], "returnByValue": true
+        })), Some(session_id)).await?;
+        if stable.get("exceptionDetails").is_some() {
+            return Err("click_state_unavailable: pinned geometry unavailable after pointer movement; no button press dispatched".into());
+        }
+        match stable["result"]["value"].as_str() {
+            Some("changed" | "detached") => return Err("click_target_changed: pinned target detached after pointer movement; no button press dispatched".into()),
+            Some("disabled") => return Err("click_disabled: pinned target disabled after pointer movement; no button press dispatched".into()),
+            Some(_) => return Err("click_state_unavailable: pinned geometry unavailable after pointer movement; no button press dispatched".into()),
+            None if stable["result"]["value"] == false => return Err("click_hover_reposition: pinned geometry moved before button press".into()),
+            None if stable["result"]["value"] == true => {},
+            None => return Err("click_state_unavailable: pinned geometry unavailable after pointer movement; no button press dispatched".into()),
+        }
     }
 
     let button_value = match button {
