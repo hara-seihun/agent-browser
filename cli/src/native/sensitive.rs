@@ -2213,11 +2213,11 @@ async fn inventory_control(
                                     if (privateToken(attr.value)) values.push(attr.value);
                                 }
                                 if (node.shadowRoot) scan(node.shadowRoot);
-                                if (node.content) scan(node.content);
+                                if (node.tagName === 'TEMPLATE' && node.content) scan(node.content);
                             }
                             for (const child of node.childNodes) scan(child);
                         };
-                        scan(this.content || this);
+                        scan(this.tagName === 'TEMPLATE' ? this.content : this);
                         return values;
                     }"#
                 } else if control.display {
