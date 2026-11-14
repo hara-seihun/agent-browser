@@ -10,6 +10,9 @@ readme = "../README.md"
 keywords = ["browser", "automation", "ai", "cdp", "chrome"]
 categories = ["command-line-utilities", "web-programming"]
 
+[workspace.metadata.rcargo]
+iteration-profile = "ci"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["unbounded_depth"] }
