@@ -4013,8 +4013,10 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   recollect all projections under one deadline. Post-capture guards never retry.
   Cancelled renderer handles retain connection-owned cleanup (500ms bound).
   Unresolved cleanup refuses further observation until connection close.
-  Explicit data-private=true elements and TOTP/authenticator secret or seed labels
-  protect text/descendants as [redacted: credential], including screenshots and eval.
+  Direct data-private=true controls and text-only displays, and TOTP/authenticator
+  secret or seed labels, protect text/descendants as [redacted: credential].
+  Form-container analytics markers do not classify descendant controls as secrets.
+  Screenshots and eval retain the same protection.
   OAuth authorization-code labels, IDs/classes (including code.auth-code) protect
   displayed codes in snapshots/getters, mask screenshots and refuse evaluation.
   Private auth export still writes only to its exclusive private file.

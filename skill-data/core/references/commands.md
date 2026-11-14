@@ -1,6 +1,6 @@
 # Command Reference
 
-Elements marked `data-private="true"` and text labelled as a TOTP/authenticator secret or seed are protected as `[redacted: credential]`, including their descendants and later text echoes. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
+Controls and text-only displays marked `data-private="true"`, and text labelled as a TOTP/authenticator secret or seed, are protected as `[redacted: credential]`, including their descendants and later text echoes. Analytics privacy markers on form containers do not make every child a credential; descendant controls are classified individually, and directly marked controls remain private. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
 
 Plain `fill` accepts non-secret email, username and shipping-address values, including in forms containing passwords or payment fields. Passwords, payment credentials, one-time codes and previously protected controls still require `auth fill` from a credential provider. CLI and MCP share this behavior.
 

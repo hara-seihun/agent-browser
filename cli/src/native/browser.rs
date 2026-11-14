@@ -1283,12 +1283,25 @@ impl BrowserManager {
             .track(
                 super::observation_progress::Phase::NavigationMetadata,
                 async {
-                    let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
-                    let title = self.get_title().await.unwrap_or_default();
-                    (page_url, title)
+                    // Target metadata is maintained by the browser process. Renderer
+                    // evaluation can stall indefinitely after lifecycle completion
+                    // (for example while a page is running long tasks).
+                    let target = self.active_target_id()?;
+                    let info = self.client.send_command(
+                        "Target.getTargetInfo",
+                        Some(json!({ "targetId": target })),
+                        None,
+                    ).await?;
+                    let target_info = &info["targetInfo"];
+                    let page_url = target_info["url"].as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "Browser target metadata returned no URL string".to_string())?
+                        .to_owned();
+                    let title = target_info["title"].as_str().unwrap_or("").to_owned();
+                    Ok::<_, String>((page_url, title))
                 },
             )
-            .await;
+            .await?;
 
         // Track visited origin for cross-origin localStorage collection in save_state
         if let Ok(parsed) = url::Url::parse(&page_url) {

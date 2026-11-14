@@ -31,6 +31,7 @@ const PRIVATE_TOKEN_PATTERNS: &[(&str, usize, bool)] = &[
     ("rk_live_", 8, false),
     ("whsec_", 8, false),
     ("bu_", 20, true),
+    ("tl-", 48, false),
 ];
 
 fn private_token_length(text: &str) -> Option<usize> {
@@ -427,6 +428,28 @@ fn private_text(attributes: &HashMap<String, String>) -> bool {
             .is_some_and(|classes| classes.split_whitespace().any(api_text_label))
 }
 
+// Analytics libraries mark entire checkout forms data-private. Such a container
+// is not a credential display: classify its controls individually. Directly
+// marked controls and private text-only displays retain their protection.
+fn private_node(node: &Value, attributes: &HashMap<String, String>) -> bool {
+    fn control(node: &Value) -> bool {
+        matches!(node["nodeName"].as_str(), Some("INPUT" | "TEXTAREA" | "SELECT"))
+            || node_attributes(node).get("contenteditable").is_some_and(|value|
+                matches!(value.to_ascii_lowercase().as_str(), "" | "true" | "plaintext-only"))
+    }
+    fn contains_control(node: &Value) -> bool {
+        control(node) || ["children", "shadowRoots"].iter().any(|key|
+            node[*key].as_array().into_iter().flatten().any(contains_control))
+    }
+    if attributes.contains_key("data-private") && !control(node) && contains_control(node) {
+        let mut own = attributes.clone();
+        own.remove("data-private");
+        private_text(&own)
+    } else {
+        private_text(attributes)
+    }
+}
+
 /// `autocomplete="one-time-code"` alone does not make a field a one-time code:
 /// some forms put it on every field. It protects only a single-line input that
 /// is code-shaped (short maxlength, numeric inputmode or pattern, or a code-like
@@ -610,8 +633,18 @@ pub fn classifier_js() -> String {
       }}
       return apiRoots.get(root).has(el);
     }};
+    const controlContainers = new WeakMap();
+    const hasControl = el => {{
+      if (!controlContainers.has(el)) controlContainers.set(el,
+        Array.from(el.children).some(child =>
+          ['INPUT', 'TEXTAREA', 'SELECT'].includes(child.tagName) || child.isContentEditable
+          || hasControl(child)) || !!(el.shadowRoot && hasControl(el.shadowRoot)));
+      return controlContainers.get(el);
+    }};
     const privateText = el => Array.from(el.attributes).some(a => privateToken(a.value))
-      || (el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
+      || ((el.getAttribute('data-private') || '').trim().toLowerCase() === 'true'
+        && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable
+          || !hasControl(el)))
       || {}.some(hint => (el.getAttribute('aria-label') || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(hint))
       || ['aria-label', 'title', 'id', 'name'].some(key => apiLabel(el.getAttribute(key)))
       || (el.getAttribute('class') || '').split(/\s+/).some(apiLabel)
@@ -1424,7 +1457,7 @@ fn collect_nodes(
             }
         }
         let display = display_button(node);
-        let text = private_text(&attrs)
+        let text = private_node(node, &attrs)
             || node["backendNodeId"]
                 .as_i64()
                 .is_some_and(|id| api_nodes.contains(&id))
@@ -2213,11 +2246,18 @@ async fn inventory_control(
                                     if (privateToken(attr.value)) values.push(attr.value);
                                 }
                                 if (node.shadowRoot) scan(node.shadowRoot);
-                                if (node.content) scan(node.content);
+                                if (node.tagName === 'TEMPLATE' && node.content) scan(node.content);
+                            }
+                            if (!node.childNodes) {
+                                // CDP resolves pseudo elements to CSSPseudoElement, not Node.
+                                // Their generated content can itself contain credentials.
+                                if (!node.element || typeof node.type !== 'string') throw new Error('Unsupported private subtree');
+                                values.push(getComputedStyle(node.element, node.type).content || '');
+                                return;
                             }
                             for (const child of node.childNodes) scan(child);
                         };
-                        scan(this.content || this);
+                        scan(this.tagName === 'TEMPLATE' ? this.content : this);
                         return values;
                     }"#
                 } else if control.display {
@@ -2451,7 +2491,7 @@ where
         api_nodes: &HashSet<i64>,
     ) {
         let private = inherited_private
-            || private_text(&node_attributes(node))
+            || private_node(node, &node_attributes(node))
             || node["backendNodeId"]
                 .as_i64()
                 .is_some_and(|id| api_nodes.contains(&id));
@@ -2782,6 +2822,9 @@ mod tests {
         assert!(has_private_token(&format!("bu_{}", "x".repeat(20))));
         assert!(!has_private_token("pk_test_public_1234567890"));
         assert!(has_private_token("sk_test_12345678"));
+        let token_lab = format!("tl-{}", "a1".repeat(24));
+        assert!(has_private_token(&token_lab));
+        assert_eq!(Observation::default().protect_text(&format!("Authorization: Bearer {token_lab}")), "Authorization: Bearer [redacted: credential]");
         let observed = Observation::default();
         assert_eq!(observed.protect_text(&format!("é[{secret}]!")), "é[[redacted: credential]]!");
         let root = json!({"nodeName":"DIV", "backendNodeId":1, "children":[

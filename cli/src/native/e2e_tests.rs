@@ -11591,12 +11591,13 @@ async fn e2e_fill_replaces_text_in_value_tracking_fields() {
 async fn e2e_checkout_plain_fill_beside_secrets() {
     let mut state = DaemonState::new();
     assert_success(&sensitive_test_command(&json!({"id":"launch","action":"launch","headless":true,"engine":"chrome","args":["--no-sandbox","--disable-dev-shm-usage"]}), &mut state).await);
-    let html = "<form><label>Email<input id='email' type='email'></label><label>Username<input id='username' autocomplete='username'></label><label>Address<input id='address' autocomplete='street-address'></label><label>Password<input id='password' type='password'></label><label>Card<input id='card' autocomplete='cc-number'></label></form>";
+    let html = "<div data-private='true'><form data-private='true'><div data-private='true'><label>Email<input id='email' type='email'></label></div><label>Username<input id='username' autocomplete='username'></label><label>Address<input id='address' autocomplete='street-address'></label><label>Password<input id='password' type='password'></label><label>Card<input id='card' autocomplete='cc-number'></label><label>Expiry<input id='expiry' autocomplete='cc-exp' value='12/29'></label><label>CVV<input id='cvv' autocomplete='cc-csc' value='987'></label><label>Code<input id='otp' autocomplete='one-time-code' maxlength='6' value='654321'></label><label>Private input<input id='private' data-private='true' value='private-input-sentinel'></label><div data-private='true'><span>private-display-sentinel</span></div><label>Birth date<input id='dob' type='date'></label><label>City<select id='city'><option>Seattle</option></select></label><label><input type='checkbox'>Consent</label><p id='total'>Order total $65</p></form></div>";
     assert_success(&sensitive_test_command(&json!({"id":"page","action":"navigate","url":format!("data:text/html,{}", urlencoding::encode(html))}), &mut state).await);
     for (selector, value) in [
         ("#email", "checkout@example.test"),
         ("#username", "ordinary-name"),
         ("#address", "123 Example Street"),
+        ("#dob", "1990-01-02"),
     ] {
         assert_success(
             &sensitive_test_command(
@@ -11625,7 +11626,23 @@ async fn e2e_checkout_plain_fill_beside_secrets() {
         .unwrap()
         .0;
     assert_success(&sensitive_test_command(&json!({"id":"ref-fill","action":"fill","selector":format!("@{reference}"),"value":"second@example.test"}), &mut state).await);
-    for selector in ["#password", "#card"] {
+    let snapshot = sensitive_test_command(&json!({"id":"mixed-snapshot","action":"snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let rendered = snapshot.to_string();
+    for public in ["Email", "Username", "Address", "Birth date", "Seattle", "Consent", "Order total $65"] {
+        assert!(rendered.contains(public), "missing public label {public}: {rendered}");
+    }
+    for secret in ["private-input-sentinel", "private-display-sentinel", "654321", "987", "12/29"] {
+        assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+    }
+    // The execution-time getter uses the same per-control scope as inventory.
+    let text = sensitive_test_command(&json!({"id":"mixed-text","action":"gettext","selector":"#total"}), &mut state).await;
+    assert_success(&text);
+    assert!(text.to_string().contains("Order total $65"));
+    assert!(!text.to_string().contains("private-display-sentinel"));
+    let eval = sensitive_test_command(&json!({"id":"eval","action":"evaluate","script":"document.title"}), &mut state).await;
+    assert!(eval.to_string().contains("SENSITIVE_OUTPUT_UNSUPPORTED"));
+    for selector in ["#password", "#card", "#expiry", "#cvv", "#otp", "#private"] {
         let result = sensitive_test_command(
             &json!({"id":"secret","action":"fill","selector":selector,"value":"not-a-real-secret"}),
             &mut state,

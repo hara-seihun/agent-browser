@@ -978,7 +978,7 @@ Public X/Twitter status URLs and LinkedIn activity URLs/URNs keep their numeric 
 
 ### Native sensitive form inputs
 
-Elements marked `data-private="true"` and text labelled as a TOTP/authenticator secret or seed are protected as `[redacted: credential]`, including their descendants and later text echoes. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
+Controls and text-only displays marked `data-private="true"`, and text labelled as a TOTP/authenticator secret or seed, are protected as `[redacted: credential]`, including their descendants and later text echoes. Analytics privacy markers on form containers do not make every child a credential; descendant controls are classified individually, and directly marked controls remain private. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
 
 Click and other input-only acknowledgements return after input dispatch without a fresh page inventory or post-action frame setup. They do not confirm that the application accepted the action; inspect a new snapshot to learn the outcome, and never replay an uncertain payment or submission automatically. Snapshots include represented presentational iframes as well as ordinary iframes, with the same protected-value handling.
 
