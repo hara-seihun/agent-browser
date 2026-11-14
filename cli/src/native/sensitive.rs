@@ -31,6 +31,7 @@ const PRIVATE_TOKEN_PATTERNS: &[(&str, usize, bool)] = &[
     ("rk_live_", 8, false),
     ("whsec_", 8, false),
     ("bu_", 20, true),
+    ("tl-", 48, false),
 ];
 
 fn private_token_length(text: &str) -> Option<usize> {
@@ -2789,6 +2790,9 @@ mod tests {
         assert!(has_private_token(&format!("bu_{}", "x".repeat(20))));
         assert!(!has_private_token("pk_test_public_1234567890"));
         assert!(has_private_token("sk_test_12345678"));
+        let token_lab = format!("tl-{}", "a1".repeat(24));
+        assert!(has_private_token(&token_lab));
+        assert_eq!(Observation::default().protect_text(&format!("Authorization: Bearer {token_lab}")), "Authorization: Bearer [redacted: credential]");
         let observed = Observation::default();
         assert_eq!(observed.protect_text(&format!("é[{secret}]!")), "é[[redacted: credential]]!");
         let root = json!({"nodeName":"DIV", "backendNodeId":1, "children":[
