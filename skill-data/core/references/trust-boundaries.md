@@ -6,7 +6,7 @@ Safety rules that apply to every agent-browser task, across all sites and framew
 
 ## Native sensitive form input contract
 
-Elements marked `data-private="true"` and text labelled as a TOTP/authenticator secret or seed are protected as `[redacted: credential]`, including their descendants and later text echoes. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
+Controls and text-only displays marked `data-private="true"`, and text labelled as a TOTP/authenticator secret or seed, are protected as `[redacted: credential]`, including their descendants and later text echoes. Analytics privacy markers on form containers do not make every child a credential; descendant controls are classified individually, and directly marked controls remain private. This explicit private-text protection also blocks evaluation and masks screenshots; `auth export` still transfers the selected private value directly to its private file without printing it.
 
 Known expiry hints for native form controls and contenteditable fields also include aria-label, aria-labelledby, associated or wrapping labels, and MM/YY placeholders. Snapshots protect remembered combined expiry echoes before AX aggregation/ref construction, including whitespace-formatted sibling StaticText after a textbox disappears. Split month/year controls and their AX descendants are scoped; short fragments never become global text substitutions. Rendered text getters preserve native innerText layout outside mapped protected spans without changing live DOM or controls; unavailable or ambiguous mapping refuses with SENSITIVE_OUTPUT_UNSUPPORTED.
 
