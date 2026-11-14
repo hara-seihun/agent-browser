@@ -2215,6 +2215,13 @@ async fn inventory_control(
                                 if (node.shadowRoot) scan(node.shadowRoot);
                                 if (node.tagName === 'TEMPLATE' && node.content) scan(node.content);
                             }
+                            if (!node.childNodes) {
+                                // CDP resolves pseudo elements to CSSPseudoElement, not Node.
+                                // Their generated content can itself contain credentials.
+                                if (!node.element || typeof node.type !== 'string') throw new Error('Unsupported private subtree');
+                                values.push(getComputedStyle(node.element, node.type).content || '');
+                                return;
+                            }
                             for (const child of node.childNodes) scan(child);
                         };
                         scan(this.tagName === 'TEMPLATE' ? this.content : this);
