@@ -1282,21 +1282,58 @@ fn public_numeric_id_span(text: &str, id: &str) -> Option<(usize, usize)> {
     Some((start, start + length))
 }
 
-/// Full payment numbers are private even when a site renders them as ordinary
-/// text or copy-button names rather than form values. Do not require a checksum:
-/// a mistyped or provider-specific number still must not be published.
-fn payment_number_length(text: &str) -> Option<usize> {
-    let mut digits = 0;
-    let mut end = 0;
+/// Digit groups of a run that starts at `text[0]`, joined by whitespace or
+/// dashes: (byte offset just past the group, digit count) for each group.
+fn digit_groups(text: &str) -> Vec<(usize, usize)> {
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut in_group = false;
     for (offset, ch) in text.char_indices() {
         if ch.is_ascii_digit() {
-            digits += 1;
-            end = offset + 1;
-        } else if digits > 0 && (ch.is_whitespace() || matches!(ch, '-' | '‐' | '‑' | '–')) {
-            continue;
+            if in_group {
+                let last = groups.last_mut().unwrap();
+                *last = (offset + 1, last.1 + 1);
+            } else {
+                groups.push((offset + 1, 1));
+                in_group = true;
+            }
+        } else if !groups.is_empty() && (ch.is_whitespace() || matches!(ch, '-' | '‐' | '‑' | '–')) {
+            in_group = false;
         } else {
             break;
         }
+    }
+    groups
+}
+
+/// Every digit of a separated run, in a control already known to hold a card
+/// number. Grouping is not evidence there: the control's kind already is.
+fn payment_digit_run_length(text: &str) -> Option<usize> {
+    let groups = digit_groups(text);
+    let digits: usize = groups.iter().map(|(_, n)| n).sum();
+    (digits >= 13).then(|| groups.last().unwrap().0)
+}
+
+/// Full payment numbers are private even when a site renders them as ordinary
+/// text or copy-button names rather than form values. Do not require a checksum:
+/// a mistyped or provider-specific number still must not be published.
+///
+/// In unlabelled page text a separated card number is printed in groups of at
+/// most six digits (4-4-4-4, Amex 4-6-5, Diners 4-6-4, 4-4-4-4-3). A later group
+/// of seven or more digits ends the card-shaped prefix: public identifiers such as
+/// FDA warning-letter paths (`snuzyncom-721342-12302025`, a six-digit case number
+/// and an eight-digit date) are not card numbers. On November 15, 2026 every link
+/// in the FDA warning-letter table was published as `[redacted: cc-number]`.
+/// A contiguous run of 13 or more digits stays private whatever follows it, and a
+/// card-shaped prefix is still redacted when a long group follows it.
+fn payment_number_length(text: &str) -> Option<usize> {
+    let mut digits = 0;
+    let mut end = 0;
+    for (index, (group_end, count)) in digit_groups(text).into_iter().enumerate() {
+        if index > 0 && count > 6 {
+            break;
+        }
+        digits += count;
+        end = group_end;
     }
     (digits >= 13).then_some(end)
 }
@@ -1313,7 +1350,7 @@ fn display_payment_spans(text: &str, kind: &str) -> Vec<(usize, usize)> {
             continue;
         }
         let length = if kind == "cc-number" {
-            payment_number_length(&text[start..])
+            payment_digit_run_length(&text[start..])
         } else {
             let mut digits = 0;
             let mut end = 0;
@@ -3032,6 +3069,60 @@ mod tests {
         let mut known = Observation::default();
         known.secrets.push((id.to_string(), marker("cc-number")));
         assert_eq!(known.protect_text(&value), "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+    }
+
+    #[test]
+    fn fda_warning_letter_path_ids_are_public_but_cards_are_not() {
+        use super::*;
+        let observed = Observation::default();
+        // The public FDA warning-letter table row observed on November 15, 2026
+        // (snuzyn.com, MARCS-CMS 721342, issued December 30, 2025), as page text,
+        // as rendered HTML and as JSON-escaped HTML inside an eval result.
+        let path = "/inspections-compliance-enforcement-and-criminal-investigations/warning-letters/snuzyncom-721342-12302025";
+        for text in [
+            path.to_string(),
+            format!("https://www.fda.gov{path}"),
+            format!("<a href=\"{path}\">snuzyn.com</a>"),
+            format!("[\"<a href=\\\"{path}\\\">snuzyn.com</a>\"]"),
+            "MARCS-CMS 721342 — December 30, 2025; letter 721342-12302025".to_string(),
+            "bnc-distribution-inc-7213429-12112025 and 721342 12302025".to_string(),
+        ] {
+            assert_eq!(observed.protect_text(&text), text);
+        }
+        // Real card numbers stay private in every ordinary printed form.
+        for (text, expected) in [
+            ("Card 4242424242424242", "Card [redacted: cc-number]"),
+            ("Card 4242 4242 4242 4242 exp", "Card [redacted: cc-number] exp"),
+            ("Card 4242-4242-4242-4242.", "Card [redacted: cc-number]."),
+            ("Amex 3782 822463 10005", "Amex [redacted: cc-number]"),
+            ("Amex 378282246310005", "Amex [redacted: cc-number]"),
+            ("Diners 3056 930902 5904", "Diners [redacted: cc-number]"),
+            ("19 digits 6011 0009 9013 9424 123", "19 digits [redacted: cc-number]"),
+            ("Visa13 4222222222222", "Visa13 [redacted: cc-number]"),
+            // A card-shaped prefix stays private when a long public group follows it.
+            ("4242 4242 4242 4242 12302025", "[redacted: cc-number] 12302025"),
+            ("4242424242424242-12302025", "[redacted: cc-number]-12302025"),
+            // A card later in the same separated run is found from its own start.
+            ("letter 721342-4242424242424242", "letter 721342-[redacted: cc-number]"),
+            ("/pay/4242424242424242?x=1", "/pay/[redacted: cc-number]?x=1"),
+            ("snuzyncom-4242-4242-4242-4242", "snuzyncom-[redacted: cc-number]"),
+            ("pan=4242 4242 4242 4242&", "pan=[redacted: cc-number]&"),
+        ] {
+            assert_eq!(observed.protect_text(text), expected, "{text}");
+        }
+        // Secrets and remembered values keep their protection inside public paths.
+        assert_eq!(
+            observed.protect_text("/warning-letters/sk_live_abcdefghijklmnop1234"),
+            "/warning-letters/[redacted: credential]"
+        );
+        let mut known = Observation::default();
+        known.secrets.push(("721342-12302025".to_string(), marker("cc-number")));
+        assert_eq!(known.protect_text(path), path.replace("721342-12302025", "[redacted: cc-number]"));
+        // A control already known to hold a card number protects its whole digit run.
+        assert_eq!(
+            observed.protect_control_name("Copy 721342-12302025", "[redacted: cc-number]"),
+            "Copy [redacted: cc-number]"
+        );
     }
 
     #[test]
