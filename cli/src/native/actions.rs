@@ -2981,9 +2981,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     incomplete_snapshot(super::sensitive::InventoryError::Deadline(diagnostic)),
                 );
             }
+            let action_completed = diagnostic.action_completed();
             let mut response = error_response(id, &format!(
-                "{}; command deadline expired; dispatched effects may still settle; outcome unknown; not replayed",
-                diagnostic.command_message()));
+                "{}; command deadline expired{}; dispatched effects may still settle; outcome unknown; not replayed",
+                diagnostic.command_message(),
+                if action_completed {
+                    " after the action itself completed, while its response was being protected and finalized; the response was withheld"
+                } else {
+                    ""
+                }));
+            response["actionCompleted"] = json!(action_completed);
             response["diagnostic"] = json!(diagnostic);
             response["code"] = json!(
                 if matches!(action, "auth_login" | "auth_fill" | "auth_export") {

@@ -65,8 +65,11 @@ lto = false
 incremental = true
 codegen-units = 16
 
-# Browser control waits on CDP, not Rust optimization. Keep native iteration
-# fast while dependencies (including image codecs) retain release optimization.
+# The ci binary is the one agents run. The protected-output inventory walks the
+# whole pierced DOM before and after every command; on a 59,000-element page an
+# opt-level 0 daemon spent most of a 25 s command deadline there (November 15,
+# 2026: 26.8 s unoptimized, 14.3 s optimized for one eval). Optimize the crate;
+# codegen-units and incremental builds keep rebuilds reasonable.
 [profile.ci.package.agent-browser]
-opt-level = 0
+opt-level = 3
 codegen-units = 64
