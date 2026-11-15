@@ -44,9 +44,20 @@ fn private_token_length(text: &str) -> Option<usize> {
     })
 }
 
+// Every family prefix contains '_' or '-'; most page text has neither, and the
+// inventory scans every text node and attribute value of large documents.
+const PRIVATE_TOKEN_FIRST_BYTES: &[u8] = b"srwbt";
+
 fn has_private_token(text: &str) -> bool {
-    text.char_indices()
-        .any(|(start, _)| private_token_length(&text[start..]).is_some())
+    let bytes = text.as_bytes();
+    if !bytes.iter().any(|byte| matches!(byte, b'_' | b'-')) {
+        return false;
+    }
+    // Prefixes are ASCII, so a match can only start at one of these bytes,
+    // which are always character boundaries.
+    bytes.iter().enumerate().any(|(start, byte)| {
+        PRIVATE_TOKEN_FIRST_BYTES.contains(byte) && private_token_length(&text[start..]).is_some()
+    })
 }
 
 const AUTOCOMPLETE: &[(&str, &str)] = &[
@@ -358,14 +369,13 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
     // A recovery-code dialog often separates its heading from a deeply nested
     // list. Protect list items as a group, regardless of token shape or depth.
     fn recovery_dialogs(node: &Value, found: &mut HashSet<i64>) {
-        fn attrs(node: &Value) -> HashMap<String, String> {
-            node["attributes"].as_array().into_iter().flatten().collect::<Vec<_>>()
-                .chunks_exact(2).filter_map(|pair| Some((pair[0].as_str()?.to_ascii_lowercase(), pair[1].as_str()?.to_ascii_lowercase()))).collect()
+        // Attribute names and values compare ignoring ASCII case.
+        fn role(node: &Value, wanted: &str) -> bool {
+            attribute_ignore_case(node, "role").is_some_and(|role| role.eq_ignore_ascii_case(wanted))
         }
         fn heading(node: &Value) -> bool {
             let name = node["nodeName"].as_str().unwrap_or("");
-            let a = attrs(node);
-            let is_heading = matches!(name, "H1" | "H2" | "H3" | "H4" | "H5" | "H6") || a.get("role").is_some_and(|r| r == "heading");
+            let is_heading = matches!(name, "H1" | "H2" | "H3" | "H4" | "H5" | "H6") || role(node, "heading");
             fn text(node: &Value, out: &mut String) {
                 if let Some(t) = node["nodeValue"].as_str() { out.push_str(t); }
                 for child in node["children"].as_array().into_iter().flatten() { text(child, out); }
@@ -378,14 +388,12 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
             node["children"].as_array().into_iter().flatten().any(heading)
         }
         fn items(node: &Value, found: &mut HashSet<i64>) {
-            let a = attrs(node);
-            if node["nodeName"] == "LI" || a.get("role").is_some_and(|r| r == "listitem") {
+            if node["nodeName"] == "LI" || role(node, "listitem") {
                 if let Some(id) = node["backendNodeId"].as_i64() { found.insert(id); }
             }
             for child in node["children"].as_array().into_iter().flatten() { items(child, found); }
         }
-        let a = attrs(node);
-        if (node["nodeName"] == "DIALOG" || a.get("role").is_some_and(|r| r == "dialog" || r == "alertdialog")) && heading(node) { items(node, found); }
+        if (node["nodeName"] == "DIALOG" || role(node, "dialog") || role(node, "alertdialog")) && heading(node) { items(node, found); }
         for key in ["children", "shadowRoots", "pseudoElements"] {
             for child in node[key].as_array().into_iter().flatten() { recovery_dialogs(child, found); }
         }
@@ -1401,10 +1409,7 @@ fn display_payment_spans(text: &str, kind: &str) -> Vec<(usize, usize)> {
 }
 
 fn display_button(node: &Value) -> bool {
-    node["nodeName"] == "BUTTON"
-        || node_attributes(node)
-            .get("role")
-            .is_some_and(|role| role == "button")
+    node["nodeName"] == "BUTTON" || attribute(node, "role") == Some("button")
 }
 
 fn button_counts(node: &Value, counts: &mut HashMap<usize, usize>) -> usize {
@@ -1425,6 +1430,29 @@ struct Control {
     kind: &'static str,
     display: bool,
     text: bool,
+}
+
+/// The value `node_attributes(node).get(name)` would return, without building
+/// the map: the last string pair with exactly this name.
+fn attribute<'a>(node: &'a Value, name: &str) -> Option<&'a str> {
+    attribute_pairs(node).filter(|(key, _)| *key == name).last().map(|(_, value)| value)
+}
+
+/// The original-case value an ASCII-lowercased attribute map would hold for
+/// `name`: the last string pair whose name matches ignoring ASCII case.
+fn attribute_ignore_case<'a>(node: &'a Value, name: &str) -> Option<&'a str> {
+    attribute_pairs(node)
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .last()
+        .map(|(_, value)| value)
+}
+
+fn attribute_pairs(node: &Value) -> impl Iterator<Item = (&str, &str)> {
+    node["attributes"]
+        .as_array()
+        .into_iter()
+        .flat_map(|attributes| attributes.chunks_exact(2))
+        .filter_map(|pair| Some((pair[0].as_str()?, pair[1].as_str()?)))
 }
 
 fn node_attributes(node: &Value) -> HashMap<String, String> {
@@ -1452,19 +1480,30 @@ fn collect_nodes(
     controls: &mut Vec<Control>,
     seen: &mut HashSet<i64>,
 ) {
+    collect_nodes_with(node, session, controls, seen, &api_display_nodes(node))
+}
+
+/// `api_nodes` must be `api_display_nodes(node)`; the inventory computes it once
+/// per document and also uses it for its live private-text node set.
+fn collect_nodes_with(
+    node: &Value,
+    session: &str,
+    controls: &mut Vec<Control>,
+    seen: &mut HashSet<i64>,
+    api_nodes: &HashSet<i64>,
+) {
     fn labels<'a>(
         node: &'a Value,
         ids: &mut HashMap<String, &'a Value>,
         targets: &mut HashMap<String, String>,
     ) {
-        let attrs = node_attributes(node);
-        if let Some(id) = attrs.get("id") {
-            ids.insert(id.clone(), node);
+        if let Some(id) = attribute(node, "id") {
+            ids.insert(id.to_owned(), node);
         }
         if node["nodeName"] == "LABEL" {
-            if let Some(target) = attrs.get("for") {
+            if let Some(target) = attribute(node, "for") {
                 targets
-                    .entry(target.clone())
+                    .entry(target.to_owned())
                     .or_default()
                     .push_str(&format!("\n{}", node_text(node)));
             }
@@ -1654,7 +1693,7 @@ fn collect_nodes(
         false,
         "",
         &counts,
-        &api_display_nodes(node),
+        api_nodes,
     );
 }
 
@@ -2211,10 +2250,13 @@ async fn inventory_document(
     {
         return Err(format!("{UNSUPPORTED}: frame session association changed").into());
     }
-    let document = document?;
+    let mut document = document?;
+    // Move the root out of the response: a pierced tree can be tens of MB, and
+    // copying it cost a quarter second of daemon CPU per inventory (EUR-Lex OJ).
     let root = document
-        .get("root")
+        .get_mut("root")
         .filter(|root| root["nodeName"] == "#document")
+        .map(Value::take)
         .ok_or_else(|| format!("{UNSUPPORTED}: DOM root unavailable"))?;
     let backend = root["backendNodeId"]
         .as_i64()
@@ -2231,7 +2273,7 @@ async fn inventory_document(
         session,
         tree: live["frameTree"].clone(),
         bindings,
-        root: root.clone(),
+        root,
         backend,
     })
 }
@@ -2478,6 +2520,8 @@ where
         retained.remove(top_session),
     ));
     let mut documents = Vec::new();
+    // api_display_nodes per document, in `documents` order.
+    let mut api_sets = Vec::new();
     let mut visited = HashSet::from([top_session.to_owned()]);
     while !sessions.is_empty() {
         let document = tokio::select! {
@@ -2505,7 +2549,9 @@ where
             }
         }
         let mut controls = Vec::new();
-        collect_nodes(&document.root, session, &mut controls, &mut HashSet::new());
+        let api_nodes = api_display_nodes(&document.root);
+        collect_nodes_with(&document.root, session, &mut controls, &mut HashSet::new(), &api_nodes);
+        api_sets.push(api_nodes);
         if !controls.is_empty() {
             let group = client
                 .object_group(vec![session.clone()])
@@ -2582,14 +2628,14 @@ where
     }
     let mut live_nodes = HashSet::new();
     let mut private_text_nodes = HashSet::new();
-    for document in &documents {
+    for (document, api_nodes) in documents.iter().zip(&api_sets) {
         collect_live_nodes(
             &document.root,
             &document.session,
             &mut live_nodes,
             &mut private_text_nodes,
             false,
-            &api_display_nodes(&document.root),
+            api_nodes,
         );
     }
     let mut observation = Observation {
@@ -2865,6 +2911,181 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Profiling aid: SENSITIVE_BENCH_DOM=path/to/DOM.getDocument.json cargo test bench_inventory_walks -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_inventory_walks() {
+        use super::*;
+        let path = std::env::var("SENSITIVE_BENCH_DOM").expect("SENSITIVE_BENCH_DOM");
+        let text = std::fs::read_to_string(path).unwrap();
+        let t = std::time::Instant::now();
+        let doc: Value = super::super::cdp::client::parse_cdp(&text).unwrap();
+        eprintln!("parse {:?}", t.elapsed());
+        let root = &doc["root"];
+        let t = std::time::Instant::now();
+        let _ = truncated_nodes(root);
+        eprintln!("truncated_nodes {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let (mut covered, mut owners) = (HashMap::new(), HashSet::new());
+        collect_document_frames(root, "s", &mut covered, &mut owners);
+        eprintln!("collect_document_frames {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let api = api_display_nodes(root);
+        eprintln!("api_display_nodes {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let mut controls = Vec::new();
+        collect_nodes_with(root, "s", &mut controls, &mut HashSet::new(), &api);
+        eprintln!("collect_nodes_with {:?} ({} controls)", t.elapsed(), controls.len());
+        let t = std::time::Instant::now();
+        fn live(node: &Value, n: &mut usize) {
+            let _ = private_node(node, &node_attributes(node));
+            *n += 1;
+            for key in ["children", "shadowRoots", "pseudoElements"] {
+                for child in node[key].as_array().into_iter().flatten() { live(child, n); }
+            }
+            for key in ["contentDocument", "templateContent"] {
+                if let Some(child) = node.get(key) { live(child, n); }
+            }
+        }
+        let mut n = 0;
+        live(root, &mut n);
+        eprintln!("live_nodes(private_node) {:?} ({n} nodes, {} api)", t.elapsed(), api.len());
+        let t = std::time::Instant::now();
+        let _ = cursor_node_paths(root);
+        eprintln!("cursor_node_paths {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let mut context = InventoryContext {
+            document_frames: HashMap::new(), cursor_nodes: HashMap::new(), frame_paths: HashMap::new(),
+            dialog_roots: HashMap::new(), top_frame: String::new(), frame_roots: HashMap::new(),
+            frames: HashMap::new(), owners: HashMap::new(), hrefs: HashMap::new(),
+        };
+        let _ = collect_snapshot_context(root, "s", &mut context, None, None);
+        eprintln!("collect_snapshot_context {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let copy = root.clone();
+        eprintln!("clone root {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        drop(copy);
+        drop(doc);
+        eprintln!("drop {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn attribute_lookups_match_the_attribute_maps_they_replace() {
+        use super::*;
+        let node = serde_json::json!({"attributes": [
+            "role", "Dialog", "id", "a", "ROLE", "button", "id", "b", "broken", 3, "tail"]});
+        let exact = node_attributes(&node);
+        for name in ["role", "ROLE", "id", "broken", "tail", "missing"] {
+            assert_eq!(attribute(&node, name), exact.get(name).map(String::as_str), "{name}");
+        }
+        let lowered: HashMap<String, String> = attribute_pairs(&node)
+            .map(|(key, value)| (key.to_ascii_lowercase(), value.to_ascii_lowercase()))
+            .collect();
+        assert_eq!(
+            attribute_ignore_case(&node, "role").map(str::to_ascii_lowercase),
+            lowered.get("role").cloned()
+        );
+        assert!(!display_button(&serde_json::json!({"nodeName": "DIV", "attributes": ["role", "Button"]})));
+        assert!(display_button(&serde_json::json!({"nodeName": "DIV", "attributes": ["role", "x", "role", "button"]})));
+    }
+
+    #[test]
+    fn private_token_fast_path_matches_the_full_scan() {
+        use super::*;
+        fn full_scan(text: &str) -> bool {
+            text.char_indices()
+                .any(|(start, _)| private_token_length(&text[start..]).is_some())
+        }
+        for (prefix, _, _) in PRIVATE_TOKEN_PATTERNS {
+            assert!(prefix.contains(['_', '-']), "{prefix} needs the separator pre-check");
+            assert!(PRIVATE_TOKEN_FIRST_BYTES.contains(&prefix.as_bytes()[0]), "{prefix}");
+        }
+        let samples = [
+            "", "plain text", "sk_live_abcdefgh", "x sk_live_abcdefg", "émoji sk_test_ABCDEFGH1 tail",
+            "tl-", "bu_abcdefghijklmnopqrst", "bu_abcdefghijklmnopqrs", "whsec_12345678", "rk_test_12345678",
+            "class-name another_name", "ünïcode-wörds_ok", "sk_livé_abcdefgh", "rk_live_1234567",
+            "--__--__", "Ꮪk_live_abcdefgh",
+        ];
+        let long = format!("{}tl-{}", "ß-".repeat(40), "a".repeat(48));
+        for text in samples.iter().copied().chain([long.as_str()]) {
+            assert_eq!(has_private_token(text), full_scan(text), "{text:?}");
+        }
+    }
+
+    /// A tree shaped like the EUR-Lex Official Journal index (about 60,000
+    /// mostly hidden elements) whose protected-output inventory missed a 25 s
+    /// command deadline on November 15, 2026, after the evaluation had finished.
+    fn large_document(sections: usize) -> serde_json::Value {
+        use serde_json::json;
+        let mut backend = 1;
+        let mut next = || { backend += 1; backend };
+        let text = |id: i64, value: &str| json!({"nodeName":"#text","nodeType":3,"backendNodeId":id,"nodeValue":value});
+        let mut body = Vec::new();
+        for section in 0..sections {
+            let mut items = Vec::new();
+            for item in 0..12 {
+                let link = json!({"nodeName":"A","nodeType":1,"backendNodeId":next(),
+                    "attributes":["href",format!("./legal-content/EN/TXT/?uri=OJ:L_2026{section:05}{item}"),"title","Official Journal L series"],
+                    "children":[text(next(), &format!("Commission Implementing Regulation (EU) 2026/{section}{item}"))]});
+                let image = json!({"nodeName":"IMG","nodeType":1,"backendNodeId":next(),
+                    "attributes":["src","./images/pdf.png","alt","PDF","class","oj-icon hidden-xs"]});
+                items.push(json!({"nodeName":"LI","nodeType":1,"backendNodeId":next(),
+                    "attributes":["class","list-group-item"],"children":[link, image]}));
+            }
+            let cells: Vec<_> = (0..4).map(|cell| json!({"nodeName":"TD","nodeType":1,"backendNodeId":next(),
+                "children":[{"nodeName":"P","nodeType":1,"backendNodeId":next(),
+                    "attributes":["class","oj-normal"],"children":[text(next(), &format!("cell {cell} of {section}"))]}]})).collect();
+            body.push(json!({"nodeName":"DIV","nodeType":1,"backendNodeId":next(),
+                "attributes":["id",format!("section-{section}"),"class","collapse panel-collapse","aria-expanded","false"],
+                "children":[
+                    {"nodeName":"BUTTON","nodeType":1,"backendNodeId":next(),"attributes":["type","button","data-toggle","collapse"],
+                        "children":[text(next(), "Show")]},
+                    {"nodeName":"UL","nodeType":1,"backendNodeId":next(),"children":items},
+                    {"nodeName":"TABLE","nodeType":1,"backendNodeId":next(),"children":[
+                        {"nodeName":"TBODY","nodeType":1,"backendNodeId":next(),"children":[
+                            {"nodeName":"TR","nodeType":1,"backendNodeId":next(),"children":cells}]}]}]}));
+        }
+        json!({"nodeName":"#document","nodeType":9,"backendNodeId":1,"frameId":"top",
+            "documentURL":"https://eur-lex.europa.eu/TodayOJ/index.html","baseURL":"https://eur-lex.europa.eu/TodayOJ/index.html",
+            "children":[{"nodeName":"HTML","nodeType":1,"backendNodeId":2,"children":[
+                {"nodeName":"BODY","nodeType":1,"backendNodeId":3,"children":body}]}]})
+    }
+
+    /// Wall-clock bound: the intake runs tests named `deadline` on exclusive
+    /// latency cores. An unoptimized daemon build fails this.
+    #[test]
+    fn inventory_walks_fit_command_deadline_on_large_documents() {
+        use super::*;
+        let root = large_document(1100);
+        fn count(node: &Value) -> usize {
+            1 + node["children"].as_array().into_iter().flatten().map(count).sum::<usize>()
+        }
+        assert!(count(&root) > 59_000, "{}", count(&root));
+        let started = std::time::Instant::now();
+        let api = api_display_nodes(&root);
+        let mut controls = Vec::new();
+        collect_nodes_with(&root, "s", &mut controls, &mut HashSet::new(), &api);
+        let mut live = 0;
+        fn walk(node: &Value, live: &mut usize) {
+            *live += usize::from(private_node(node, &node_attributes(node)));
+            for child in node["children"].as_array().into_iter().flatten() {
+                walk(child, live);
+            }
+        }
+        walk(&root, &mut live);
+        let paths = cursor_node_paths(&root).unwrap();
+        let mut context = InventoryContext {
+            document_frames: HashMap::new(), cursor_nodes: HashMap::new(), frame_paths: HashMap::new(),
+            dialog_roots: HashMap::new(), top_frame: "top".into(), frame_roots: HashMap::new(),
+            frames: HashMap::new(), owners: HashMap::new(), hrefs: HashMap::new(),
+        };
+        collect_snapshot_context(&root, "s", &mut context, None, Some("top")).unwrap();
+        let elapsed = started.elapsed();
+        assert!(controls.is_empty() && api.is_empty() && live == 0 && paths.len() > 50_000);
+        assert!(elapsed < std::time::Duration::from_millis(1_500), "inventory walks took {elapsed:?}");
+    }
+
     #[test]
     fn numeric_urls_and_ids_are_public_but_labeled_cards_are_private() {
         use super::*;

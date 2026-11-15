@@ -60,6 +60,14 @@ struct PhaseDiagnostic {
 }
 
 impl DeadlineDiagnostic {
+    /// The command's own action returned, and only response work (protecting its
+    /// output and attaching metadata) was still running at the deadline.
+    pub(crate) fn action_completed(&self) -> bool {
+        let phase = |wanted| self.phases.iter().find(|p| p.phase == wanted);
+        phase(Phase::CommandAction).is_some_and(|p| p.completed > 0 && p.in_flight == 0)
+            && phase(Phase::ResponseFinalization).is_some_and(|p| p.in_flight > 0)
+    }
+
     pub(crate) fn command_message(&self) -> String {
         format!(
             "browser command deadline elapsed: {}",
@@ -305,6 +313,30 @@ mod tests {
         assert!(matches!(*progress.0.lock().unwrap(), State::Unset));
         // Other sessions and work outside the command cannot inherit its phases.
         assert!(!Arc::ptr_eq(&progress.0, &connection_progress().0));
+    }
+
+    #[tokio::test]
+    async fn response_finalization_after_a_completed_action_is_distinguished() {
+        let expire = |action_done: bool| async move {
+            let progress = ObservationProgress::default();
+            progress
+                .before(Instant::now() + std::time::Duration::from_millis(50), async {
+                    if action_done {
+                        progress.track(Phase::CommandAction, async {}).await;
+                        progress
+                            .track(Phase::ResponseFinalization, std::future::pending::<()>())
+                            .await;
+                    } else {
+                        progress
+                            .track(Phase::CommandAction, std::future::pending::<()>())
+                            .await;
+                    }
+                })
+                .await
+                .unwrap_err()
+        };
+        assert!(expire(true).await.action_completed());
+        assert!(!expire(false).await.action_completed());
     }
 
     #[tokio::test]
