@@ -650,6 +650,8 @@ pub fn classifier_js() -> String {
       || (el.getAttribute('class') || '').split(/\s+/).some(apiLabel)
       || apiLabel((el.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => el.getRootNode().getElementById(id)?.textContent || '').join(' '))
       || apiDisplay(el);
+    // Numeric IDs and URLs never establish card context. Only field metadata does.
+    // Keep scoped card fields private even if their value is mistyped or empty.
     const kindOf = el => {{
       if (!el || el.nodeType !== 1) return null;
       for (let parent = el; parent; parent = parent.parentElement || parent.getRootNode().host) {{
@@ -1024,7 +1026,7 @@ impl Observation {
                 .is_ascii_digit()
                 .then(|| payment_number_length(&text[start..]))
                 .flatten()
-                .filter(|_| start == 0 || !text.as_bytes()[start - 1].is_ascii_digit())
+                .filter(|length| card_number_context(text, start, start + length))
                 .filter(|_| !public_ids.iter().any(|&(lo, hi)| lo <= start && start < hi))
             {
                 out.push_str("[redacted: cc-number]");
@@ -1274,23 +1276,80 @@ fn public_numeric_id_span(text: &str, id: &str) -> Option<(usize, usize)> {
     Some((start, start + length))
 }
 
-/// Full payment numbers are private even when a site renders them as ordinary
-/// text or copy-button names rather than form values. Do not require a checksum:
-/// a mistyped or provider-specific number still must not be published.
+/// A generic numeric guess needs both a valid PAN checksum and a card label.
+/// Scoped card controls are protected independently, including mistyped values.
 fn payment_number_length(text: &str) -> Option<usize> {
-    let mut digits = 0;
+    let mut digits = Vec::new();
     let mut end = 0;
     for (offset, ch) in text.char_indices() {
         if ch.is_ascii_digit() {
-            digits += 1;
+            digits.push(ch as u8 - b'0');
             end = offset + 1;
-        } else if digits > 0 && (ch.is_whitespace() || matches!(ch, '-' | '‐' | '‑' | '–')) {
+        } else if !digits.is_empty() && (ch == ' ' || matches!(ch, '-' | '‐' | '‑' | '–')) {
             continue;
         } else {
             break;
         }
     }
-    (digits >= 13).then_some(end)
+    let sum: u32 = digits
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, &n)| {
+            let n = u32::from(n) * if i % 2 == 1 { 2 } else { 1 };
+            if n > 9 {
+                n - 9
+            } else {
+                n
+            }
+        })
+        .sum();
+    ((13..=19).contains(&digits.len()) && sum % 10 == 0).then_some(end)
+}
+
+fn standalone_card_number(text: &str, start: usize, end: usize) -> bool {
+    // A numeric substring in a URL, URN, identifier or query is not a PAN.
+    let prefix = &text[..start];
+    let suffix = &text[end..];
+    if prefix.chars().next_back().is_some_and(|c| {
+        c.is_alphanumeric() || matches!(c, '/' | '=' | '_' | '-' | ':' | '?' | '&' | '#' | '.')
+    }) || suffix.chars().next().is_some_and(|c| {
+        c.is_alphanumeric() || matches!(c, '/' | '_' | '-' | '?' | '&' | '#' | '.')
+    }) {
+        return false;
+    }
+    true
+}
+
+fn card_number_context(text: &str, start: usize, end: usize) -> bool {
+    if !standalone_card_number(text, start, end) {
+        return false;
+    }
+    let prefix = &text[..start];
+    let label = prefix
+        .rsplit(['\n', '\r', '"', '<', '>'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '='));
+    let lower = label.to_ascii_lowercase();
+    [
+        "card",
+        "card number",
+        "card no",
+        "cc number",
+        "cc-number",
+        "pan",
+    ]
+    .iter()
+    .any(|name| {
+        lower.strip_suffix(name).is_some_and(|before| {
+            before.is_empty()
+                || before
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !c.is_alphanumeric())
+        })
+    })
 }
 
 /// Short payment values need an explicit payment label; unlike full numbers,
@@ -1306,6 +1365,7 @@ fn display_payment_spans(text: &str, kind: &str) -> Vec<(usize, usize)> {
         }
         let length = if kind == "cc-number" {
             payment_number_length(&text[start..])
+                .filter(|length| standalone_card_number(text, start, start + length))
         } else {
             let mut digits = 0;
             let mut end = 0;
@@ -1491,7 +1551,14 @@ fn collect_nodes(
                     .or_else(|| classify(&attrs))
                     .or_else(|| {
                         (display
-                            && !display_payment_spans(&node_text(node), "cc-number").is_empty())
+                            && !display_payment_spans(&node_text(node), "cc-number").is_empty()
+                            && node_text(node).char_indices().any(|(start, _)| {
+                                payment_number_length(&node_text(node)[start..]).is_some_and(
+                                    |length| {
+                                        card_number_context(&node_text(node), start, start + length)
+                                    },
+                                )
+                            }))
                         .then_some("cc-number")
                     })
                     .filter(|kind| {
@@ -2799,18 +2866,59 @@ pub fn guarded(action: &str, cmd: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn numeric_urls_and_ids_are_public_but_labeled_cards_are_private() {
+        use super::*;
+        let observed = Observation::default();
+        for text in [
+            "https://www.facebook.com/marketplace/item/1390849649670167/",
+            "/marketplace/item/4242424242424242/",
+            "https://example.test/?card=4242424242424242",
+            "item_4242424242424242",
+            "4242424242424242",
+            "Card 4242424242424241",
+        ] {
+            assert_eq!(observed.protect_text(text), text);
+        }
+        assert_eq!(
+            observed.protect_text("Card number: 4242 4242 4242 4242"),
+            "Card number: [redacted: cc-number]"
+        );
+        assert_eq!(observed.protect_control_name("item_4242424242424242", "[redacted: cc-number]"), "item_4242424242424242");
+        let mut attrs = HashMap::new();
+        attrs.insert("autocomplete".into(), "cc-number".into());
+        assert_eq!(classify(&attrs), Some("cc-number"));
+        let mut scoped = Observation::default();
+        scoped
+            .secrets
+            .push(("4242424242424241".into(), marker("cc-number")));
+        assert_eq!(scoped.protect_text("4242424242424241"), marker("cc-number"));
+    }
+
+    #[test]
     fn linkedin_facepile_id_is_public_but_cards_and_remembered_secrets_are_not() {
         use super::*;
         let id = "7526753488295477248";
         let value = format!("ReactionFacepileCollection-urn:li:activity:{id}");
         let observed = Observation::default();
         assert_eq!(observed.protect_text(&value), value);
-        assert_eq!(observed.protect_text(&format!("x{value}")), "xReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
-        assert_eq!(observed.protect_text("Card 4242424242424242"), "Card [redacted: cc-number]");
-        assert_eq!(observed.protect_control_name(&value, "[redacted: cc-number]"), "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+        assert_eq!(
+            observed.protect_text(&format!("x{value}")),
+            format!("x{value}")
+        );
+        assert_eq!(
+            observed.protect_text("Card 4242424242424242"),
+            "Card [redacted: cc-number]"
+        );
+        assert_eq!(
+            observed.protect_control_name(&value, "[redacted: cc-number]"),
+            value
+        );
         let mut known = Observation::default();
         known.secrets.push((id.to_string(), marker("cc-number")));
-        assert_eq!(known.protect_text(&value), "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]");
+        assert_eq!(
+            known.protect_text(&value),
+            "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]"
+        );
     }
 
     #[test]
