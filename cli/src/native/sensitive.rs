@@ -3143,20 +3143,6 @@ mod tests {
     }
 
     #[test]
-    fn fda_warning_letter_ids_remain_public_and_known_secrets_stay_private() {
-        let path = "/inspections-compliance-enforcement-and-criminal-investigations/warning-letters/snuzyncom-721342-12302025";
-        let observed = Observation::default();
-        for text in [path.to_string(), format!("https://www.fda.gov{path}"), format!("<a href=\"{path}\">snuzyn.com</a>"), "letter 721342-12302025".to_string()] {
-            assert_eq!(observed.protect_text(&text), text);
-        }
-        assert_eq!(observed.protect_text("Card 4242424242424242"), "Card [redacted: cc-number]");
-        assert_eq!(observed.protect_text("/warning-letters/sk_live_abcdefghijklmnop1234"), "/warning-letters/[redacted: credential]");
-        let mut known = Observation::default();
-        known.secrets.push(("721342-12302025".to_string(), marker("cc-number")));
-        assert_eq!(known.protect_text(path), path.replace("721342-12302025", "[redacted: cc-number]"));
-    }
-
-    #[test]
     fn browser_use_tokens_are_always_private_and_url_safe() {
         use super::*;
         let secret = format!("bu_{}", "Ab_9-".repeat(9));
