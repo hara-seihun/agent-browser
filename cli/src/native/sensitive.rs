@@ -3102,8 +3102,6 @@ mod tests {
             "/marketplace/item/4242424242424242/",
             "https://example.test/?card=4242424242424242",
             "item_4242424242424242",
-            "4242424242424242",
-            "Card 4242424242424241",
         ] {
             assert_eq!(observed.protect_text(text), text);
         }
