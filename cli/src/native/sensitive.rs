@@ -1284,8 +1284,7 @@ fn public_numeric_id_span(text: &str, id: &str) -> Option<(usize, usize)> {
     Some((start, start + length))
 }
 
-/// A generic numeric guess needs both a valid PAN checksum and a card label.
-/// Scoped card controls are protected independently, including mistyped values.
+/// Detect 13–19 digit candidates; checksum or label decides generic protection.
 fn payment_number_length(text: &str) -> Option<usize> {
     let mut digits = Vec::new();
     let mut end = 0;
@@ -1299,6 +1298,11 @@ fn payment_number_length(text: &str) -> Option<usize> {
             break;
         }
     }
+    (13..=19).contains(&digits.len()).then_some(end)
+}
+
+fn valid_card_checksum(text: &str) -> bool {
+    let digits: Vec<u8> = text.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
     let sum: u32 = digits
         .iter()
         .rev()
@@ -1312,7 +1316,7 @@ fn payment_number_length(text: &str) -> Option<usize> {
             }
         })
         .sum();
-    ((13..=19).contains(&digits.len()) && sum % 10 == 0).then_some(end)
+    sum % 10 == 0
 }
 
 fn standalone_card_number(text: &str, start: usize, end: usize) -> bool {
@@ -1332,6 +1336,9 @@ fn standalone_card_number(text: &str, start: usize, end: usize) -> bool {
 fn card_number_context(text: &str, start: usize, end: usize) -> bool {
     if !standalone_card_number(text, start, end) {
         return false;
+    }
+    if valid_card_checksum(&text[start..end]) {
+        return true;
     }
     let prefix = &text[..start];
     let label = prefix
@@ -3139,6 +3146,44 @@ mod tests {
         assert_eq!(
             known.protect_text(&value),
             "ReactionFacepileCollection-urn:li:activity:[redacted: cc-number]"
+        );
+    }
+
+    #[test]
+    fn fda_warning_letter_ids_remain_public_and_known_secrets_stay_private() {
+        let path = "/inspections-compliance-enforcement-and-criminal-investigations/warning-letters/snuzyncom-721342-12302025";
+        let observed = Observation::default();
+        for text in [
+            path.to_string(),
+            format!("https://www.fda.gov{path}"),
+            format!("<a href=\"{path}\">snuzyn.com</a>"),
+            "letter 721342-12302025".to_string(),
+        ] {
+            assert_eq!(observed.protect_text(&text), text);
+        }
+        assert_eq!(
+            observed.protect_text("Test card 4242 4242 4242 4242 and 4242424242424242"),
+            "Test card [redacted: cc-number] and [redacted: cc-number]"
+        );
+        assert_eq!(
+            observed.protect_text("Card 4242424242424241"),
+            "Card [redacted: cc-number]"
+        );
+        assert_eq!(
+            observed.protect_text("value 4242424242424241"),
+            "value 4242424242424241"
+        );
+        assert_eq!(
+            observed.protect_text("/warning-letters/sk_live_abcdefghijklmnop1234"),
+            "/warning-letters/[redacted: credential]"
+        );
+        let mut known = Observation::default();
+        known
+            .secrets
+            .push(("721342-12302025".to_string(), marker("cc-number")));
+        assert_eq!(
+            known.protect_text(path),
+            path.replace("721342-12302025", "[redacted: cc-number]")
         );
     }
 
