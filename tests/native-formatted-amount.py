@@ -48,7 +48,7 @@ try:
     response = run('fill', '@' + ref, '10053.74')
     assert response['data']['retainedValue'] == '10,053.74', response
     # Passwords and arbitrary text do not get numeric equivalence.
-    evaluate('amount.type="password"; true')
+    run('eval', 'amount.type="password"; true', success=False)
     run('fill', '#amount', '10053.74', success=False)
     print('PASS: 15 amount renderings, selector/find/ref observations, unchanged sibling and password rejection')
 finally:
