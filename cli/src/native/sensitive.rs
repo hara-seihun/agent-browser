@@ -300,6 +300,10 @@ fn api_value(text: &str) -> bool {
         && text.bytes().any(|b| b.is_ascii_alphanumeric())
 }
 
+// Google's manual authenticator enrollment labels the key in prose rather than
+// an attribute. Keep the instruction shared by CDP inventory and live getters.
+const SETUP_KEY_INSTRUCTION: &str = "enteryouremailaddressandthiskey";
+
 // Find the smallest field containing one exact API label and a displayed token.
 // Text nodes are bound to their containing element for screenshot geometry.
 // Completed fields never donate their values to an ancestor's unrelated label.
@@ -335,6 +339,13 @@ fn api_display_nodes(root: &Value) -> HashSet<i64> {
                     .map(|id| vec![(id, 0)])
                     .unwrap_or_default(),
             );
+        }
+        if (node["nodeName"] == "LI"
+            || attribute_ignore_case(node, "role").is_some_and(|r| r.eq_ignore_ascii_case("listitem")))
+            && normalize(&node_text(node)).contains(SETUP_KEY_INSTRUCTION)
+        {
+            if let Some(id) = backend { found.insert(id); }
+            return (0, Vec::new());
         }
         if api_node_label(node) {
             return (1, Vec::new());
@@ -596,6 +607,7 @@ pub fn classifier_js() -> String {
       }};
       return read(node) && apiLabel(text);
     }};
+    const setupKeyInstruction = {};
     const apiRoots = new WeakMap();
     const apiDisplay = el => {{
       const root = el.getRootNode();
@@ -615,6 +627,12 @@ pub fn classifier_js() -> String {
             }}
             return [apiLabel(text) ? 1 : 0,
               node.parentElement && apiValue(text) ? [[node.parentElement, 0]] : []];
+          }}
+          if (node.nodeType === 1
+            && (node.tagName === 'LI' || (node.getAttribute('role') || '').toLowerCase() === 'listitem')
+            && (node.textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '').includes(setupKeyInstruction)) {{
+            found.add(node);
+            return [0, []];
           }}
           if (apiNodeLabel(node)) return [1, []];
           let labels = 0, values = [];
@@ -725,6 +743,7 @@ pub fn classifier_js() -> String {
     }};"#,
         serde_json::to_string(API_TEXT_LABELS).unwrap(),
         serde_json::to_string(PRIVATE_TOKEN_PATTERNS).unwrap(),
+        serde_json::to_string(SETUP_KEY_INSTRUCTION).unwrap(),
         serde_json::to_string(PRIVATE_TEXT_LABELS).unwrap(),
         serde_json::to_string(IDENTIFIERS).unwrap(),
         serde_json::to_string(CONTACT_HINTS).unwrap(),
@@ -3206,6 +3225,24 @@ mod tests {
         ]});
         assert_eq!(api_display_nodes(&root), HashSet::from([2]));
         assert!(private_text(&HashMap::from([("data-key".into(), secret)])));
+    }
+
+    #[test]
+    fn google_authenticator_instruction_protects_only_labeled_item() {
+        use super::*;
+        for (name, attrs) in [("LI", json!([])), ("DIV", json!(["role", "listitem"]))] {
+            let root = json!({"nodeName":"DIV","backendNodeId":1,"children":[
+                {"nodeName":name,"attributes":attrs,"backendNodeId":2,"children":[
+                    {"nodeName":"#text","nodeValue":"Enter your email address and this key (spaces don’t matter):"},
+                    {"nodeName":"STRONG","backendNodeId":3,"children":[{"nodeName":"#text","nodeValue":"JBSW Y3DP EHPK 3PXP"}]}
+                ]},
+                {"nodeName":"LI","backendNodeId":4,"children":[{"nodeName":"#text","nodeValue":"Open your authenticator app."}]}
+            ]});
+            assert_eq!(api_display_nodes(&root), HashSet::from([2]));
+            let mut controls = Vec::new();
+            collect_nodes(&root, "synthetic", &mut controls, &mut HashSet::new());
+            assert!(controls.iter().any(|c| c.backend == 2), "instruction must be registered as a private display");
+        }
     }
 
     #[test]

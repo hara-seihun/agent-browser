@@ -11766,3 +11766,40 @@ async fn e2e_click_waits_for_moving_drawer() {
     .await;
     assert_success(&execute_command(&json!({"id":"close","action":"close"}), &mut state).await);
 }
+
+/// Google manual enrollment displays a grouped base32 key in a strong element,
+/// with the only label in its containing instruction. No real key is used here.
+#[tokio::test]
+#[ignore]
+async fn e2e_google_authenticator_setup_key_redacted() {
+    let mut state = DaemonState::new();
+    let response = execute_command(&json!({"id":"launch", "action":"launch", "headless":true}), &mut state).await;
+    assert_success(&response);
+    let key = "JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP";
+    let html = format!(r#"<html><meta charset="utf-8"><body><div role="dialog" aria-labelledby="title">
+      <h2 id="title">Set up authenticator app</h2><a>Can't scan it?</a><ol>
+      <li id="public">Open your authenticator app.</li>
+      <li id="instruction">Enter your email address and this key (spaces don’t matter): <strong id="key">{key}</strong></li>
+      <li>Choose time based.</li></ol></div></body></html>"#);
+    let response = execute_command(&json!({"id":"navigate", "action":"navigate", "url":format!("data:text/html;base64,{}", STANDARD.encode(html))}), &mut state).await;
+    assert_success(&response);
+    for command in [
+        json!({"action":"snapshot"}),
+        json!({"action":"gettext", "selector":"body"}),
+        json!({"action":"gettext", "selector":"#key"}),
+        json!({"action":"gettext", "selector":"#instruction"}),
+        json!({"action":"innerhtml", "selector":"#instruction"}),
+    ] {
+        let mut command = command;
+        command["id"] = json!("protected");
+        let response = execute_command(&command, &mut state).await;
+        assert_success(&response);
+        let output = response.to_string();
+        assert!(!output.contains("JBSW") && !output.contains("3PXP"), "setup key escaped: {output}");
+        assert!(output.contains("redacted"), "missing redaction: {output}");
+    }
+    let response = execute_command(&json!({"id":"public", "action":"gettext", "selector":"#public"}), &mut state).await;
+    assert_success(&response);
+    assert!(response.to_string().contains("Open your authenticator app."));
+    let _ = execute_command(&json!({"id":"close", "action":"close"}), &mut state).await;
+}
