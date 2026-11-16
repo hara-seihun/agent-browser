@@ -9,7 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 use super::state::StorageEntry;
 
 const MAX_BYTES: u64 = 1024 * 1024;

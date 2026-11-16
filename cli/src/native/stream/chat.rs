@@ -6,15 +6,15 @@ use tokio::io::AsyncWriteExt;
 
 use super::http::cors_headers_for_origin;
 
-pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
+pub const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-pub(crate) fn http_client() -> &'static reqwest::Client {
+pub fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
-pub(crate) fn is_chat_enabled() -> bool {
+pub fn is_chat_enabled() -> bool {
     std::env::var("AI_GATEWAY_API_KEY").is_ok()
 }
 
@@ -121,7 +121,7 @@ fn strip_frontmatter(s: &str) -> &str {
     }
 }
 
-pub(crate) fn get_system_prompt() -> &'static str {
+pub fn get_system_prompt() -> &'static str {
     static PROMPT: OnceLock<String> = OnceLock::new();
     PROMPT.get_or_init(|| {
         let skills = load_skills();
@@ -153,12 +153,12 @@ The following skill references describe agent-browser capabilities in detail. Us
     })
 }
 
-pub(crate) const CHAT_TOOLS: &str = r#"[{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}}]"#;
+pub const CHAT_TOOLS: &str = r#"[{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}}]"#;
 
-pub(crate) const COMPACT_THRESHOLD_CHARS: usize = 200_000;
-pub(crate) const KEEP_RECENT_MESSAGES: usize = 6;
+pub const COMPACT_THRESHOLD_CHARS: usize = 200_000;
+pub const KEEP_RECENT_MESSAGES: usize = 6;
 
-pub(crate) fn estimate_chars(messages: &[Value]) -> usize {
+pub fn estimate_chars(messages: &[Value]) -> usize {
     messages
         .iter()
         .map(|m| {
@@ -181,7 +181,7 @@ pub(crate) fn estimate_chars(messages: &[Value]) -> usize {
         .sum()
 }
 
-pub(crate) fn find_safe_split(messages: &[Value], keep_recent: usize) -> usize {
+pub fn find_safe_split(messages: &[Value], keep_recent: usize) -> usize {
     if messages.len() <= keep_recent + 1 {
         return 1;
     }
@@ -230,7 +230,7 @@ fn build_summary_text(messages: &[Value]) -> String {
     text
 }
 
-pub(crate) async fn summarize_for_compaction(
+pub async fn summarize_for_compaction(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
@@ -454,7 +454,7 @@ const ALLOWED_COMMANDS: &[&str] = &[
 
 const ALLOWED_GLOBAL_FLAGS: &[&str] = &["--session", "--engine"];
 
-pub(crate) async fn execute_chat_tool(session: &str, command: &str) -> String {
+pub async fn execute_chat_tool(session: &str, command: &str) -> String {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return format!("Failed to resolve executable: {}", e),

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::*;
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::*;
 use super::element::{resolve_checkbox_point, resolve_element_center, resolve_element_object_id, RefMap};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
@@ -361,12 +361,12 @@ pub async fn fill_observed(
     selector: &str,
     value: &str,
     frames: &HashMap<String, String>,
-    observation: &super::sensitive::Observation,
+    observation: &agent_browser_observation::Observation,
 ) -> Result<Option<String>, String> {
     let unsupported = || {
         format!(
             "{}: fill target is sensitive or cannot be bound safely",
-            super::sensitive::UNSUPPORTED
+            agent_browser_observation::UNSUPPORTED
         )
     };
     let (object, target_session) = if let Some(reference) = super::element::parse_ref(selector) {
@@ -473,7 +473,7 @@ pub async fn fill_observed(
     }
     // Classify the pinned control itself, not its neighbors: checkout forms can
     // contain email, shipping details, optional account passwords and payment fields.
-    let function = format!("async function(value) {{ {} if (!this.isConnected || kindOf(this)) return {{status:'sensitive'}}; return await ({}).call(this,value,'bound-form'); }}", super::sensitive::classifier_js(), include_str!("fill.js"));
+    let function = format!("async function(value) {{ {} if (!this.isConnected || kindOf(this)) return {{status:'sensitive'}}; return await ({}).call(this,value,'bound-form'); }}", agent_browser_observation::classifier_js(), include_str!("fill.js"));
     let result = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
         "objectId":object,"functionDeclaration":function,"arguments":[{"value":value}],"returnByValue":true,"awaitPromise":true
     })), Some(&target_session)).await.map_err(|_| unsupported())?;

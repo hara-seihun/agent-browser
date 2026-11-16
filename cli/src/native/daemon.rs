@@ -20,7 +20,7 @@ use super::actions::{
     close_all_browser_backends, close_current_browser, maybe_autosave_restore_state,
     save_restore_state_for_shutdown, DaemonState,
 };
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
@@ -899,7 +899,7 @@ mod tests {
             if command["method"] == "DOM.getDocument" {
                 assert_eq!(
                     command["params"],
-                    serde_json::json!({"depth": crate::native::sensitive::PIERCE_LAYER_DEPTH, "pierce": true})
+                    serde_json::json!({"depth": agent_browser_observation::PIERCE_LAYER_DEPTH, "pierce": true})
                 );
             }
             methods.push(command["method"].as_str().unwrap().to_owned());

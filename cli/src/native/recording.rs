@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::{AttachToTargetParams, AttachToTargetResult};
 
 /// Capture rate used when the caller does not ask for one. 30 fps reads as
 /// smooth motion, so scrolls, hovers, and CSS transitions survive the
@@ -486,7 +486,7 @@ pub fn spawn_recording_task(
 async fn capture_frames(
     client: &CdpClient,
     capture_session: &str,
-    mut events: mpsc::Receiver<super::cdp::types::CdpEvent>,
+    mut events: mpsc::Receiver<agent_browser_cdp::types::CdpEvent>,
     mut stdin: tokio::process::ChildStdin,
     period: Duration,
     max_frames_per_tick: u64,

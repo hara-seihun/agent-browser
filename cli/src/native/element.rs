@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::*;
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::*;
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -1156,7 +1156,7 @@ pub async fn get_element_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: super::sensitive::getter_js("text", None),
+                function_declaration: agent_browser_observation::getter_js("text", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1194,7 +1194,7 @@ pub async fn get_element_attribute(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: super::sensitive::getter_js("attribute", Some(attribute)),
+                function_declaration: agent_browser_observation::getter_js("attribute", Some(attribute)),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1379,7 +1379,7 @@ pub async fn get_element_inner_text(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: super::sensitive::getter_js("innertext", None),
+                function_declaration: agent_browser_observation::getter_js("innertext", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1416,7 +1416,7 @@ pub async fn get_element_inner_html(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: super::sensitive::getter_js("html", None),
+                function_declaration: agent_browser_observation::getter_js("html", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1453,7 +1453,7 @@ pub async fn get_element_input_value(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: super::sensitive::getter_js("value", None),
+                function_declaration: agent_browser_observation::getter_js("value", None),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

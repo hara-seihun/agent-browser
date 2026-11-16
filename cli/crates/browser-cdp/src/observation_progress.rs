@@ -10,7 +10,7 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Phase {
+pub enum Phase {
     CommandAction,
     EvaluationScript,
     EvaluationMetadata,
@@ -39,7 +39,7 @@ pub(crate) enum Phase {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DeadlineDiagnostic {
+pub struct DeadlineDiagnostic {
     budget_ms: u128,
     elapsed_ms: u128,
     attempts: usize,
@@ -62,23 +62,23 @@ struct PhaseDiagnostic {
 impl DeadlineDiagnostic {
     /// The command's own action returned, and only response work (protecting its
     /// output and attaching metadata) was still running at the deadline.
-    pub(crate) fn action_completed(&self) -> bool {
+    pub fn action_completed(&self) -> bool {
         let phase = |wanted| self.phases.iter().find(|p| p.phase == wanted);
         phase(Phase::CommandAction).is_some_and(|p| p.completed > 0 && p.in_flight == 0)
             && phase(Phase::ResponseFinalization).is_some_and(|p| p.in_flight > 0)
     }
 
-    pub(crate) fn command_message(&self) -> String {
+    pub fn command_message(&self) -> String {
         format!(
             "browser command deadline elapsed: {}",
             serde_json::to_string(self).expect("numeric command diagnostic serializes")
         )
     }
 
-    pub(crate) fn into_message(self) -> String {
+    pub fn into_message(self) -> String {
         format!(
             "{}: frame observation deadline elapsed: {}",
-            super::sensitive::UNSUPPORTED,
+            crate::SENSITIVE_OUTPUT_UNSUPPORTED,
             serde_json::to_string(&self).expect("numeric observation diagnostic serializes")
         )
     }
@@ -110,15 +110,15 @@ enum State {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ObservationProgress(Arc<Mutex<State>>);
+pub struct ObservationProgress(Arc<Mutex<State>>);
 
 tokio::task_local! {
-    pub(crate) static COMMAND_PROGRESS: ObservationProgress;
+    pub static COMMAND_PROGRESS: ObservationProgress;
 }
 
 /// Connections opened inside a command must retain its original diagnostic
 /// handle, including the work after a preparatory launch or reconnect.
-pub(crate) fn connection_progress() -> ObservationProgress {
+pub fn connection_progress() -> ObservationProgress {
     COMMAND_PROGRESS.try_with(Clone::clone).unwrap_or_default()
 }
 
@@ -196,13 +196,13 @@ impl ObservationProgress {
         }
     }
 
-    pub(crate) fn attempt(&self) {
+    pub fn attempt(&self) {
         if let State::Running(running) = &mut *self.0.lock().expect("observation progress lock") {
             running.attempts += 1;
         }
     }
 
-    pub(crate) async fn track<T>(&self, phase: Phase, operation: impl Future<Output = T>) -> T {
+    pub async fn track<T>(&self, phase: Phase, operation: impl Future<Output = T>) -> T {
         let id = match &mut *self.0.lock().expect("observation progress lock") {
             State::Unset => None, // Setup outside protected observation is untracked.
             State::Running(running) => {
@@ -254,7 +254,7 @@ impl ObservationProgress {
         }
     }
 
-    pub(crate) async fn before<T>(
+    pub async fn before<T>(
         &self,
         deadline: Instant,
         operation: impl Future<Output = T>,
@@ -284,19 +284,27 @@ impl ObservationProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[tokio::test]
     async fn new_cdp_connection_preserves_completed_and_inflight_command_phases() {
         let progress = ObservationProgress::default();
+        use futures_util::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if message.is_close() { break; }
+            }
+        });
         let mut client = None;
         let mut server = None;
         let diagnostic = COMMAND_PROGRESS.scope(progress.clone(), async {
             progress.before(Instant::now() + std::time::Duration::from_secs(2), async {
                 progress.track(Phase::CommandAction, async {}).await;
-                let fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
-                let connection = fixture.manager.client.clone();
+                let connection = std::sync::Arc::new(crate::client::CdpClient::connect(&format!("ws://{address}")).await.unwrap());
                 client = Some(connection.clone());
-                server = Some(fixture.server);
+                server = Some(serving);
                 // This is the same handle used by navigation, inventory and cleanup
                 // after a preparatory launch replaces the connection.
                 connection.observation_progress.track(
@@ -314,6 +322,8 @@ mod tests {
         // Other sessions and work outside the command cannot inherit its phases.
         assert!(!Arc::ptr_eq(&progress.0, &connection_progress().0));
     }
+
+
 
     #[tokio::test]
     async fn response_finalization_after_a_completed_action_is_distinguished() {

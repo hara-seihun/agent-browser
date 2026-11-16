@@ -1,22 +1,21 @@
-mod ca_bundle;
+use agent_browser::ca_bundle;
 mod chat;
-mod color;
-mod commands;
-mod connection;
+use agent_browser::color;
+use agent_browser::commands;
+use agent_browser::connection;
 mod doctor;
-mod flags;
-mod install;
+use agent_browser::flags;
+use agent_browser::install;
 mod local_vault;
 mod mcp;
-mod native;
+use agent_browser::native;
 mod output;
-mod plugins;
-mod read;
+use agent_browser::plugins;
 mod skills;
 #[cfg(test)]
 mod test_utils;
 mod upgrade;
-mod validation;
+use agent_browser::validation;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};

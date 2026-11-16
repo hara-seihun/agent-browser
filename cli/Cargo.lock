@@ -48,6 +48,8 @@ name = "agent-browser"
 version = "0.37.1"
 dependencies = [
  "aes-gcm",
+ "agent-browser-cdp",
+ "agent-browser-observation",
  "async-trait",
  "base64",
  "bitflags",
@@ -78,6 +80,33 @@ dependencies = [
  "uuid",
  "windows-sys 0.52.0",
  "zip",
+]
+
+[[package]]
+name = "agent-browser-cdp"
+version = "0.37.1"
+dependencies = [
+ "base64",
+ "futures-util",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_stacker",
+ "socket2",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "agent-browser-observation"
+version = "0.37.1"
+dependencies = [
+ "agent-browser-cdp",
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 mod cdp_loop;
-pub(crate) mod chat;
+pub mod chat;
 mod dashboard;
 mod discovery;
 mod http;
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 
 /// Screencast encoding for the live stream, from `AGENT_BROWSER_STREAM_*`.
 ///
@@ -225,7 +225,7 @@ impl StreamServer {
     /// OS-assigned port (used by daemon startup). When false, the error propagates
     /// (used by the runtime `stream_enable` command).
     /// `idle_activity` is daemon-owned so replacement servers reset the same idle timer.
-    pub async fn start_without_client(
+    pub(crate) async fn start_without_client(
         preferred_port: u16,
         session_id: String,
         allow_port_fallback: bool,

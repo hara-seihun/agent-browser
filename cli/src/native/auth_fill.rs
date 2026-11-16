@@ -462,7 +462,7 @@ struct WorkObservation {
 struct WorkPage {
     bound: Binding,
     object: String,
-    _group: super::cdp::client::RemoteObjectGroup,
+    _group: agent_browser_cdp::client::RemoteObjectGroup,
 }
 
 async fn work_bound(state: &DaemonState, location: &FieldLocation) -> Result<Binding, WorkReason> {

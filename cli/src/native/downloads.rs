@@ -1,8 +1,8 @@
 //! Move the actual Chrome download to the caller's filesystem, including over remote CDP.
 //! Never replay a download URL: it may represent a POST, a blob or a one-time link.
 use super::browser::BrowserManager;
-use super::cdp::client::CdpClient;
-use super::cdp::types::CdpEvent;
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::CdpEvent;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::collections::HashSet;

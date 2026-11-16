@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::{
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
     CreateTargetResult, EvaluateParams,
 };
@@ -92,7 +92,7 @@ async fn eval_origin_storage(
     origin_js: &str,
 ) -> Option<OriginStorage> {
     let result = client
-        .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+        .send_command_typed::<_, agent_browser_cdp::types::EvaluateResult>(
             "Runtime.evaluate",
             &EvaluateParams {
                 expression: origin_js.to_string(),
@@ -523,7 +523,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
                 serde_json::to_string(&entry.value).unwrap_or_default(),
             );
             let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                .send_command_typed::<_, agent_browser_cdp::types::EvaluateResult>(
                     "Runtime.evaluate",
                     &EvaluateParams {
                         expression: js,
@@ -542,7 +542,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
                 serde_json::to_string(&entry.value).unwrap_or_default(),
             );
             let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                .send_command_typed::<_, agent_browser_cdp::types::EvaluateResult>(
                     "Runtime.evaluate",
                     &EvaluateParams {
                         expression: js,

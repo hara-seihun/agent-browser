@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use std::collections::HashMap;
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::*;
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::*;
 use super::element::RefMap;
 
 const ANNOTATION_OVERLAY_ID: &str = "__agent_browser_annotations__";
@@ -181,11 +181,11 @@ pub async fn take_screenshot(
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
-    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+    agent_browser_observation::require_public(client, session_id, iframe_sessions).await?;
     let capture = capture_screenshot(client, session_id, ref_map, options, iframe_sessions).await?;
     // Captured bytes stay in memory until the complete frame inventory is
     // public again. Do not create a raw file and redact or delete it later.
-    super::sensitive::require_public(client, session_id, iframe_sessions).await?;
+    agent_browser_observation::require_public(client, session_id, iframe_sessions).await?;
     save_capture(capture, options)
 }
 
@@ -255,7 +255,7 @@ pub async fn sensitive_control_rects(
                 .ok_or_else(|| {
                     format!(
                         "{}: sensitive control position unavailable",
-                        super::sensitive::UNSUPPORTED
+                        agent_browser_observation::UNSUPPORTED
                     )
                 })?;
                 offsets.insert(session.clone(), offset);

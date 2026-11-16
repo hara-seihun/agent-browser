@@ -21,13 +21,13 @@ use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
 const OBJECT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 
-pub(crate) struct RemoteObjectGroup {
-    pub(crate) name: String,
+pub struct RemoteObjectGroup {
+    pub name: String,
     completion: Option<oneshot::Sender<bool>>,
 }
 
 impl RemoteObjectGroup {
-    pub(crate) fn finish(mut self) {
+    pub fn finish(mut self) {
         if let Some(completion) = self.completion.take() {
             let _ = completion.send(false);
         }
@@ -248,7 +248,7 @@ fn sanitize_lone_surrogates(msg: &str) -> Option<String> {
 /// Chrome nests a pierced DOM two JSON levels per element, so serde_json's
 /// default 128-level limit refused any page about 60 elements deep (Gmail).
 /// Parse without that limit, growing the stack on the heap instead.
-pub(crate) fn parse_cdp<T: serde::de::DeserializeOwned>(msg: &str) -> serde_json::Result<T> {
+pub fn parse_cdp<T: serde::de::DeserializeOwned>(msg: &str) -> serde_json::Result<T> {
     let mut deserializer = serde_json::Deserializer::from_str(msg);
     deserializer.disable_recursion_limit();
     let value = T::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
@@ -279,7 +279,7 @@ pub struct CdpClient {
     dom_revisions: DomRevisions,
     object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
     next_object_group: AtomicU64,
-    pub(crate) observation_progress: super::super::observation_progress::ObservationProgress,
+    pub observation_progress: crate::observation_progress::ObservationProgress,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -552,11 +552,11 @@ impl CdpClient {
             dom_revisions,
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
-            observation_progress: super::super::observation_progress::connection_progress(),
+            observation_progress: crate::observation_progress::connection_progress(),
         })
     }
 
-    pub(crate) fn dom_revision(&self, session: &str) -> u64 {
+    pub fn dom_revision(&self, session: &str) -> u64 {
         *self
             .dom_revisions
             .lock()
@@ -567,7 +567,7 @@ impl CdpClient {
 
     /// A just-completed command already demonstrated transport responsiveness.
     /// A close event always overrides the freshness window.
-    pub(crate) fn recently_responsive(&self) -> bool {
+    pub fn recently_responsive(&self) -> bool {
         !self.closed.load(Ordering::SeqCst)
             && self.last_response.lock().unwrap_or_else(|e| e.into_inner())
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
@@ -616,7 +616,7 @@ impl CdpClient {
     /// The observer settles prior cleanup before starting a batch; registration
     /// must not wait for unfinished groups belonging to that same batch.
     /// Cancellation drops only the signal; the connection owns bounded cleanup.
-    pub(crate) async fn object_group(
+    pub async fn object_group(
         self: &Arc<Self>,
         sessions: Vec<String>,
     ) -> Result<RemoteObjectGroup, String> {
@@ -663,7 +663,7 @@ impl CdpClient {
         })
     }
 
-    pub(crate) async fn settle_object_cleanup(&self) -> Result<(), String> {
+    pub async fn settle_object_cleanup(&self) -> Result<(), String> {
         let mut groups = self.object_groups.lock().await;
         let mut complete = Vec::new();
         let mut failed = false;
@@ -990,13 +990,13 @@ impl CdpClient {
 
     /// Test-only: count of in-flight commands still awaiting a response, so a
     /// test can assert a cancelled command left no orphaned entry (#1528).
-    #[cfg(test)]
-    pub(crate) async fn pending_len(&self) -> usize {
+    #[doc(hidden)]
+    pub async fn pending_len(&self) -> usize {
         self.pending.lock().await.len()
     }
 
-    #[cfg(test)]
-    pub(crate) async fn object_cleanup_len(&self) -> usize {
+    #[doc(hidden)]
+    pub async fn object_cleanup_len(&self) -> usize {
         self.object_groups.lock().await.len()
     }
 }

@@ -30,7 +30,6 @@ pub mod inspect_server;
 pub mod interaction;
 #[allow(dead_code)]
 pub mod network;
-pub(crate) mod observation_progress;
 pub(crate) mod payment_errors;
 #[allow(dead_code)]
 pub mod policy;
@@ -42,8 +41,8 @@ pub mod react;
 pub mod recording;
 #[allow(dead_code)]
 pub mod screenshot;
-#[allow(dead_code)]
-pub mod sensitive;
+#[cfg(test)]
+mod observation_inventory_tests;
 #[allow(dead_code)]
 pub mod snapshot;
 #[allow(dead_code)]

@@ -154,7 +154,7 @@ async fn disabled_click_guard_rejects_unknown_state_without_input_commands() {
                 .unwrap();
             }
         });
-        let client = super::cdp::client::CdpClient::connect(&format!("ws://{address}"))
+        let client = agent_browser_cdp::client::CdpClient::connect(&format!("ws://{address}"))
             .await
             .unwrap();
         let outcome =

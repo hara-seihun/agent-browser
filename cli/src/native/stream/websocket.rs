@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::native::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 
 use super::http::handle_http_request;
 use super::{is_allowed_origin, timestamp_ms, IdleActivity, StreamFrame};

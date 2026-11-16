@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
-use crate::native::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 use crate::native::network;
 
 use super::timestamp_ms;

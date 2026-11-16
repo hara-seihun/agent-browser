@@ -11,8 +11,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::{EvaluateResult, RemoteObject};
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::{EvaluateResult, RemoteObject};
 
 /// Unmodified axe-core build, injected via `Runtime.evaluate` (which is
 /// not subject to the page's CSP, unlike a CDN `<script>` tag).

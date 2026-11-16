@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 
 pub async fn set_extra_headers(
     client: &CdpClient,

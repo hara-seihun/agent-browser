@@ -10,10 +10,17 @@ readme = "../README.md"
 keywords = ["browser", "automation", "ai", "cdp", "chrome"]
 categories = ["command-line-utilities", "web-programming"]
 
+[workspace]
+default-members = [".", "crates/browser-cdp", "crates/browser-observation"]
+members = ["crates/browser-cdp", "crates/browser-observation"]
+
 [workspace.metadata.rcargo]
-iteration-profile = "ci"
+iteration-profile = "edit"
+iteration-backend = "cranelift"
 
 [dependencies]
+agent-browser-cdp = { path = "crates/browser-cdp" }
+agent-browser-observation = { path = "crates/browser-observation" }
 # Match tempfile's test-time bitflags feature so alternating tests and builds
 # reuses the same image and HTTP dependency graph.
 bitflags = { version = "2", features = ["std"] }
@@ -81,12 +88,19 @@ opt-level = 3
 # Keep optimization, but spread LLVM work across smaller parallel units.
 codegen-units = 256
 
-# Local edit build (with mold installed):
-# cargo rustc --profile edit --bin agent-browser -- -C link-arg=-fuse-ld=mold
-# CI and shipped browser binaries stay optimized;
-# this profile is not suitable for measuring large-page command deadlines.
+# Local iteration uses opt1, incremental compilation and workspace-only Cranelift.
+# Registry dependencies remain LLVM opt3; ci remains LLVM opt3 throughout.
+# Plain cargo build selects edit through rcargo. Installed releases explicitly use ci.
+# Runtime, CDP and protected observation compile separately from CLI presentation.
+# Do not use edit timings to judge production large-page command deadlines.
 [profile.edit]
 inherits = "ci"
 
 [profile.edit.package.agent-browser]
-opt-level = 0
+opt-level = 1
+
+[profile.edit.package.agent-browser-cdp]
+opt-level = 1
+
+[profile.edit.package.agent-browser-observation]
+opt-level = 1

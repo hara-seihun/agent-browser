@@ -16,8 +16,8 @@ use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
-use super::cdp::client::CdpClient;
-use super::cdp::types::{
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
     ExceptionThrownEvent, GetFullAXTreeResult, GetTargetsResult, JavascriptDialogOpeningEvent,
     TargetCreatedEvent, TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
@@ -595,9 +595,9 @@ pub struct DaemonState {
     pub last_autosave_attempt: Option<std::time::Instant>,
     pub session_id: String,
     /// Per-target, in-memory form observations. Never included in saved state.
-    pub sensitive_observations: HashMap<String, super::sensitive::Observation>,
+    pub sensitive_observations: HashMap<String, agent_browser_observation::Observation>,
     /// Connection-shared numeric progress survives cancellation of observer work.
-    observation_progress: super::observation_progress::ObservationProgress,
+    observation_progress: agent_browser_cdp::observation_progress::ObservationProgress,
     /// Targets explicitly armed with a tab capsule. Contains no credential values.
     pub tab_state_targets: HashSet<String>,
     pub tracing_state: TracingState,
@@ -668,7 +668,7 @@ pub struct DaemonState {
     /// Stream server instance kept alive so the broadcast channel remains open.
     pub stream_server: Option<Arc<StreamServer>>,
     /// Daemon-owned activity clock shared by commands and stream servers.
-    pub idle_activity: Arc<IdleActivity>,
+    pub(crate) idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
     effective_ca_cert: Option<EffectiveCaCert>,
@@ -757,7 +757,7 @@ impl DaemonState {
             last_autosave_attempt: None,
             session_id,
             sensitive_observations: HashMap::new(),
-            observation_progress: super::observation_progress::ObservationProgress::default(),
+            observation_progress: agent_browser_cdp::observation_progress::ObservationProgress::default(),
             tab_state_targets: HashSet::new(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
@@ -857,7 +857,7 @@ impl DaemonState {
 
     /// Create state with an optional stream client slot and server instance
     /// (for daemon startup with stream server).
-    pub fn new_with_stream(
+    pub(crate) fn new_with_stream(
         stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
         stream_server: Option<Arc<StreamServer>>,
         idle_activity: Arc<IdleActivity>,
@@ -1660,7 +1660,7 @@ impl DaemonState {
 
     fn protected_observation_progress(
         &mut self,
-    ) -> super::observation_progress::ObservationProgress {
+    ) -> agent_browser_cdp::observation_progress::ObservationProgress {
         if let Some(mgr) = &self.browser {
             self.observation_progress = mgr.client.observation_progress.clone();
         }
@@ -1683,7 +1683,7 @@ impl DaemonState {
         let result = self
             .observation_progress
             .track(
-                super::observation_progress::Phase::RecoveryAttach,
+                agent_browser_cdp::observation_progress::Phase::RecoveryAttach,
                 &mut attachment.task,
             )
             .await;
@@ -1692,13 +1692,13 @@ impl DaemonState {
             .map_err(|_| {
                 format!(
                     "{}: frame attachment task unavailable",
-                    super::sensitive::UNSUPPORTED
+                    agent_browser_observation::UNSUPPORTED
                 )
             })?
             .map_err(|_| {
                 format!(
                     "{}: live frame attachment unavailable",
-                    super::sensitive::UNSUPPORTED
+                    agent_browser_observation::UNSUPPORTED
                 )
             })?;
         self.retain_iframe_attachment(frame, &attach.session_id);
@@ -1776,7 +1776,7 @@ impl DaemonState {
                 let setup: Result<(), String> = mgr
                     .client
                     .observation_progress
-                    .track(super::observation_progress::Phase::FrameSetup, async {
+                    .track(agent_browser_cdp::observation_progress::Phase::FrameSetup, async {
                         // An unresponsive frame must not consume the entire
                         // observation deadline. Resume even after timeout; the
                         // protected live-tree inventory remains mandatory.
@@ -2961,7 +2961,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         return command_not_executed_response(cmd);
     }
     let progress = state.protected_observation_progress();
-    let result = super::observation_progress::COMMAND_PROGRESS
+    let result = agent_browser_cdp::observation_progress::COMMAND_PROGRESS
         .scope(
             progress.clone(),
             COMMAND_DEADLINE.scope(
@@ -2978,7 +2978,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             if action == "snapshot" {
                 return success_response(
                     id,
-                    incomplete_snapshot(super::sensitive::InventoryError::Deadline(diagnostic)),
+                    incomplete_snapshot(agent_browser_observation::InventoryError::Deadline(diagnostic)),
                 );
             }
             let action_completed = diagnostic.action_completed();
@@ -3192,12 +3192,12 @@ async fn execute_command_inner(
         .to_string();
 
     let cmd_start = std::time::Instant::now();
-    if super::sensitive::always_denied(action) {
+    if agent_browser_observation::always_denied(action) {
         return error_response(
             &id,
             &format!(
                 "{}: continuous or unguarded browser output is unavailable",
-                super::sensitive::UNSUPPORTED
+                agent_browser_observation::UNSUPPORTED
             ),
         );
     }
@@ -3581,7 +3581,7 @@ async fn execute_command_inner(
     let effect_action = find_subaction.unwrap_or(action);
     let fill_input = effect_action == "fill";
     let input_acknowledgement =
-        super::sensitive::input_acknowledgement(effect_action, cmd);
+        agent_browser_observation::input_acknowledgement(effect_action, cmd);
     // These actions own the full protected inventory and validated projection;
     // getcounts returns only numeric counts, never protected page content.
     let observation_session = if matches!(action, "snapshot" | "dialog" | "getcounts") {
@@ -3618,8 +3618,8 @@ async fn execute_command_inner(
                 let current = match observe_sensitive_tab(state, &session).await {
                     Ok(observation) => Some(observation),
                     Err(error)
-                        if super::sensitive::content_free(action, cmd)
-                            || super::sensitive::masked_screenshot(action, cmd) =>
+                        if agent_browser_observation::content_free(action, cmd)
+                            || agent_browser_observation::masked_screenshot(action, cmd) =>
                     {
                         guard_incomplete.get_or_insert(error);
                         None
@@ -3639,14 +3639,14 @@ async fn execute_command_inner(
                         .values()
                         .any(|marker| marker == "[redacted: credential]");
                 if known.has_sensitive()
-                    && ((action != "fill" && super::sensitive::guarded(action, cmd))
+                    && ((action != "fill" && agent_browser_observation::guarded(action, cmd))
                         || private_projection_unavailable)
                 {
                     return error_response(
                         &id,
                         &format!(
                             "{}: operation cannot safely observe a sensitive tab",
-                            super::sensitive::UNSUPPORTED
+                            agent_browser_observation::UNSUPPORTED
                         ),
                     );
                 }
@@ -3656,15 +3656,15 @@ async fn execute_command_inner(
         }
     } else {
         if action != "read"
-            && (super::sensitive::guarded(action, cmd)
-                || super::sensitive::masked_screenshot(action, cmd))
+            && (agent_browser_observation::guarded(action, cmd)
+                || agent_browser_observation::masked_screenshot(action, cmd))
             && state.webdriver_backend.is_some()
         {
             return error_response(
                 &id,
                 &format!(
                     "{}: backend has no complete sensitive-frame inventory",
-                    super::sensitive::UNSUPPORTED
+                    agent_browser_observation::UNSUPPORTED
                 ),
             );
         }
@@ -3679,7 +3679,7 @@ async fn execute_command_inner(
 
     let action_progress = state.protected_observation_progress();
     let result = action_progress
-        .track(super::observation_progress::Phase::CommandAction, async {
+        .track(agent_browser_cdp::observation_progress::Phase::CommandAction, async {
             match action {
                 "launch" => {
                     let webmcp_enabled = cmd
@@ -3901,7 +3901,7 @@ async fn execute_command_inner(
     // Completion of the action is not completion of response protection and
     // metadata work. Keep that remaining work visible under the same budget.
     action_progress.track(
-        super::observation_progress::Phase::ResponseFinalization,
+        agent_browser_cdp::observation_progress::Phase::ResponseFinalization,
         async {
     if action == "auth_fill"
         && cmd["credentialProvider"] == "converge-work-password-v5"
@@ -4052,8 +4052,8 @@ async fn execute_command_inner(
             // A successful click may have opened a native dialog. Its response
             // has no page content; protect it with the pre-command inventory
             // rather than reading the now-blocked renderer again.
-            && !(state.pending_dialog.is_some() && super::sensitive::content_free(action, cmd))
-            && !super::sensitive::masked_screenshot(action, cmd)
+            && !(state.pending_dialog.is_some() && agent_browser_observation::content_free(action, cmd))
+            && !agent_browser_observation::masked_screenshot(action, cmd)
             && state.browser.is_some()
         {
             let current = switched_to.clone().unwrap_or_else(|| session.clone());
@@ -4063,7 +4063,7 @@ async fn execute_command_inner(
                     .entry(current)
                     .or_default()
                     .merge(observation),
-                Err(error) if super::sensitive::content_free(action, cmd) => {
+                Err(error) if agent_browser_observation::content_free(action, cmd) => {
                     guard_incomplete.get_or_insert(error);
                 }
                 Err(error) => return error_response(&id, &error),
@@ -4072,14 +4072,14 @@ async fn execute_command_inner(
         for observed in std::iter::once(&session).chain(switched_to.as_ref()) {
             if let Some(known) = state.sensitive_observations.get(observed) {
                 if known.has_sensitive()
-                    && super::sensitive::guarded(action, cmd)
+                    && agent_browser_observation::guarded(action, cmd)
                     && !target_scoped_fill
                 {
                     return error_response(
                         &id,
                         &format!(
                             "{}: sensitive controls appeared during the operation",
-                            super::sensitive::UNSUPPORTED
+                            agent_browser_observation::UNSUPPORTED
                         ),
                     );
                 }
@@ -5561,26 +5561,26 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
 async fn observe_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
-) -> Result<super::sensitive::Observation, String> {
+) -> Result<agent_browser_observation::Observation, String> {
     observe_sensitive_tab_until(state, session, state.protected_deadline()).await
 }
 
 async fn protected_inventory_before<T>(
     deadline: std::time::Instant,
-    progress: &super::observation_progress::ObservationProgress,
+    progress: &agent_browser_cdp::observation_progress::ObservationProgress,
     operation: impl std::future::Future<Output = Result<T, String>>,
 ) -> Result<T, String> {
     progress
         .before(deadline, operation)
         .await
-        .map_err(super::observation_progress::DeadlineDiagnostic::into_message)?
+        .map_err(agent_browser_cdp::observation_progress::DeadlineDiagnostic::into_message)?
 }
 
 async fn observe_sensitive_tab_until(
     state: &mut DaemonState,
     session: &str,
     deadline: std::time::Instant,
-) -> Result<super::sensitive::Observation, String> {
+) -> Result<agent_browser_observation::Observation, String> {
     let progress = state.protected_observation_progress();
     protected_inventory_before(deadline, &progress, reconcile_sensitive_tab(state, session)).await
 }
@@ -5593,8 +5593,8 @@ async fn inventory_until_frame_change<T>(
     events: &mut broadcast::Receiver<CdpEvent>,
     session: &str,
     frames: &HashMap<String, String>,
-    operation: impl std::future::Future<Output = Result<T, super::sensitive::InventoryError>>,
-) -> Result<T, super::sensitive::InventoryError> {
+    operation: impl std::future::Future<Output = Result<T, agent_browser_observation::InventoryError>>,
+) -> Result<T, agent_browser_observation::InventoryError> {
     tokio::pin!(operation);
     loop {
         tokio::select! {
@@ -5621,8 +5621,8 @@ async fn inventory_until_frame_change<T>(
                     // The daemon drains the entire event batch next. Coalesce
                     // our copy too, so a widget's many frames cause one retry.
                     while events.try_recv().is_ok() {}
-                    return Err(super::sensitive::InventoryError::Changed(
-                        super::sensitive::DocumentChange::FrameBindings,
+                    return Err(agent_browser_observation::InventoryError::Changed(
+                        agent_browser_observation::DocumentChange::FrameBindings,
                     ));
                 }
             }
@@ -5634,8 +5634,8 @@ async fn inventory_until_frame_change<T>(
 async fn reconcile_sensitive_tab(
     state: &mut DaemonState,
     session: &str,
-) -> Result<super::sensitive::Observation, String> {
-    let mut continuation = super::sensitive::InventoryContinuation::default();
+) -> Result<agent_browser_observation::Observation, String> {
+    let mut continuation = agent_browser_observation::InventoryContinuation::default();
     let mut frame_events = state
         .browser
         .as_ref()
@@ -5647,7 +5647,7 @@ async fn reconcile_sensitive_tab(
             .observation_progress
             .clone()
             .track(
-                super::observation_progress::Phase::AttachmentHarvest,
+                agent_browser_cdp::observation_progress::Phase::AttachmentHarvest,
                 state.harvest_iframe_attachments(),
             )
             .await?;
@@ -5656,14 +5656,14 @@ async fn reconcile_sensitive_tab(
         if mgr.active_session_id()? != session {
             return Err(format!(
                 "{}: active observation target changed",
-                super::sensitive::UNSUPPORTED
+                agent_browser_observation::UNSUPPORTED
             ));
         }
         let gap = match inventory_until_frame_change(
             &mut frame_events,
             session,
             &state.iframe_sessions,
-            super::sensitive::observe_inventory_continued(
+            agent_browser_observation::observe_inventory_continued(
                 &mgr.client,
                 session,
                 &state.iframe_sessions,
@@ -5676,13 +5676,13 @@ async fn reconcile_sensitive_tab(
                 state.active_iframe_sessions = observation.frame_sessions.clone();
                 return Ok(observation);
             }
-            Err(super::sensitive::InventoryError::Coverage(gap)) => gap,
-            Err(super::sensitive::InventoryError::Changed(_)) => {
+            Err(agent_browser_observation::InventoryError::Coverage(gap)) => gap,
+            Err(agent_browser_observation::InventoryError::Changed(_)) => {
                 state
                     .observation_progress
                     .clone()
                     .track(
-                        super::observation_progress::Phase::DrainEvents,
+                        agent_browser_cdp::observation_progress::Phase::DrainEvents,
                         state.drain_cdp_events_background(),
                     )
                     .await?;
@@ -5700,7 +5700,7 @@ async fn reconcile_sensitive_tab(
 /// after attachment, retaining unchanged documents but rereading control values.
 async fn recover_sensitive_frames(
     state: &mut DaemonState,
-    gap: super::sensitive::CoverageGap,
+    gap: agent_browser_observation::CoverageGap,
 ) -> Result<(), String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let represented = gap.unattached_frames();
@@ -5708,7 +5708,7 @@ async fn recover_sensitive_frames(
         .client
         .observation_progress
         .track(
-            super::observation_progress::Phase::RecoveryTargets,
+            agent_browser_cdp::observation_progress::Phase::RecoveryTargets,
             mgr.client
                 .send_command_typed("Target.getTargets", &json!({}), None),
         )
@@ -5716,7 +5716,7 @@ async fn recover_sensitive_frames(
         .map_err(|_| {
             format!(
                 "{}: live frame target inventory unavailable",
-                super::sensitive::UNSUPPORTED
+                agent_browser_observation::UNSUPPORTED
             )
         })?;
     let client = mgr.client.clone();
@@ -5771,7 +5771,7 @@ async fn recover_sensitive_frames(
         .observation_progress
         .clone()
         .track(
-            super::observation_progress::Phase::DrainEvents,
+            agent_browser_cdp::observation_progress::Phase::DrainEvents,
             state.drain_cdp_events_background(),
         )
         .await?;
@@ -5782,13 +5782,13 @@ fn require_restore_export_allowed(state: &mut DaemonState) -> Result<(), String>
     if state
         .sensitive_observations
         .values()
-        .any(super::sensitive::Observation::has_sensitive)
+        .any(agent_browser_observation::Observation::has_sensitive)
     {
         state.restore_save_status = "sensitive_output_unsupported".to_string();
         state.restore_saved_path = None;
         return Err(format!(
             "{}: automatic state export after sensitive form observation",
-            super::sensitive::UNSUPPORTED
+            agent_browser_observation::UNSUPPORTED
         ));
     }
     Ok(())
@@ -5814,7 +5814,7 @@ pub(crate) async fn auto_save_restore_state(
     if let Some(mgr) = state.browser.as_ref() {
         let session = mgr.active_session_id()?.to_string();
         let current =
-            super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+            agent_browser_observation::observe(&mgr.client, &session, &state.iframe_sessions).await?;
         state
             .sensitive_observations
             .entry(session)
@@ -6741,7 +6741,7 @@ async fn handle_content(state: &DaemonState) -> Result<Value, String> {
     if state.webdriver_backend.is_some() && state.browser.is_none() {
         return Err(format!(
             "{}: backend has no complete sensitive-frame inventory",
-            super::sensitive::UNSUPPORTED
+            agent_browser_observation::UNSUPPORTED
         ));
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
@@ -6776,14 +6776,14 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let guarded_script = super::sensitive::guarded_eval(script);
+    let guarded_script = agent_browser_observation::guarded_eval(script);
     let script = guarded_script.as_str();
     // Honor an active `frame <sel>` selection, like element resolution and
     // `wait` already do. Without this, `frame` reported success and `eval`
     // still ran in the top document.
-    let progress = super::observation_progress::connection_progress();
+    let progress = agent_browser_cdp::observation_progress::connection_progress();
     let result = progress
-        .track(super::observation_progress::Phase::EvaluationScript, async {
+        .track(agent_browser_cdp::observation_progress::Phase::EvaluationScript, async {
             Ok::<_, String>(match state.active_frame_id.as_deref() {
                 Some(frame_id) => match state.iframe_sessions.get(frame_id) {
                     // Cross-origin frame: it owns a dedicated CDP session.
@@ -6801,7 +6801,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     // The script may start navigation or leave its renderer busy. Reading the
     // bound target metadata needs no second JavaScript execution afterwards.
     let url = progress
-        .track(super::observation_progress::Phase::EvaluationMetadata, mgr.get_url_metadata())
+        .track(agent_browser_cdp::observation_progress::Phase::EvaluationMetadata, mgr.get_url_metadata())
         .await?;
     Ok(json!({ "result": result, "origin": url }))
 }
@@ -6872,7 +6872,7 @@ async fn protected_snapshot_observation(
     session: &str,
     options: &SnapshotOptions,
     frame: Option<&str>,
-) -> Result<(String, RefMap), super::sensitive::InventoryError> {
+) -> Result<(String, RefMap), agent_browser_observation::InventoryError> {
     let deadline = state.protected_deadline();
     let progress = state.protected_observation_progress();
     state.ref_map.clear();
@@ -6886,15 +6886,15 @@ async fn protected_snapshot_observation(
                 .subscribe();
             progress
                 .track(
-                    super::observation_progress::Phase::DrainEvents,
+                    agent_browser_cdp::observation_progress::Phase::DrainEvents,
                     state.drain_cdp_events_background(),
                 )
                 .await?;
-            let mut continuation = super::sensitive::InventoryContinuation::default();
+            let mut continuation = agent_browser_observation::InventoryContinuation::default();
             loop {
                 progress
                     .track(
-                        super::observation_progress::Phase::AttachmentHarvest,
+                        agent_browser_cdp::observation_progress::Phase::AttachmentHarvest,
                         state.harvest_iframe_attachments(),
                     )
                     .await?;
@@ -6910,9 +6910,9 @@ async fn protected_snapshot_observation(
                     .as_ref()
                     .ok_or_else(|| "Browser not launched".to_string())?;
                 if mgr.active_session_id()? != session {
-                    return Err(super::sensitive::InventoryError::Unavailable(format!(
+                    return Err(agent_browser_observation::InventoryError::Unavailable(format!(
                         "{}: active observation target changed",
-                        super::sensitive::UNSUPPORTED
+                        agent_browser_observation::UNSUPPORTED
                     )));
                 }
                 let mut refs = RefMap::new();
@@ -6942,13 +6942,13 @@ async fn protected_snapshot_observation(
                             .merge(observation);
                         return Ok((tree, refs));
                     }
-                    Err(super::sensitive::InventoryError::Coverage(gap)) => {
+                    Err(agent_browser_observation::InventoryError::Coverage(gap)) => {
                         recover_sensitive_frames(state, gap).await?;
                     }
-                    Err(super::sensitive::InventoryError::Changed(_)) => {
+                    Err(agent_browser_observation::InventoryError::Changed(_)) => {
                         progress
                             .track(
-                                super::observation_progress::Phase::DrainEvents,
+                                agent_browser_cdp::observation_progress::Phase::DrainEvents,
                                 state.drain_cdp_events_background(),
                             )
                             .await?;
@@ -6959,7 +6959,7 @@ async fn protected_snapshot_observation(
             }
         })
         .await
-        .map_err(super::sensitive::InventoryError::Deadline)?
+        .map_err(agent_browser_observation::InventoryError::Deadline)?
 }
 
 // Consumers requiring complete content never receive an incomplete tree.
@@ -6971,13 +6971,13 @@ async fn protected_snapshot(
 ) -> Result<(String, RefMap), String> {
     protected_snapshot_observation(state, session, options, frame)
         .await
-        .map_err(super::sensitive::InventoryError::into_message)
+        .map_err(agent_browser_observation::InventoryError::into_message)
 }
 
 /// No page data is safe until the complete protected batch is validated.
 /// A deadline is useful observation metadata, never permission to bypass inventory.
-fn incomplete_snapshot(error: super::sensitive::InventoryError) -> Value {
-    use super::sensitive::InventoryError;
+fn incomplete_snapshot(error: agent_browser_observation::InventoryError) -> Value {
+    use agent_browser_observation::InventoryError;
     let reason = match error {
         InventoryError::Deadline(diagnostic) => json!({
             "kind": "deadline", "diagnostic": diagnostic
@@ -7025,7 +7025,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             // The initial event drain may follow a newly opened popup. Rebind
             // this read to its document within the original command deadline;
             // never repeat input or reuse the opener's frame selection.
-            Err(super::sensitive::InventoryError::Unavailable(_))
+            Err(agent_browser_observation::InventoryError::Unavailable(_))
                 if state.browser.as_ref().and_then(|mgr| mgr.active_session_id().ok())
                     .is_some_and(|current| current != session_id) => continue,
             Err(error) => return Ok(incomplete_snapshot(error)),
@@ -7036,7 +7036,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url = match progress
         .track(
-            super::observation_progress::Phase::OriginProjection,
+            agent_browser_cdp::observation_progress::Phase::OriginProjection,
             mgr.get_url(),
         )
         .await
@@ -7045,7 +7045,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         _ => {
             state.ref_map.clear();
             return Ok(incomplete_snapshot(
-                super::sensitive::InventoryError::Unavailable("Snapshot origin unavailable".into()),
+                agent_browser_observation::InventoryError::Unavailable("Snapshot origin unavailable".into()),
             ));
         }
     };
@@ -7713,7 +7713,7 @@ async fn handle_scoped_getter(
         && cmd
             .get("attribute")
             .and_then(Value::as_str)
-            .is_some_and(super::sensitive::selector_metadata_attribute);
+            .is_some_and(agent_browser_observation::selector_metadata_attribute);
     if let Some(known) = state.sensitive_observations.get(&session).filter(|known| {
         (!selector_metadata || cmd.get("attribute").and_then(Value::as_str) == Some("aria-label"))
             && !known.controls.is_empty()
@@ -7976,7 +7976,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     selector: &str,
     state: &str,
@@ -8034,7 +8034,7 @@ async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> R
 }
 
 async fn wait_for_text(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     text: &str,
     timeout_ms: u64,
@@ -8047,7 +8047,7 @@ async fn wait_for_text(
 }
 
 async fn wait_for_function(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     fn_str: &str,
     timeout_ms: u64,
@@ -8060,7 +8060,7 @@ async fn wait_for_function(
 /// polls the frame's own document, re-resolved every poll so a navigating
 /// frame stays correct, and in the frame's realm so cross-origin works.
 async fn wait_for_selector_in_frame(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     frame_id: &str,
     selector: &str,
@@ -8094,7 +8094,7 @@ async fn wait_for_selector_in_frame(
 }
 
 async fn poll_frame_document(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     frame_id: &str,
     check: &str,
@@ -8140,7 +8140,7 @@ async fn poll_frame_document(
 }
 
 async fn poll_until_true(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     expression: &str,
     timeout_ms: u64,
@@ -8148,10 +8148,10 @@ async fn poll_until_true(
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
-        let result: super::cdp::types::EvaluateResult = client
+        let result: agent_browser_cdp::types::EvaluateResult = client
             .send_command_typed(
                 "Runtime.evaluate",
-                &super::cdp::types::EvaluateParams {
+                &agent_browser_cdp::types::EvaluateParams {
                     expression: expression.to_string(),
                     return_by_value: Some(true),
                     await_promise: Some(true),
@@ -8348,7 +8348,7 @@ fn session_info(state: &mut DaemonState) -> Value {
     let effective = effective_browser_launch(state);
     json!({
         "sensitiveSecretMaintenance": {
-            "minimumCharacters": super::sensitive::MIN_SECRET_CHARS,
+            "minimumCharacters": agent_browser_observation::MIN_SECRET_CHARS,
             "removedByCharacterLength": removed,
             "retainedCount": retained,
         },
@@ -8420,7 +8420,7 @@ async fn handle_tab_state(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     }
     let session = mgr.active_session_id()?.to_string();
     let observation =
-        super::sensitive::observe(&mgr.client, &session, &state.iframe_sessions).await?;
+        agent_browser_observation::observe(&mgr.client, &session, &state.iframe_sessions).await?;
     let known = state
         .sensitive_observations
         .entry(session.clone())
@@ -8429,7 +8429,7 @@ async fn handle_tab_state(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if known.has_sensitive() {
         return Err(format!(
             "{}: guarded tab cannot capture or restore tab state",
-            super::sensitive::UNSUPPORTED
+            agent_browser_observation::UNSUPPORTED
         ));
     }
     if cmd["action"] == "state_save_tab" {
@@ -9194,7 +9194,7 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
         .await?;
 
     // Recheck before decoded PDF bytes can reach a file.
-    super::sensitive::require_public(&mgr.client, &session_id, &state.iframe_sessions).await?;
+    agent_browser_observation::require_public(&mgr.client, &session_id, &state.iframe_sessions).await?;
     let data = result
         .get("data")
         .and_then(|v| v.as_str())
@@ -9495,7 +9495,7 @@ async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let deadline = state.protected_deadline();
     let mut events = state.browser.as_ref().ok_or("Browser not launched")?.client.subscribe();
     let counts = progress.before(deadline, async {
-        let mut continuation = super::sensitive::InventoryContinuation::default();
+        let mut continuation = agent_browser_observation::InventoryContinuation::default();
         loop {
             state.drain_cdp_events_background().await?;
             state.harvest_iframe_attachments().await?;
@@ -9504,7 +9504,7 @@ async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             if mgr.active_session_id()? != session { return Err("getcounts: active target changed".to_string()); }
             let client = mgr.client.clone();
             let frames = state.iframe_sessions.clone();
-            let operation = super::sensitive::observe_with_continuation(
+            let operation = agent_browser_observation::observe_with_continuation(
         &client, &session, &frames, &mut continuation, |context| {
             let client = client.clone();
             let selectors = selectors.clone();
@@ -9531,13 +9531,13 @@ async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                     state.sensitive_observations.entry(session.clone()).or_default().merge(observation);
                     return Ok(counts);
                 }
-                Err(super::sensitive::InventoryError::Coverage(gap)) => recover_sensitive_frames(state, gap).await?,
-                Err(super::sensitive::InventoryError::Changed(_)) => {},
+                Err(agent_browser_observation::InventoryError::Coverage(gap)) => recover_sensitive_frames(state, gap).await?,
+                Err(agent_browser_observation::InventoryError::Changed(_)) => {},
                 Err(error) => return Err(error.into_message()),
             }
             tokio::task::yield_now().await;
         }
-    }).await.map_err(super::observation_progress::DeadlineDiagnostic::into_message)??;
+    }).await.map_err(agent_browser_cdp::observation_progress::DeadlineDiagnostic::into_message)??;
     Ok(json!({"counts":counts}))
 }
 
@@ -10889,11 +10889,11 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
 
     wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let result: agent_browser_cdp::types::EvaluateResult = mgr
         .client
         .send_command_typed(
             "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
+            &agent_browser_cdp::types::EvaluateParams {
                 expression: format!("({})", expression),
                 return_by_value: Some(true),
                 await_promise: Some(true),
@@ -11433,11 +11433,11 @@ async fn eval_body_in_active_frame(
                 .and_then(|f| iframe_sessions.get(f))
                 .map(|s| s.as_str())
                 .unwrap_or(top_session);
-            let res: super::cdp::types::EvaluateResult = mgr
+            let res: agent_browser_cdp::types::EvaluateResult = mgr
                 .client
                 .send_command_typed(
                     "Runtime.evaluate",
-                    &super::cdp::types::EvaluateParams {
+                    &agent_browser_cdp::types::EvaluateParams {
                         expression: format!("({body})(document)"),
                         return_by_value: Some(true),
                         await_promise: Some(false),
@@ -11533,7 +11533,7 @@ fn normalize_ws(s: &str) -> String {
 /// nodes without a backendDOMNodeId (virtual nodes) so a later actionable match
 /// still wins.
 fn find_ax_node_by_role(
-    nodes: &[super::cdp::types::AXNode],
+    nodes: &[agent_browser_cdp::types::AXNode],
     role: &str,
     name: Option<&str>,
     exact: bool,
@@ -11738,11 +11738,11 @@ async fn handle_semantic_locator(
         }
     };
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let result: agent_browser_cdp::types::EvaluateResult = mgr
         .client
         .send_command_typed(
             "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
+            &agent_browser_cdp::types::EvaluateParams {
                 expression: query,
                 return_by_value: Some(true),
                 await_promise: Some(false),
@@ -11824,11 +11824,11 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         idx = index,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let result: agent_browser_cdp::types::EvaluateResult = mgr
         .client
         .send_command_typed(
             "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
+            &agent_browser_cdp::types::EvaluateParams {
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
@@ -11897,12 +11897,12 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let result: agent_browser_cdp::types::EvaluateResult = mgr
         .client
         .send_command_typed(
             "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: super::sensitive::guarded_eval(script),
+            &agent_browser_cdp::types::EvaluateParams {
+                expression: agent_browser_observation::guarded_eval(script),
                 return_by_value: Some(false),
                 await_promise: Some(true),
             },
@@ -12230,7 +12230,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .ok_or("Failed to create browser context")?
             .to_string();
 
-        let create_result: super::cdp::types::CreateTargetResult = mgr
+        let create_result: agent_browser_cdp::types::CreateTargetResult = mgr
             .client
             .send_command_typed(
                 "Target.createTarget",
@@ -12239,11 +12239,11 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             )
             .await?;
 
-        let attach: super::cdp::types::AttachToTargetResult = mgr
+        let attach: agent_browser_cdp::types::AttachToTargetResult = mgr
             .client
             .send_command_typed(
                 "Target.attachToTarget",
-                &super::cdp::types::AttachToTargetParams {
+                &agent_browser_cdp::types::AttachToTargetParams {
                     target_id: create_result.target_id.clone(),
                     flatten: true,
                 },
@@ -13403,7 +13403,7 @@ async fn handle_http_credentials(cmd: &Value, state: &mut DaemonState) -> Result
 /// This is used by `auth_login` auto-detection so SPA login forms can render
 /// after initial navigation without requiring global network-idle.
 async fn wait_for_any_selector(
-    client: &super::cdp::client::CdpClient,
+    client: &agent_browser_cdp::client::CdpClient,
     session_id: &str,
     selectors: &[&str],
     timeout_ms: u64,
@@ -13438,10 +13438,10 @@ async fn wait_for_any_selector(
                 sel = serde_json::to_string(selector).unwrap_or_default()
             );
 
-            let result: super::cdp::types::EvaluateResult = client
+            let result: agent_browser_cdp::types::EvaluateResult = client
                 .send_command_typed(
                     "Runtime.evaluate",
-                    &super::cdp::types::EvaluateParams {
+                    &agent_browser_cdp::types::EvaluateParams {
                         expression,
                         return_by_value: Some(true),
                         await_promise: Some(true),
@@ -14631,7 +14631,7 @@ mod tests {
         assert!(unknown.get("data").is_none());
         assert!(unknown.get("code").is_none());
     }
-    use super::super::cdp::types::{AXNode, AXValue};
+    use agent_browser_cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;
     use std::fs;
@@ -15439,7 +15439,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap_err();
-        assert!(refusal.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(refusal.starts_with(agent_browser_observation::UNSUPPORTED));
         assert!(!refusal.contains("Synthetic-private-value"));
         assert_eq!(state.restore_save_status, "sensitive_output_unsupported");
         assert!(state.restore_saved_path.is_none());
@@ -15514,7 +15514,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(error.starts_with(agent_browser_observation::UNSUPPORTED));
         assert!(error.contains("deadline elapsed"));
         while let Ok(command) = fixture.commands.try_recv() {
             let method = command["method"].as_str().unwrap();
@@ -15676,7 +15676,7 @@ mod tests {
             assert!(resp["error"]
                 .as_str()
                 .unwrap()
-                .starts_with(super::super::sensitive::UNSUPPORTED));
+                .starts_with(agent_browser_observation::UNSUPPORTED));
         }
     }
 
@@ -15761,7 +15761,7 @@ mod tests {
                     )
             );
             if method == "DOM.getDocument" {
-                if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
+                if command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH {
                     deep += 1;
                 } else {
                     shallow += 1;
@@ -16087,7 +16087,7 @@ mod tests {
                         )
                 );
                 if method == "DOM.getDocument" {
-                    if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
+                    if command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH {
                         deep += 1;
                     } else {
                         shallow += 1;
@@ -16160,7 +16160,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             error,
-            super::super::sensitive::InventoryError::Unavailable(_)
+            agent_browser_observation::InventoryError::Unavailable(_)
         ));
         assert!(!error.into_message().contains("Synthetic-"));
         assert_eq!(refs.entries_sorted().len(), 1);
@@ -16286,7 +16286,7 @@ mod tests {
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
             if method == "DOM.getDocument"
-                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
             {
                 deep += 1;
             }
@@ -16331,7 +16331,7 @@ mod tests {
                 }
             }
             state.iframe_sessions.remove("frame-1");
-            let mut continuation = super::super::sensitive::InventoryContinuation::default();
+            let mut continuation = agent_browser_observation::InventoryContinuation::default();
             let mut refs = RefMap::new();
             let first = snapshot::take_snapshot_with_observation(
                 &client,
@@ -16340,13 +16340,13 @@ mod tests {
                 &mut refs,
                 None,
                 &state.iframe_sessions,
-                &super::super::sensitive::Observation::default(),
+                &agent_browser_observation::Observation::default(),
                 &mut continuation,
             )
             .await;
             assert!(matches!(
                 first,
-                Err(super::super::sensitive::InventoryError::Coverage(_))
+                Err(agent_browser_observation::InventoryError::Coverage(_))
             ));
             assert!(refs.entries_sorted().is_empty());
             {
@@ -16400,7 +16400,7 @@ mod tests {
                 &mut refs,
                 None,
                 &state.iframe_sessions,
-                &super::super::sensitive::Observation::default(),
+                &agent_browser_observation::Observation::default(),
                 &mut continuation,
             )
             .await
@@ -16412,7 +16412,7 @@ mod tests {
             while let Ok(command) = fixture.commands.try_recv() {
                 if command["method"] == "DOM.getDocument"
                     && command["sessionId"] == session
-                    && command["params"]["depth"] == super::super::sensitive::PIERCE_LAYER_DEPTH
+                    && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
                 {
                     main_reads += 1;
                 }
@@ -16692,7 +16692,7 @@ mod tests {
             );
             *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
             if method == "DOM.getDocument" {
-                if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
+                if command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH {
                     deep += 1;
                 } else {
                     shallow += 1;
@@ -16731,7 +16731,7 @@ mod tests {
                 assert_ne!(command["sessionId"], "unrepresented-session");
                 deeper |= command["sessionId"] == "session-2"
                     && command["method"] == "DOM.getDocument"
-                    && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH;
+                    && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH;
                 resolved |= command["sessionId"] == "synthetic-session"
                     && command["method"] == "DOM.resolveNode";
                 read |= command["sessionId"] == "synthetic-session"
@@ -16830,10 +16830,10 @@ mod tests {
                         let error = result.unwrap().unwrap_err();
                         assert!(matches!(
                             error,
-                            super::super::sensitive::InventoryError::Unavailable(_)
+                            agent_browser_observation::InventoryError::Unavailable(_)
                         ));
                         let message = error.into_message();
-                        assert!(message.starts_with(super::super::sensitive::UNSUPPORTED));
+                        assert!(message.starts_with(agent_browser_observation::UNSUPPORTED));
                         assert!(!message.contains("Synthetic-"));
                     }
                     assert_eq!(refs.entries_sorted().len(), 1);
@@ -16920,7 +16920,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_protected_inventory_streaming_keeps_typed_coverage_and_identity_errors() {
-        use super::super::sensitive::{DocumentChange, InventoryError};
+        use agent_browser_observation::{DocumentChange, InventoryError};
         for changed in [false, true] {
             let mut fixture = super::super::lifecycle_fixture::SyntheticCdp::connect().await;
             let client = fixture.manager.client.clone();
@@ -16948,7 +16948,7 @@ mod tests {
             let observer_client = client.clone();
             let frames = state.iframe_sessions.clone();
             let observer = tokio::spawn(async move {
-                super::super::sensitive::observe_inventory(&observer_client, &session, &frames)
+                agent_browser_observation::observe_inventory(&observer_client, &session, &frames)
                     .await
             });
             let mut commands =
@@ -17159,7 +17159,7 @@ mod tests {
                 );
                 *counts.entry((sid.into(), method.into())).or_insert(0) += 1;
                 if method == "DOM.getDocument" {
-                    if command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH {
+                    if command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH {
                         deep += 1;
                     } else {
                         shallow += 1;
@@ -17271,7 +17271,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dom["params"],
-            json!({"depth":crate::native::sensitive::PIERCE_LAYER_DEPTH,"pierce":true})
+            json!({"depth":agent_browser_observation::PIERCE_LAYER_DEPTH,"pierce":true})
         );
         assert_eq!(client.pending_len().await, 2);
         let (state, error) = observer.await.unwrap();
@@ -17339,7 +17339,7 @@ mod tests {
             .err()
             .unwrap();
             assert!(start.elapsed() < std::time::Duration::from_millis(600));
-            assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+            assert!(error.starts_with(agent_browser_observation::UNSUPPORTED));
             let diagnostic: Value =
                 serde_json::from_str(error.split_once("deadline elapsed: ").unwrap().1).unwrap();
             assert_eq!(diagnostic["budgetMs"], 200);
@@ -17517,7 +17517,7 @@ mod tests {
 
     #[test]
     fn test_protected_inventory_incomplete_snapshot_unavailable_scrubs_raw_errors() {
-        let response = incomplete_snapshot(super::super::sensitive::InventoryError::Unavailable(
+        let response = incomplete_snapshot(agent_browser_observation::InventoryError::Unavailable(
             "private-provider-secret https://private.invalid frame-id".into(),
         ));
         assert_eq!(
@@ -17641,7 +17641,7 @@ mod tests {
                 ax_frames.insert(command["params"]["frameId"].as_str().unwrap().to_owned());
             }
             if command["method"] == "DOM.getDocument"
-                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
             {
                 deep += 1;
             }
@@ -17695,7 +17695,7 @@ mod tests {
         let mut deep = 0;
         while let Ok(command) = fixture.commands.try_recv() {
             if command["method"] == "DOM.getDocument"
-                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
             {
                 deep += 1;
             }
@@ -17756,7 +17756,7 @@ mod tests {
                     assert!(initial_validation_seen);
                 }
                 if method == "DOM.getDocument"
-                    && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                    && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
                 {
                     deep += 1;
                 }
@@ -17814,7 +17814,7 @@ mod tests {
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
             if method == "DOM.getDocument"
-                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
             {
                 deep += 1;
             }
@@ -18029,7 +18029,7 @@ mod tests {
             let method = command["method"].as_str().unwrap();
             assert!(!method.starts_with("Input.") && method != "Page.navigate");
             if method == "DOM.getDocument"
-                && command["params"]["depth"] == crate::native::sensitive::PIERCE_LAYER_DEPTH
+                && command["params"]["depth"] == agent_browser_observation::PIERCE_LAYER_DEPTH
             {
                 deep += 1;
             }
@@ -18054,7 +18054,7 @@ mod tests {
             .changed_documents
             .insert("synthetic-top".into());
         let error =
-            super::super::sensitive::observe_inventory(&client, &session, &state.iframe_sessions)
+            agent_browser_observation::observe_inventory(&client, &session, &state.iframe_sessions)
                 .await
                 .err()
                 .unwrap()
@@ -18325,7 +18325,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(error.starts_with(super::super::sensitive::UNSUPPORTED));
+        assert!(error.starts_with(agent_browser_observation::UNSUPPORTED));
         assert!(state.iframe_sessions.is_empty());
         while let Ok(command) = fixture.commands.try_recv() {
             assert_ne!(command["method"], "Target.attachToTarget");
@@ -18379,7 +18379,7 @@ mod tests {
             error,
             format!(
                 "{}: pierced DOM unavailable",
-                super::super::sensitive::UNSUPPORTED
+                agent_browser_observation::UNSUPPORTED
             )
         );
         assert_eq!(state.iframe_sessions.len(), 1);
@@ -19386,7 +19386,7 @@ mod tests {
         assert!(resp["error"]
             .as_str()
             .unwrap()
-            .starts_with(super::super::sensitive::UNSUPPORTED));
+            .starts_with(agent_browser_observation::UNSUPPORTED));
         assert_eq!(server.await.unwrap(), 1);
     }
 
@@ -21456,7 +21456,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(result["error"]
             .as_str()
             .unwrap()
-            .starts_with(super::super::sensitive::UNSUPPORTED));
+            .starts_with(agent_browser_observation::UNSUPPORTED));
         assert!(!std::path::Path::new(&path).exists());
     }
 

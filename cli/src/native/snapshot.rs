@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::cdp::client::CdpClient;
-use super::cdp::types::{AXNode, AXProperty, AXValue, GetFullAXTreeResult};
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::types::{AXNode, AXProperty, AXValue, GetFullAXTreeResult};
 #[cfg(test)]
 use super::element::resolve_ax_session;
 use super::element::RefMap;
@@ -244,7 +244,7 @@ pub async fn take_snapshot(
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<String, super::sensitive::InventoryError> {
+) -> Result<String, agent_browser_observation::InventoryError> {
     take_snapshot_with_observation(
         client,
         session_id,
@@ -252,8 +252,8 @@ pub async fn take_snapshot(
         ref_map,
         frame_id,
         iframe_sessions,
-        &super::sensitive::Observation::default(),
-        &mut super::sensitive::InventoryContinuation::default(),
+        &agent_browser_observation::Observation::default(),
+        &mut agent_browser_observation::InventoryContinuation::default(),
     )
     .await
     .map(|(output, _)| output)
@@ -266,10 +266,10 @@ pub(crate) async fn take_snapshot_with_observation(
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-    private_observation: &super::sensitive::Observation,
-    continuation: &mut super::sensitive::InventoryContinuation,
-) -> Result<(String, super::sensitive::Observation), super::sensitive::InventoryError> {
-    let (mut observation, batch) = super::sensitive::observe_with_continuation(
+    private_observation: &agent_browser_observation::Observation,
+    continuation: &mut agent_browser_observation::InventoryContinuation,
+) -> Result<(String, agent_browser_observation::Observation), agent_browser_observation::InventoryError> {
+    let (mut observation, batch) = agent_browser_observation::observe_with_continuation(
         client,
         session_id,
         iframe_sessions,
@@ -294,7 +294,7 @@ pub(crate) async fn take_snapshot_with_observation(
 }
 
 struct SnapshotBatch {
-    context: super::sensitive::InventoryContext,
+    context: agent_browser_observation::InventoryContext,
     selected_frame: String,
     projections: HashMap<String, GetFullAXTreeResult>,
     cursor: HashMap<String, HashMap<i64, CursorElementInfo>>,
@@ -305,7 +305,7 @@ async fn collect_snapshot_batch(
     client: &Arc<CdpClient>,
     options: &SnapshotOptions,
     frame_id: Option<&str>,
-    context: super::sensitive::InventoryContext,
+    context: agent_browser_observation::InventoryContext,
 ) -> Result<SnapshotBatch, String> {
     let root = frame_id.unwrap_or(&context.top_frame);
     let selected_session = context
@@ -320,7 +320,7 @@ async fn collect_snapshot_batch(
             let mut tree: GetFullAXTreeResult = client
                 .observation_progress
                 .track(
-                    super::observation_progress::Phase::AxTree,
+                    agent_browser_cdp::observation_progress::Phase::AxTree,
                     client.send_command_typed(
                         "Accessibility.getFullAXTree",
                         &serde_json::json!({"frameId": frame}),
@@ -341,7 +341,7 @@ async fn collect_snapshot_batch(
             let elements = client
                 .observation_progress
                 .track(
-                    super::observation_progress::Phase::CursorProjection,
+                    agent_browser_cdp::observation_progress::Phase::CursorProjection,
                     find_cursor_interactive_elements(
                         client,
                         session,
@@ -360,7 +360,7 @@ async fn collect_snapshot_batch(
         .collect::<Result<HashMap<_, _>, _>>()
     };
     let selector = client.observation_progress.track(
-        super::observation_progress::Phase::SelectorProjection,
+        agent_browser_cdp::observation_progress::Phase::SelectorProjection,
         async {
             let session_id = selected_session.as_str();
             let selector_backend_ids: Option<std::collections::HashSet<i64>> =
@@ -422,7 +422,7 @@ fn render_snapshot_frame(
     frame_id: Option<&str>,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
-    observation: &super::sensitive::Observation,
+    observation: &agent_browser_observation::Observation,
     batch: &SnapshotBatch,
     visited: &mut std::collections::HashSet<String>,
 ) -> Result<String, String> {
@@ -708,7 +708,7 @@ async fn supplement_visible_dialogs(
     client: &Arc<CdpClient>,
     session: &str,
     frame: &str,
-    context: &super::sensitive::InventoryContext,
+    context: &agent_browser_observation::InventoryContext,
     tree: &mut GetFullAXTreeResult,
 ) -> Result<(), String> {
     let Some(roots) = context.dialog_roots.get(frame) else {
@@ -1115,7 +1115,7 @@ fn promote_hidden_inputs(
 /// Protect remembered echoes and control descendants before AX aggregation loses identity.
 fn protect_private_text_nodes(
     nodes: &[AXNode],
-    observation: &super::sensitive::Observation,
+    observation: &agent_browser_observation::Observation,
     session: &str,
 ) -> Vec<AXNode> {
     let indices: HashMap<_, _> = nodes
@@ -1130,7 +1130,7 @@ fn protect_private_text_nodes(
         };
         let key = (session.to_owned(), backend);
         if observation.private_text_nodes.contains(&key) {
-            pending.push((i, super::sensitive::marker("credential")));
+            pending.push((i, agent_browser_observation::marker("credential")));
         } else if let Some(marker) = observation.controls.get(&key) {
             if let Some(children) = &node.child_ids {
                 pending.extend(
@@ -1766,7 +1766,7 @@ mod tests {
             {"nodeId":"leaf","backendDOMNodeId":20,"role":{"type":"string","value":"status"},"name":{"type":"string","value":"界"},"childIds":["text"]},
             {"nodeId":"text","backendDOMNodeId":21,"role":{"type":"string","value":"StaticText"},"name":{"type":"string","value":"界"}}
         ])).unwrap();
-        let mut known = super::super::sensitive::Observation::default();
+        let mut known = agent_browser_observation::Observation::default();
         known.remember_private_value("frame", 10, "credential", "synthetic-full-value");
         known.remember_private_text("frame", 20, "界");
         let sanitized = protect_private_text_nodes(&nodes, &known, "frame");
@@ -1794,7 +1794,7 @@ mod tests {
             {"nodeId":"option","backendDOMNodeId":31,"role":{"type":"string","value":"option"},"name":{"type":"string","value":"12"}},
             {"nodeId":"public","role":{"type":"string","value":"StaticText"},"name":{"type":"string","value":"12 items and 34 rows"}}
         ])).unwrap();
-        let mut known = super::super::sensitive::Observation::default();
+        let mut known = agent_browser_observation::Observation::default();
         // The filled textbox is absent from AX; its remembered value still protects a sibling echo.
         known.remember_private_expiry_value("frame", 10, "12/34");
         known.remember_private_value("frame", 30, "cc-exp-month", "12");

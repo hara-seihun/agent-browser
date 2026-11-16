@@ -7,10 +7,10 @@ use std::sync::Arc;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 
-use super::cdp::client::CdpClient;
-use super::observation_progress::{DeadlineDiagnostic, Phase};
+use agent_browser_cdp::client::CdpClient;
+use agent_browser_cdp::observation_progress::{DeadlineDiagnostic, Phase};
 
-pub const UNSUPPORTED: &str = "SENSITIVE_OUTPUT_UNSUPPORTED";
+pub const UNSUPPORTED: &str = agent_browser_cdp::SENSITIVE_OUTPUT_UNSUPPORTED;
 pub const MIN_SECRET_CHARS: usize = 3;
 
 fn useful_secret(value: &str) -> bool {
@@ -912,9 +912,9 @@ pub fn guarded_eval(script: &str) -> String {
 
 #[derive(Clone, Default)]
 pub struct Observation {
-    pub(crate) frame_sessions: HashSet<String>,
+    pub frame_sessions: HashSet<String>,
     pub controls: HashMap<(String, i64), String>,
-    pub(crate) private_text_nodes: HashSet<(String, i64)>,
+    pub private_text_nodes: HashSet<(String, i64)>,
     // Complete current DOM membership, not just classified controls. Private-fill
     // controls retain protection while alive even if their attributes change.
     live_nodes: Option<HashSet<(String, i64)>>,
@@ -968,7 +968,7 @@ impl Observation {
         }
     }
 
-    pub(crate) fn remember_private_expiry_value(
+    pub fn remember_private_expiry_value(
         &mut self,
         session: &str,
         backend: i64,
@@ -979,7 +979,7 @@ impl Observation {
     }
 
     /// Text-only exported fields protect AX names/descendants as well as values.
-    pub(crate) fn remember_private_text(&mut self, session: &str, backend: i64, value: &str) {
+    pub fn remember_private_text(&mut self, session: &str, backend: i64, value: &str) {
         self.remember_private_value(session, backend, "credential", value);
         self.private_text_nodes
             .insert((session.to_owned(), backend));
@@ -1073,7 +1073,7 @@ impl Observation {
 
     /// A scoped payment control may expose a short month/year in its name.
     /// Replace only the value span, preserving its useful action/field label.
-    pub(crate) fn protect_control_name(&self, text: &str, redacted: &str) -> String {
+    pub fn protect_control_name(&self, text: &str, redacted: &str) -> String {
         let Some(kind) = redacted
             .strip_prefix("[redacted: ")
             .and_then(|s| s.strip_suffix(']'))
@@ -1108,7 +1108,7 @@ impl Observation {
 
     /// Retain protection for live nodes and remembered values. Detached login
     /// fields in a single-page app must not make its later inbox sensitive.
-    pub(crate) fn inherit_private(&mut self, known: &Self) {
+    pub fn inherit_private(&mut self, known: &Self) {
         let live = |key: &&(String, i64)| {
             self.live_nodes
                 .as_ref()
@@ -1138,7 +1138,7 @@ impl Observation {
     /// navigation ids restart), so keeping them redacted whole unrelated pages
     /// (2026-10-31: every name on the next site read "[redacted: credential]").
     /// Remembered values still protect any echo of them on the new page.
-    pub(crate) fn forget_document_controls(&mut self) {
+    pub fn forget_document_controls(&mut self) {
         self.controls.clear();
         self.private_text_nodes.clear();
     }
@@ -1764,7 +1764,7 @@ fn collect_document_frames(
 }
 
 #[derive(Debug)]
-pub(crate) struct CoverageGap {
+pub struct CoverageGap {
     pub missing_owners: Vec<String>,
     pub mismatched_frames: Vec<(String, String, Option<String>)>,
     covered: HashMap<String, String>,
@@ -1773,7 +1773,7 @@ pub(crate) struct CoverageGap {
 
 impl CoverageGap {
     /// Only represented but uncached frames may request attachment recovery.
-    pub(crate) fn unattached_frames(&self) -> HashSet<String> {
+    pub fn unattached_frames(&self) -> HashSet<String> {
         self.missing_owners
             .iter()
             .chain(self.mismatched_frames.iter().map(|(frame, _, _)| frame))
@@ -1784,7 +1784,7 @@ impl CoverageGap {
 }
 
 #[derive(Debug)]
-pub(crate) enum InventoryError {
+pub enum InventoryError {
     Unavailable(String),
     Coverage(CoverageGap),
     Changed(DocumentChange),
@@ -1792,7 +1792,7 @@ pub(crate) enum InventoryError {
 }
 
 #[derive(Debug)]
-pub(crate) enum DocumentChange {
+pub enum DocumentChange {
     FrameBindings,
     BackendIdentity,
     PiercedSubtree,
@@ -1805,7 +1805,7 @@ impl From<String> for InventoryError {
 }
 
 impl InventoryError {
-    pub(crate) fn into_message(self) -> String {
+    pub fn into_message(self) -> String {
         match self {
             Self::Unavailable(message) => message,
             Self::Deadline(diagnostic) => diagnostic.into_message(),
@@ -1860,16 +1860,16 @@ pub async fn observe(
         .map_err(InventoryError::into_message)
 }
 
-pub(crate) struct InventoryContext {
-    pub(crate) document_frames: HashMap<String, String>,
-    pub(crate) cursor_nodes: HashMap<String, HashMap<String, i64>>,
-    pub(crate) frame_paths: HashMap<String, HashMap<String, i64>>,
-    pub(crate) dialog_roots: HashMap<String, HashSet<i64>>,
-    pub(crate) top_frame: String,
+pub struct InventoryContext {
+    pub document_frames: HashMap<String, String>,
+    pub cursor_nodes: HashMap<String, HashMap<String, i64>>,
+    pub frame_paths: HashMap<String, HashMap<String, i64>>,
+    pub dialog_roots: HashMap<String, HashSet<i64>>,
+    pub top_frame: String,
     frame_roots: HashMap<String, Option<i64>>,
-    pub(crate) frames: HashMap<String, String>,
-    pub(crate) owners: HashMap<(String, i64), String>,
-    pub(crate) hrefs: HashMap<(String, i64), Result<String, String>>,
+    pub frames: HashMap<String, String>,
+    pub owners: HashMap<(String, i64), String>,
+    pub hrefs: HashMap<(String, i64), Result<String, String>>,
 }
 
 fn collect_snapshot_context(
@@ -2021,7 +2021,7 @@ fn cursor_node_paths(root: &Value) -> Result<HashMap<String, i64>, String> {
 }
 
 impl InventoryContext {
-    pub(crate) fn frame_node(&self, frame: &str) -> Result<i64, String> {
+    pub fn frame_node(&self, frame: &str) -> Result<i64, String> {
         self.frame_roots
             .get(frame)
             .copied()
@@ -2033,7 +2033,7 @@ impl InventoryContext {
 /// Collect protected output inside the inventory's document-identity span.
 /// A changed document discards both the output and its control observation.
 /// Capture guards use the one-shot observer instead of admitting older captures.
-pub(crate) async fn observe_with_continuation<T, F, Fut>(
+pub async fn observe_with_continuation<T, F, Fut>(
     client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
@@ -2113,7 +2113,7 @@ fn frame_bindings(tree: &Value) -> Result<FrameBindings, InventoryError> {
 /// Kept only while one command attaches missing frames. Successful observations,
 /// navigation and other failures drop it; no tree is reused by a later command.
 #[derive(Default)]
-pub(crate) struct InventoryContinuation {
+pub struct InventoryContinuation {
     documents: HashMap<String, InventoryDocument>,
 }
 
@@ -2131,7 +2131,7 @@ struct InventoryDocument {
 /// 147 elements (long Gmail threads) cannot be read in one response. Read it in
 /// layers: a node reporting children it did not include is described again from
 /// there, and the description is spliced in, until no such node remains.
-pub(crate) const PIERCE_LAYER_DEPTH: i64 = 120;
+pub const PIERCE_LAYER_DEPTH: i64 = 120;
 
 #[derive(Clone, Copy)]
 enum TreeStep {
@@ -2486,7 +2486,7 @@ async fn validate_inventory_document(
 /// Renderer groups register connection-owned cancellation cleanup before resolve;
 /// cancellation cannot dispatch further value reads or abandon remote handles.
 /// Cached sessions from unrelated tabs are not evidence of membership.
-pub(crate) async fn observe_inventory(
+pub async fn observe_inventory(
     client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
@@ -2500,7 +2500,7 @@ pub(crate) async fn observe_inventory(
     .await
 }
 
-pub(crate) async fn observe_inventory_continued(
+pub async fn observe_inventory_continued(
     client: &Arc<CdpClient>,
     top_session: &str,
     iframe_sessions: &HashMap<String, String>,
@@ -2949,7 +2949,7 @@ mod tests {
         let path = std::env::var("SENSITIVE_BENCH_DOM").expect("SENSITIVE_BENCH_DOM");
         let text = std::fs::read_to_string(path).unwrap();
         let t = std::time::Instant::now();
-        let doc: Value = super::super::cdp::client::parse_cdp(&text).unwrap();
+        let doc: Value = agent_browser_cdp::client::parse_cdp(&text).unwrap();
         eprintln!("parse {:?}", t.elapsed());
         let root = &doc["root"];
         let t = std::time::Instant::now();
@@ -3480,119 +3480,6 @@ mod tests {
         );
         client.close().await;
         assert_eq!(server.await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn delayed_initial_pair_preserves_coverage_association_and_changed_errors() {
-        use super::super::lifecycle_fixture::SyntheticCdp;
-        for case in [
-            "coverage",
-            "session",
-            "document",
-            "backend",
-            "binding",
-            "unreadable",
-        ] {
-            let mut fixture = SyntheticCdp::connect().await;
-            let client = fixture.manager.client.clone();
-            let session = fixture.manager.active_session_id().unwrap().to_owned();
-            {
-                let mut inventory = fixture.frame_inventory.lock().unwrap();
-                inventory.reply_delays.insert(
-                    "Page.getFrameTree".into(),
-                    std::time::Duration::from_millis(30),
-                );
-                inventory.reply_delays.insert(
-                    "DOM.getDocument".into(),
-                    std::time::Duration::from_millis(10),
-                );
-                inventory.documents.insert("synthetic-top".into(), json!({"root":{
-                    "nodeName":"#document", "frameId":"synthetic-top", "backendNodeId":1000,
-                    "children":[{"nodeName":"INPUT","backendNodeId":11,"attributes":["autocomplete","cc-number"]}]
-                }}));
-                match case {
-                    "coverage" => {
-                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(json!({"nodeName":"IFRAME","frameId":"missing-frame"}));
-                    }
-                    "session" => {
-                        inventory
-                            .session_roots
-                            .insert("misbound-session".into(), "wrong-frame".into());
-                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["children"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(json!({"nodeName":"IFRAME","frameId":"expected-frame"}));
-                    }
-                    "document" => {
-                        inventory.documents.get_mut("synthetic-top").unwrap()["root"]["frameId"] =
-                            json!("wrong-frame");
-                    }
-                    "backend" => {
-                        inventory.changed_documents.insert("synthetic-top".into());
-                    }
-                    "binding" => {
-                        inventory.changed_frame_trees.insert(
-                            "synthetic-top".into(),
-                            json!({"frameTree":{
-                                "frame":{"id":"synthetic-top","loaderId":"next-document"}
-                            }}),
-                        );
-                    }
-                    "unreadable" => {
-                        inventory.unreadable.insert("synthetic-top".into());
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            let frames = if case == "session" {
-                HashMap::from([("expected-frame".into(), "misbound-session".into())])
-            } else {
-                HashMap::new()
-            };
-            let error = observe_inventory(&client, &session, &frames)
-                .await
-                .err()
-                .unwrap();
-            match (case, &error) {
-                ("coverage", InventoryError::Coverage(gap)) => {
-                    assert_eq!(gap.missing_owners, ["missing-frame"])
-                }
-                ("backend", InventoryError::Changed(DocumentChange::BackendIdentity)) => (),
-                ("binding", InventoryError::Changed(DocumentChange::FrameBindings)) => (),
-                ("session" | "document" | "unreadable", InventoryError::Unavailable(_)) => (),
-                _ => panic!("unexpected {case} error: {error:?}"),
-            }
-            let message = error.into_message();
-            assert!(!message.contains("Synthetic-"));
-            if case == "session" {
-                assert!(message.contains("frame session association changed"));
-            }
-            if case == "document" {
-                assert!(message.contains("document frame association changed"));
-            }
-            if case == "unreadable" {
-                assert!(message.contains("pierced DOM unavailable"));
-            }
-            client.settle_object_cleanup().await.unwrap();
-            assert!(fixture.frame_inventory.lock().unwrap().objects.is_empty());
-            assert_eq!(client.object_cleanup_len().await, 0);
-            assert_eq!(client.pending_len().await, 0);
-            while let Ok(command) = fixture.commands.try_recv() {
-                let method = command["method"].as_str().unwrap();
-                assert!(!method.starts_with("Input.") && method != "Page.navigate");
-                if matches!(case, "coverage" | "document" | "unreadable") {
-                    assert_ne!(method, "Runtime.callFunctionOn");
-                }
-                if matches!(method, "DOM.resolveNode" | "Runtime.callFunctionOn") {
-                    assert_eq!(command["sessionId"], session);
-                }
-            }
-            client.close().await;
-            fixture.server.await.unwrap();
-        }
     }
 
     #[test]

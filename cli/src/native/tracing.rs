@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 
 const MAX_PROFILE_EVENTS: usize = 5_000_000;
 

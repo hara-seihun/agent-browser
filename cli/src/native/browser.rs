@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
-use super::cdp::client::CdpClient;
+use agent_browser_cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
-use super::cdp::types::*;
+use agent_browser_cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
 
@@ -1237,7 +1237,7 @@ impl BrowserManager {
         let progress = self.client.observation_progress.clone();
         let nav_result: PageNavigateResult = progress
             .track(
-                super::observation_progress::Phase::NavigationRequest,
+                agent_browser_cdp::observation_progress::Phase::NavigationRequest,
                 self.client.send_command_typed(
                     "Page.navigate",
                     &PageNavigateParams {
@@ -1259,7 +1259,7 @@ impl BrowserManager {
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
             progress
                 .track(
-                    super::observation_progress::Phase::NavigationLifecycle,
+                    agent_browser_cdp::observation_progress::Phase::NavigationLifecycle,
                     self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx),
                 )
                 .await?;
@@ -1267,7 +1267,7 @@ impl BrowserManager {
 
         let (page_url, title) = progress
             .track(
-                super::observation_progress::Phase::NavigationMetadata,
+                agent_browser_cdp::observation_progress::Phase::NavigationMetadata,
                 async {
                     // Target metadata is maintained by the browser process. Renderer
                     // evaluation can stall indefinitely after lifecycle completion

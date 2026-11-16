@@ -1,0 +1,13 @@
+[package]
+name = "agent-browser-observation"
+version = "0.37.1"
+edition = "2021"
+license = "Apache-2.0"
+[dependencies]
+url = "2"
+agent-browser-cdp = { path = "../browser-cdp" }
+serde_json = { version = "1.0", features = ["unbounded_depth"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
+[dev-dependencies]
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
