@@ -7,8 +7,14 @@ mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
 pub use dashboard::{
-    is_valid_dashboard_access_token, normalize_dashboard_allowed_origins, run_dashboard_server,
+    is_valid_dashboard_access_token, normalize_dashboard_allowed_origins,
 };
+
+/// Keep the dashboard future and its runtime inside this library boundary.
+pub fn run_dashboard_server_blocking(port: u16) {
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    runtime.block_on(dashboard::run_dashboard_server(port));
+}
 
 use serde_json::{json, Value};
 use std::sync::Arc;

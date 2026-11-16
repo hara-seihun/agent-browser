@@ -37,7 +37,18 @@ pub fn configured_default_timeout_ms() -> Result<u64, String> {
     }
 }
 
-pub async fn run_daemon(session: &str) {
+/// Keep the large daemon future inside the runtime crate, not CLI monomorphization.
+pub fn run_daemon_blocking(session: &str) {
+    // Deep DOM values need the same worker stack as before the crate split.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(64 * 1024 * 1024)
+        .build()
+        .expect("Failed to create tokio runtime");
+    runtime.block_on(run_daemon(session));
+}
+
+pub(crate) async fn run_daemon(session: &str) {
     let default_timeout_ms = match configured_default_timeout_ms() {
         Ok(ms) => ms,
         Err(error) => {

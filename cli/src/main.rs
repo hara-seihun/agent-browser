@@ -6,7 +6,7 @@ use agent_browser::connection;
 mod doctor;
 use agent_browser::flags;
 use agent_browser::install;
-mod local_vault;
+use agent_browser::local_vault;
 mod mcp;
 use agent_browser::native;
 mod output;
@@ -1364,14 +1364,7 @@ fn main() {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
-        // Deep pages produce deeply nested CDP values; walking and dropping them
-        // recurses once per level, so give workers room beyond tokio's 2 MiB.
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .thread_stack_size(64 * 1024 * 1024)
-            .build()
-            .expect("Failed to create tokio runtime");
-        rt.block_on(native::daemon::run_daemon(&session));
+        native::daemon::run_daemon_blocking(&session);
         return;
     }
 
@@ -1381,8 +1374,7 @@ fn main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(4848);
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(native::stream::run_dashboard_server(port));
+        native::stream::run_dashboard_server_blocking(port);
         return;
     }
 

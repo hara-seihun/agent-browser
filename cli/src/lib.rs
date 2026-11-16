@@ -7,6 +7,7 @@ pub mod commands;
 pub mod connection;
 pub mod flags;
 pub mod install;
+pub mod local_vault;
 pub mod native;
 pub mod plugins;
 pub mod read;

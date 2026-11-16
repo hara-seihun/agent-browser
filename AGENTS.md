@@ -95,7 +95,7 @@ Match the existing style in that file.
 
 ## Architecture
 
-This is a Rust codebase. The browser runtime library lives in `cli/src/native/` (daemon, actions, browser, snapshot, state), with CLI presentation in the binary target. CDP wire types, transport and observation deadlines live in `cli/crates/browser-cdp`; protected DOM inventory and eval guards live in `cli/crates/browser-observation`. Plain managed `cargo build` uses the incremental opt1 `edit` profile with rcargo’s workspace-only Cranelift backend; install only an explicitly built `cargo build --profile ci --bin agent-browser` artifact. Dependencies and installed ci builds remain opt3. The `--engine` flag selects Chrome vs Lightpanda. The `install` command downloads Chrome from Chrome for Testing directly.
+This is a Rust codebase. The browser runtime library lives in `cli/src/native/` (daemon, actions, browser, snapshot, state), with CLI presentation in the binary target. CDP wire types, transport and observation deadlines live in `cli/crates/browser-cdp`; protected DOM inventory and eval guards live in `cli/crates/browser-observation`. Plain managed `cargo build` uses the incremental opt1 `edit` profile with rcargo’s workspace-only Cranelift backend; install only an explicitly built `cargo build --profile ci --bin agent-browser` artifact. Dependencies and installed ci builds remain opt3. Unit tests select the LLVM `ftest` profile, not Cranelift, because they exercise panic unwinding. Daemon and dashboard runtime entry points stay inside the library so their large futures are not monomorphized again in the CLI. The `--engine` flag selects Chrome vs Lightpanda. The `install` command downloads Chrome from Chrome for Testing directly.
 
 ## Testing
 

@@ -16,6 +16,7 @@ members = ["crates/browser-cdp", "crates/browser-observation"]
 
 [workspace.metadata.rcargo]
 iteration-profile = "edit"
+test-profile = "ftest"
 iteration-backend = "cranelift"
 
 [dependencies]
@@ -104,3 +105,8 @@ opt-level = 1
 
 [profile.edit.package.agent-browser-observation]
 opt-level = 1
+
+# Unit tests exercise panic unwinding while owning process-global environment
+# locks. Keep them on LLVM; Cranelift is for edit-and-run checks, not this suite.
+[profile.ftest]
+inherits = "edit"

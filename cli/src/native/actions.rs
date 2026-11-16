@@ -2933,7 +2933,7 @@ fn policy_actions_for_command(
 
 /// One deadline owns setup, observation, origin projection and response work.
 /// A timed-out effect is never replayed; a timed-out snapshot publishes nothing.
-pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+pub(crate) async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
     let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
     let budget_ms = match crate::commands::command_timeout_ms(cmd) {
