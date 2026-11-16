@@ -5,7 +5,7 @@ mod discovery;
 mod http;
 mod websocket;
 
-pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
+pub(crate) use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
 pub use dashboard::{
     is_valid_dashboard_access_token, normalize_dashboard_allowed_origins,
 };
@@ -38,10 +38,10 @@ use agent_browser_cdp::client::CdpClient;
 /// Not an invariant, though. `screencast_start` reconfigures the same shared
 /// screencast, so an explicit png request does reach stream clients mid-flight.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScreencastConfig {
-    pub quality: i32,
-    pub max_width: Option<u32>,
-    pub max_height: Option<u32>,
+pub(crate) struct ScreencastConfig {
+    pub(crate) quality: i32,
+    pub(crate) max_width: Option<u32>,
+    pub(crate) max_height: Option<u32>,
 }
 
 impl Default for ScreencastConfig {
@@ -55,7 +55,7 @@ impl Default for ScreencastConfig {
 }
 
 impl ScreencastConfig {
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self::parse(
             std::env::var("AGENT_BROWSER_STREAM_QUALITY")
                 .ok()
@@ -161,14 +161,14 @@ impl IdleActivity {
 
 /// Frame metadata from CDP Page.screencastFrame events.
 #[derive(Debug, Clone)]
-pub struct FrameMetadata {
-    pub offset_top: f64,
-    pub page_scale_factor: f64,
-    pub device_width: u32,
-    pub device_height: u32,
-    pub scroll_offset_x: f64,
-    pub scroll_offset_y: f64,
-    pub timestamp: u64,
+pub(crate) struct FrameMetadata {
+    pub(crate) offset_top: f64,
+    pub(crate) page_scale_factor: f64,
+    pub(crate) device_width: u32,
+    pub(crate) device_height: u32,
+    pub(crate) scroll_offset_x: f64,
+    pub(crate) scroll_offset_y: f64,
+    pub(crate) timestamp: u64,
 }
 
 impl Default for FrameMetadata {
@@ -185,7 +185,7 @@ impl Default for FrameMetadata {
     }
 }
 
-pub struct StreamServer {
+pub(crate) struct StreamServer {
     port: u16,
     session_name: String,
     frame_tx: broadcast::Sender<String>,
@@ -212,7 +212,7 @@ pub struct StreamServer {
 }
 
 impl StreamServer {
-    pub async fn start(
+    pub(crate) async fn start(
         preferred_port: u16,
         client: Arc<CdpClient>,
         session_id: String,
@@ -249,18 +249,18 @@ impl StreamServer {
     }
 
     /// Notify the background CDP listener that the client has changed (browser launched/closed).
-    pub fn notify_client_changed(&self) {
+    pub(crate) fn notify_client_changed(&self) {
         self.client_notify.notify_one();
     }
 
     /// Check whether the server currently has active screencast running.
-    pub async fn is_screencasting(&self) -> bool {
+    pub(crate) async fn is_screencasting(&self) -> bool {
         *self.screencasting.lock().await
     }
 
     /// Update the stored viewport dimensions and restart the active screencast (if any)
     /// so frames are captured at the new size.
-    pub async fn set_viewport(&self, width: u32, height: u32) {
+    pub(crate) async fn set_viewport(&self, width: u32, height: u32) {
         let mut vw = self.viewport_width.lock().await;
         let mut vh = self.viewport_height.lock().await;
         if *vw == width && *vh == height {
@@ -274,20 +274,20 @@ impl StreamServer {
     }
 
     /// Get the current viewport dimensions.
-    pub async fn viewport(&self) -> (u32, u32) {
+    pub(crate) async fn viewport(&self) -> (u32, u32) {
         let w = *self.viewport_width.lock().await;
         let h = *self.viewport_height.lock().await;
         (w, h)
     }
 
     /// Override the cached screencast state for explicit CLI start/stop commands.
-    pub async fn set_screencasting(&self, active: bool) {
+    pub(crate) async fn set_screencasting(&self, active: bool) {
         let mut guard = self.screencasting.lock().await;
         *guard = active;
     }
 
     /// Update and broadcast the recording state.
-    pub async fn set_recording(&self, active: bool, engine: &str) {
+    pub(crate) async fn set_recording(&self, active: bool, engine: &str) {
         *self.recording.lock().await = active;
         let connected = self.client_slot.read().await.is_some();
         let sc = *self.screencasting.lock().await;
@@ -296,7 +296,7 @@ impl StreamServer {
     }
 
     /// Shut down the accept loop and background CDP listener, releasing the bound port.
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
 
         if let Some(task) = self.accept_task.lock().await.take() {
@@ -441,14 +441,14 @@ impl StreamServer {
         ))
     }
 
-    pub fn port(&self) -> u16 {
+    pub(crate) fn port(&self) -> u16 {
         self.port
     }
 
     /// Broadcast a raw frame string (legacy). The caller owns the payload, so
     /// the id is read back out of it. A payload without one is delivered but
     /// never held for an ack.
-    pub fn broadcast_frame(&self, frame_json: &str) {
+    pub(crate) fn broadcast_frame(&self, frame_json: &str) {
         self.frame_watch.send_replace(Some(Arc::new(StreamFrame {
             seq: seq_in_serialized_frame(frame_json),
             json: frame_json.to_string(),
@@ -456,7 +456,7 @@ impl StreamServer {
     }
 
     /// Broadcast a screencast frame with structured metadata.
-    pub fn broadcast_screencast_frame(&self, base64_data: &str, metadata: &FrameMetadata) {
+    pub(crate) fn broadcast_screencast_frame(&self, base64_data: &str, metadata: &FrameMetadata) {
         let seq = next_frame_seq();
         let msg = json!({
             "type": "frame",
@@ -479,7 +479,7 @@ impl StreamServer {
     }
 
     /// Broadcast a status message to all connected clients.
-    pub async fn broadcast_status(
+    pub(crate) async fn broadcast_status(
         &self,
         connected: bool,
         screencasting: bool,
@@ -505,7 +505,7 @@ impl StreamServer {
     }
 
     /// Broadcast an error message to all connected clients.
-    pub fn broadcast_error(&self, message: &str) {
+    pub(crate) fn broadcast_error(&self, message: &str) {
         let msg = json!({
             "type": "error",
             "message": message,
@@ -514,7 +514,7 @@ impl StreamServer {
     }
 
     /// Broadcast a command event when a command begins executing.
-    pub fn broadcast_command(&self, action: &str, id: &str, params: &Value) {
+    pub(crate) fn broadcast_command(&self, action: &str, id: &str, params: &Value) {
         let msg = json!({
             "type": "command",
             "action": action,
@@ -526,7 +526,7 @@ impl StreamServer {
     }
 
     /// Broadcast a result event after a command finishes executing.
-    pub fn broadcast_result(
+    pub(crate) fn broadcast_result(
         &self,
         id: &str,
         action: &str,
@@ -547,7 +547,7 @@ impl StreamServer {
     }
 
     /// Broadcast a console event from the browser.
-    pub fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
+    pub(crate) fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
         let mut msg = json!({
             "type": "console",
             "level": level,
@@ -563,7 +563,7 @@ impl StreamServer {
     }
 
     /// Broadcast a page error (uncaught exception) from the browser.
-    pub fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
+    pub(crate) fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
         let msg = json!({
             "type": "page_error",
             "text": text,
@@ -576,7 +576,7 @@ impl StreamServer {
 
     /// Broadcast the current tab list so the dashboard can render a tab bar.
     /// Also caches the list so newly connected WebSocket clients receive it immediately.
-    pub async fn broadcast_tabs(&self, tabs: &[Value]) {
+    pub(crate) async fn broadcast_tabs(&self, tabs: &[Value]) {
         {
             let mut guard = self.last_tabs.write().await;
             *guard = tabs.to_vec();
@@ -589,7 +589,7 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
-    pub async fn bind_cdp_session_and_broadcast_tabs(
+    pub(crate) async fn bind_cdp_session_and_broadcast_tabs(
         &self,
         session_id: Option<String>,
         tabs: &[Value],
@@ -617,7 +617,7 @@ pub(crate) fn timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn is_allowed_origin(origin: Option<&str>) -> bool {
+pub(crate) fn is_allowed_origin(origin: Option<&str>) -> bool {
     match origin {
         None => true,
         Some(o) => {

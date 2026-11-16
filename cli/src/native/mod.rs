@@ -1,68 +1,68 @@
 #[allow(dead_code)]
-pub mod a11y;
+pub(crate) mod a11y;
 #[allow(dead_code)]
-pub mod actions;
+pub(crate) mod actions;
 #[allow(dead_code)]
-pub mod auth;
-pub mod auth_export;
+pub(crate) mod auth;
+pub(crate) mod auth_export;
 #[cfg(test)]
 mod auth_export_tests;
 #[allow(dead_code)]
-pub mod auth_fill;
+pub(crate) mod auth_fill;
 #[allow(dead_code)]
-pub mod browser;
+pub(crate) mod browser;
 #[allow(dead_code)]
 pub mod cdp;
 #[allow(dead_code)]
-pub mod cookies;
+pub(crate) mod cookies;
 #[allow(dead_code)]
 pub mod daemon;
 #[allow(dead_code)]
-pub mod diff;
+pub(crate) mod diff;
 #[cfg(test)]
 mod disabled_click_tests;
 pub(crate) mod downloads;
 #[allow(dead_code)]
-pub mod element;
+pub(crate) mod element;
 #[allow(dead_code)]
-pub mod inspect_server;
+pub(crate) mod inspect_server;
 #[allow(dead_code)]
-pub mod interaction;
+pub(crate) mod interaction;
 #[allow(dead_code)]
-pub mod network;
+pub(crate) mod network;
 pub(crate) mod payment_errors;
 #[allow(dead_code)]
-pub mod policy;
+pub(crate) mod policy;
 #[allow(dead_code)]
-pub mod providers;
+pub(crate) mod providers;
 #[allow(dead_code)]
-pub mod react;
+pub(crate) mod react;
 #[allow(dead_code)]
 pub mod recording;
 #[allow(dead_code)]
-pub mod screenshot;
+pub(crate) mod screenshot;
 #[cfg(test)]
 mod observation_inventory_tests;
 #[allow(dead_code)]
-pub mod snapshot;
+pub(crate) mod snapshot;
 #[allow(dead_code)]
 pub mod state;
 #[allow(dead_code)]
-pub mod storage;
+pub(crate) mod storage;
 #[allow(dead_code)]
 pub mod stream;
 #[allow(dead_code)]
-pub mod tab_binding;
+pub(crate) mod tab_binding;
 #[allow(dead_code)]
-pub mod tab_state;
+pub(crate) mod tab_state;
 #[cfg(test)]
 mod tab_state_tests;
 #[allow(dead_code)]
-pub mod tracing;
+pub(crate) mod tracing;
 #[allow(dead_code)]
-pub mod webdriver;
+pub(crate) mod webdriver;
 #[allow(dead_code)]
-pub mod webmcp;
+pub(crate) mod webmcp;
 
 #[cfg(test)]
 mod e2e_tests;

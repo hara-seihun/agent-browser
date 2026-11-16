@@ -17,7 +17,7 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// An optional `query` string (without the leading `?`) is appended to the
 /// final WebSocket URL so that user-supplied URL parameters (e.g.
 /// `?mode=Hello`) are forwarded to the remote endpoint.
-pub async fn discover_cdp_url(
+pub(crate) async fn discover_cdp_url(
     host: &str,
     port: u16,
     query: Option<&str>,
@@ -26,7 +26,7 @@ pub async fn discover_cdp_url(
 }
 
 /// Like [`discover_cdp_url`] but with a custom request timeout.
-pub async fn discover_cdp_url_with_timeout(
+pub(crate) async fn discover_cdp_url_with_timeout(
     host: &str,
     port: u16,
     query: Option<&str>,

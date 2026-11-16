@@ -288,7 +288,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
 /// Attach the recorder's own flattened session to the target behind
 /// `page_session_id`, publishing it in `shared` before the command is sent so
 /// the resulting `Target.attachedToTarget` is recognised as the recorder's.
-pub async fn attach_capture_session(
+pub(crate) async fn attach_capture_session(
     client: &CdpClient,
     page_session_id: &str,
     shared: &SharedCaptureSession,
@@ -341,7 +341,7 @@ pub async fn attach_capture_session(
 
 /// Detach a capture session that was attached for recording. This is best
 /// effort because the page or browser may already be gone.
-pub async fn detach_capture_session(client: &CdpClient, capture_session: &str) {
+pub(crate) async fn detach_capture_session(client: &CdpClient, capture_session: &str) {
     let _ = tokio::time::timeout(
         TEARDOWN_TIMEOUT,
         client.send_command(
@@ -363,7 +363,7 @@ fn ffmpeg_launch_error(error: impl std::fmt::Display) -> String {
 /// Verify that ffmpeg can run without opening or modifying the destination.
 /// This keeps missing-binary failures ahead of browser attachment while the
 /// real encoder process is deferred until that attachment succeeds.
-pub async fn check_ffmpeg_available() -> Result<(), String> {
+pub(crate) async fn check_ffmpeg_available() -> Result<(), String> {
     let status = tokio::process::Command::new("ffmpeg")
         .arg("-version")
         .stdin(Stdio::null())
@@ -583,7 +583,7 @@ async fn capture_frames(
     Ok(())
 }
 
-pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), String> {
+pub(crate) async fn stop_recording_task(state: &mut RecordingState) -> Result<(), String> {
     if let Some(tx) = state.cancel_tx.take() {
         let _ = tx.send(());
     }

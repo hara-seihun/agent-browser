@@ -1192,7 +1192,7 @@ pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> 
     Some((port, ws_path))
 }
 
-pub async fn auto_connect_cdp() -> Result<String, String> {
+pub(crate) async fn auto_connect_cdp() -> Result<String, String> {
     let user_data_dirs = get_chrome_user_data_dirs();
 
     for dir in &user_data_dirs {

@@ -645,8 +645,17 @@ fn daemon_config_matches(session: &str, opts: &DaemonOptions) -> bool {
     daemon_config_status(session, opts) == DaemonConfigStatus::Matches
 }
 
+fn write_daemon_config_at(path: &std::path::Path, expected: &str) -> std::io::Result<()> {
+    // A ready client must see the entire new configuration, never an empty or
+    // partially written file from a concurrently starting daemon.
+    let pending = path.with_extension(format!("pending.{}", std::process::id()));
+    let result = fs::write(&pending, expected).and_then(|_| fs::rename(&pending, path));
+    if result.is_err() { let _ = fs::remove_file(&pending); }
+    result
+}
+
 fn write_daemon_config(session: &str, opts: &DaemonOptions) {
-    let _ = fs::write(get_config_path(session), daemon_config_fingerprint(opts));
+    let _ = write_daemon_config_at(&get_config_path(session), &daemon_config_fingerprint(opts));
 }
 
 fn daemon_pid_matches(session: &str, expected_pid: u32) -> bool {
@@ -1569,7 +1578,7 @@ mod tests {
         let expected = daemon_config_fingerprint(&opts);
         let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            fs::write(config_path, expected).unwrap();
+            write_daemon_config_at(&config_path, &expected).unwrap();
         });
 
         let result = ready_existing_daemon_result(session, &opts, Duration::from_secs(1))

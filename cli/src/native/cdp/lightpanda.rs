@@ -143,7 +143,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
     None
 }
 
-pub async fn launch_lightpanda(
+pub(crate) async fn launch_lightpanda(
     options: &LightpandaLaunchOptions,
 ) -> Result<LightpandaProcess, String> {
     let binary_path = match &options.executable_path {

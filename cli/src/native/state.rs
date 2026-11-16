@@ -248,7 +248,7 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
-pub async fn save_state(
+pub(crate) async fn save_state(
     client: &CdpClient,
     session_id: &str,
     path: Option<&str>,
@@ -358,7 +358,7 @@ pub async fn save_state(
     Ok(save_path)
 }
 
-pub async fn save_auto_state_transactional(
+pub(crate) async fn save_auto_state_transactional(
     client: &CdpClient,
     session_id: &str,
     session_name: &str,
@@ -481,7 +481,7 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
+pub(crate) async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
