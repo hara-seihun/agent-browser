@@ -9477,12 +9477,21 @@ async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .ok_or_else(|| "getcounts: expected nonempty CSS selectors".to_string()))
         .collect::<Result<_,_>>()?;
     if state.active_frame_id.is_some() { return Err("getcounts: selected frames unsupported; select main frame".into()); }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session = mgr.active_session_id()?.to_owned();
-    let client = mgr.client.clone();
-    let frames = state.iframe_sessions.clone();
-    let mut continuation = super::sensitive::InventoryContinuation::default();
-    let (_, counts) = super::sensitive::observe_with_continuation(
+    let session = state.browser.as_ref().ok_or("Browser not launched")?.active_session_id()?.to_owned();
+    let progress = state.protected_observation_progress();
+    let deadline = state.protected_deadline();
+    let mut events = state.browser.as_ref().ok_or("Browser not launched")?.client.subscribe();
+    let counts = progress.before(deadline, async {
+        let mut continuation = super::sensitive::InventoryContinuation::default();
+        loop {
+            state.drain_cdp_events_background().await?;
+            state.harvest_iframe_attachments().await?;
+            state.prepare_pending_iframes().await?;
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            if mgr.active_session_id()? != session { return Err("getcounts: active target changed".to_string()); }
+            let client = mgr.client.clone();
+            let frames = state.iframe_sessions.clone();
+            let operation = super::sensitive::observe_with_continuation(
         &client, &session, &frames, &mut continuation, |context| {
             let client = client.clone();
             let selectors = selectors.clone();
@@ -9502,7 +9511,20 @@ async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 if counts.len() != selectors.len() { return Err("getcounts: incomplete selector result".into()); }
                 counts.iter().map(|v| v.as_u64().ok_or_else(|| "getcounts: invalid count".to_string())).collect::<Result<Vec<_>,_>>()
             }
-        }).await.map_err(|e| e.into_message())?;
+        });
+            match inventory_until_frame_change(&mut events, &session, &frames, operation).await {
+                Ok((observation, counts)) => {
+                    state.active_iframe_sessions = observation.frame_sessions.clone();
+                    state.sensitive_observations.entry(session.clone()).or_default().merge(observation);
+                    return Ok(counts);
+                }
+                Err(super::sensitive::InventoryError::Coverage(gap)) => recover_sensitive_frames(state, gap).await?,
+                Err(super::sensitive::InventoryError::Changed(_)) => {},
+                Err(error) => return Err(error.into_message()),
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.map_err(super::observation_progress::DeadlineDiagnostic::into_message)??;
     Ok(json!({"counts":counts}))
 }
 
