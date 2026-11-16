@@ -251,7 +251,7 @@ pub async fn hover(
 #[serde(tag = "status", rename_all = "snake_case")]
 enum NativeFillOutcome {
     FocusChanged,
-    Filled,
+    Filled { retained_value: Option<String> },
     InvalidValue,
     NotEditable,
     ValueNotRetained,
@@ -280,6 +280,7 @@ pub fn fill_error_code(error: &str) -> Option<&'static str> {
 /// Direct, ref and semantic fills share this operation and retained-value check.
 /// Resolve once and edit the pinned object in its own realm, never the page
 /// keyboard focus. Refuse before editing if focus or editability cannot be bound.
+/// Formatted amounts return the observed DOM text rather than claiming literal retention.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -287,7 +288,7 @@ pub async fn fill(
     selector_or_ref: &str,
     value: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (object_id, effective_session_id) = resolve_element_object_id(
         client,
         session_id,
@@ -324,7 +325,7 @@ pub async fn fill(
         NativeFillOutcome::FocusChanged => {
             return Err("fill_focus_changed: target did not retain focus; no text dispatched".into())
         }
-        NativeFillOutcome::Filled => return Ok(()),
+        NativeFillOutcome::Filled { retained_value } => return Ok(retained_value),
         NativeFillOutcome::InvalidValue => {
             return Err("fill_invalid_value: Invalid value for input".to_string())
         }
@@ -361,7 +362,7 @@ pub async fn fill_observed(
     value: &str,
     frames: &HashMap<String, String>,
     observation: &super::sensitive::Observation,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let unsupported = || {
         format!(
             "{}: fill target is sensitive or cannot be bound safely",
@@ -480,7 +481,9 @@ pub async fn fill_observed(
         return Err(unsupported());
     }
     match result["result"]["value"]["status"].as_str() {
-        Some("filled") => Ok(()),
+        Some("filled") => Ok(result["result"]["value"]["retained_value"]
+            .as_str()
+            .map(str::to_owned)),
         Some("sensitive") => Err(unsupported()),
         Some("focus_changed") => {
             Err("fill_focus_changed: target did not retain focus; no text dispatched".into())

@@ -7377,7 +7377,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     if let Some(observation) = state.sensitive_observations.get(&session_id) {
         if observation.has_sensitive() {
-            interaction::fill_observed(
+            let retained = interaction::fill_observed(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
@@ -7387,10 +7387,13 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                 observation,
             )
             .await?;
-            return Ok(json!({ "filled": selector }));
+            return Ok(match retained {
+                Some(actual) => json!({"filled": selector, "retainedValue": actual, "formatting": "numeric-formatting"}),
+                None => json!({"filled": selector}),
+            });
         }
     }
-    interaction::fill(
+    let retained = interaction::fill(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -7399,7 +7402,10 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "filled": selector }))
+    Ok(match retained {
+        Some(actual) => json!({"filled": selector, "retainedValue": actual, "formatting": "numeric-formatting"}),
+        None => json!({"filled": selector}),
+    })
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

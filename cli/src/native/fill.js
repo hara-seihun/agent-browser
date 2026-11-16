@@ -142,6 +142,21 @@ async function(value, route) {
     };
     const expectedPhone = telephone ? phoneText(expected) : null;
     const formattedPhone = expectedPhone !== null && phoneText(logical) === expectedPhone;
+    // Amount controls can be plain text, without inputMode. Only a canonical
+    // decimal request and a strictly grouped decimal rendering qualify. Strip
+    // one currency symbol at either edge, never arbitrary text or punctuation;
+    // string comparison preserves every digit, sign and fractional place.
+    const amountControl = input && ['text', 'number'].includes(this.type);
+    const amountText = text => {
+        const match = text.match(/^(?:\p{Sc}[ \u00a0\u202f]*)?(-?(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]+)?)(?:[ \u00a0\u202f]*\p{Sc})?$/u);
+        if (!match) return null;
+        // Do not accept two currency symbols or malformed comma placement.
+        if ((text.match(/\p{Sc}/gu) || []).length > 1) return null;
+        return match[1].replace(/,/g, '');
+    };
+    const formattedAmount = amountControl && /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(expected) &&
+        logical !== expected && amountText(logical) === expected;
+    if (formattedAmount) return { status: 'filled', retained_value: actual };
     if (logical !== expected && !formattedPhone) return { status: 'value_not_retained' };
     return { status: 'filled' };
 }

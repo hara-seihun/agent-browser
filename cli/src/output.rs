@@ -1810,6 +1810,9 @@ deadline; ordinary text and rich-editor clearing wait a task without painted fra
 Rich editors compare logical block text, not innerText paragraph spacing.
 Telephone masks may insert spaces, parentheses, periods and hyphens; digits and
 the leading plus must remain unchanged. Sensitive-control rules still apply.
+Text/number amounts accept exact decimal digits with valid comma grouping and one
+currency symbol, regardless of inputmode; formatted success includes retainedValue
+and formatting: numeric-formatting. No rounding or decimal conversion is accepted.
 A deadline after dispatch means an unknown outcome;
 never replay the fill automatically. Invalid or non-editable inputs fail.
 JSON code: fill_invalid_value, fill_not_editable, fill_focus_changed, fill_value_not_retained,
