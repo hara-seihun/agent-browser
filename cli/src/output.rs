@@ -4015,6 +4015,7 @@ const SENSITIVE_INPUT_HELP: &str = "Native sensitive form inputs (always active;
   Unresolved cleanup refuses further observation until connection close.
   Direct data-private=true controls and text-only displays, and TOTP/authenticator
   secret or seed labels, protect text/descendants as [redacted: credential].
+  Google manual authenticator instructions protect their nested setup key too.
   Form-container analytics markers do not classify descendant controls as secrets.
   Screenshots and eval retain the same protection.
   OAuth authorization-code labels, IDs/classes (including code.auth-code) protect
