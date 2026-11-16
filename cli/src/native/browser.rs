@@ -932,37 +932,23 @@ impl BrowserManager {
         session_id: &str,
         require_auto_attach: bool,
     ) -> Result<(), String> {
-        self.client
-            .send_command_no_params("Page.enable", Some(session_id))
-            .await?;
-        self.client
-            .send_command_no_params("Runtime.enable", Some(session_id))
-            .await?;
-        self.client
-            .send_command_no_params("Network.enable", Some(session_id))
-            .await?;
-        let _ = self
-            .client
-            .send_command_no_params("WebMCP.enable", Some(session_id))
-            .await;
-        // Enable auto-attach for cross-origin iframe support.
-        // flatten: true gives each iframe its own session_id.
-        // waitForDebuggerOnStart keeps child targets paused until the daemon
-        // installs any required network controls and explicitly resumes them.
-        // General page setup supports engines without this domain. Protected
-        // iframe admission instead requires the attachment contract explicitly.
-        let attachment = self
-            .client
-            .send_command(
+        // These domain admissions are independent. Do not pay one residential
+        // CDP round trip per domain before permitting the first observation.
+        // The caller still resumes only after every mandatory reply succeeds.
+        let (page, runtime, network, _, attachment) = tokio::join!(
+            self.client.send_command_no_params("Page.enable", Some(session_id)),
+            self.client.send_command_no_params("Runtime.enable", Some(session_id)),
+            self.client.send_command_no_params("Network.enable", Some(session_id)),
+            self.client.send_command_no_params("WebMCP.enable", Some(session_id)),
+            self.client.send_command(
                 "Target.setAutoAttach",
-                Some(json!({
-                    "autoAttach": true,
-                    "waitForDebuggerOnStart": true,
-                    "flatten": true
-                })),
+                Some(json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true})),
                 Some(session_id),
-            )
-            .await;
+            ),
+        );
+        page?;
+        runtime?;
+        network?;
         if require_auto_attach {
             attachment?;
         }
