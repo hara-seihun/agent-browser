@@ -78,7 +78,8 @@ codegen-units = 16
 # codegen-units and incremental builds keep rebuilds reasonable.
 [profile.ci.package.agent-browser]
 opt-level = 3
-codegen-units = 64
+# Keep optimization, but spread LLVM work across smaller parallel units.
+codegen-units = 256
 
 # Local edit build (with mold installed):
 # cargo rustc --profile edit --bin agent-browser -- -C link-arg=-fuse-ld=mold

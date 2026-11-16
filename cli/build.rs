@@ -98,6 +98,18 @@ fn emit_daemon_build_identity() {
 }
 
 fn main() {
+    // Apply the fast linker only to this binary, not registry dependencies:
+    // global rustflags would discard their reusable compiled artifacts.
+    // Other platforms and hosts without mold keep their normal linker.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && env::var("TARGET").ok() == env::var("HOST").ok()
+        && std::process::Command::new("mold")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        println!("cargo:rustc-link-arg-bin=agent-browser=-fuse-ld=mold");
+    }
     ensure_dashboard_dir();
     emit_daemon_build_identity();
 
