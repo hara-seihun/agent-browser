@@ -3582,7 +3582,9 @@ async fn execute_command_inner(
     let fill_input = effect_action == "fill";
     let input_acknowledgement =
         super::sensitive::input_acknowledgement(effect_action, cmd);
-    let observation_session = if matches!(action, "snapshot" | "dialog") {
+    // These actions own the full protected inventory and validated projection;
+    // getcounts returns only numeric counts, never protected page content.
+    let observation_session = if matches!(action, "snapshot" | "dialog" | "getcounts") {
         None
     } else if (input_acknowledgement && !fill_input && find_subaction.is_none()) || browser_metadata_only {
         // These responses contain no page content. Keep remembered redaction,
