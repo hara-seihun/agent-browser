@@ -3891,6 +3891,13 @@ async fn execute_command_inner(
         })
         .await;
 
+    // An eval returning null (including JavaScript undefined) has no page text
+    // to protect. Navigation triggered by that script must not replace its
+    // completed result with a fresh inventory of the changing destination.
+    let response_acknowledgement = input_acknowledgement
+        || (action == "evaluate"
+            && result.as_ref().is_ok_and(|data| data.get("result").is_some_and(Value::is_null)));
+
     // Completion of the action is not completion of response protection and
     // metadata work. Keep that remaining work visible under the same budget.
     action_progress.track(
@@ -3988,7 +3995,7 @@ async fn execute_command_inner(
         && !browser_metadata_only
         && !lifecycle_confirmation
     {
-        if input_acknowledgement {
+        if response_acknowledgement {
             // Consume notifications now so native dialogs are reported, but
             // leave renderer setup and frame-tree reads for the next observer.
             // Never replace a completed input's result with an unrelated setup
@@ -4006,7 +4013,7 @@ async fn execute_command_inner(
                 lifecycle_relaunched_browser,
             );
         }
-        if !input_acknowledgement {
+        if !response_acknowledgement {
             attach_webmcp_availability(&mut resp, action, state).await;
         }
     }
@@ -4040,7 +4047,7 @@ async fn execute_command_inner(
         // protected before returning JSON, diagnostics or persisted snapshots.
         // A masked screenshot observes after capture itself, before writing.
         if !matches!(action, "auth_fill" | "auth_export")
-            && !input_acknowledgement
+            && !response_acknowledgement
             && !browser_metadata_only
             // A successful click may have opened a native dialog. Its response
             // has no page content; protect it with the pre-command inventory
