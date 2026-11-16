@@ -88,4 +88,4 @@ codegen-units = 64
 inherits = "ci"
 
 [profile.edit.package.agent-browser]
-opt-level = 1
+opt-level = 0
