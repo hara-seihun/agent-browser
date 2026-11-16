@@ -597,13 +597,17 @@ pub fn classifier_js() -> String {
       }}
       return false;
     }};
+    // Read DOM nodes through native accessors from this execution realm.
+    // Same-origin frames can override childNodes with non-node placeholders.
+    const childNodesOf = Object.getOwnPropertyDescriptor(Node.prototype, 'childNodes').get;
+    const nodeValueOf = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeValue').get;
     const apiNodeLabel = node => {{
       let text = '';
       const read = node => {{
-        const value = node.nodeValue || '';
+        const value = nodeValueOf.call(node) || '';
         if (text.length + value.length > 64) return false;
         text += value;
-        return Array.from(node.childNodes).every(read);
+        return Array.from(childNodesOf.call(node)).every(read);
       }};
       return read(node) && apiLabel(text);
     }};
@@ -636,7 +640,7 @@ pub fn classifier_js() -> String {
           }}
           if (apiNodeLabel(node)) return [1, []];
           let labels = 0, values = [];
-          for (const child of node.childNodes) {{
+          for (const child of childNodesOf.call(node)) {{
             const [count, candidates] = walk(child);
             labels += count;
             values.push(...candidates.filter(([, depth]) => depth < 4).map(([el, depth]) => [el, depth + 1]));
