@@ -981,7 +981,7 @@ fn build_find_element_js_in(root: &str, selector: &str) -> String {
 }
 
 /// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
-fn build_count_elements_js(selector: &str) -> String {
+pub(crate) fn build_count_elements_js(selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
             "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",

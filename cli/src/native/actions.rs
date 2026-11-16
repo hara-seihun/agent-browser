@@ -3776,6 +3776,7 @@ async fn execute_command_inner(
                 }
                 "setvalue" => handle_setvalue(cmd, state).await,
                 "count" => handle_count(cmd, state).await,
+                "getcounts" => handle_getcounts(cmd, state).await,
                 "styles" => handle_styles(cmd, state).await,
                 "bringtofront" => handle_bringtofront(state).await,
                 "timezone" => handle_timezone(cmd, state).await,
@@ -9463,6 +9464,44 @@ async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
     Ok(json!({ "set": selector, "value": value }))
+}
+
+// Project selector counts inside one complete document-identity-validated inventory.
+// Unlike a series of get count calls, a failed frame inventory never returns partial data.
+async fn handle_getcounts(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selectors: Vec<String> = cmd.get("selectors").and_then(Value::as_array)
+        .filter(|a| !a.is_empty()).ok_or("getcounts: selectors required")?
+        .iter().map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+            .ok_or_else(|| "getcounts: expected nonempty CSS selectors".to_string()))
+        .collect::<Result<_,_>>()?;
+    if state.active_frame_id.is_some() { return Err("getcounts: selected frames unsupported; select main frame".into()); }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session = mgr.active_session_id()?.to_owned();
+    let client = mgr.client.clone();
+    let frames = state.iframe_sessions.clone();
+    let mut continuation = super::sensitive::InventoryContinuation::default();
+    let (_, counts) = super::sensitive::observe_with_continuation(
+        &client, &session, &frames, &mut continuation, |context| {
+            let client = client.clone();
+            let selectors = selectors.clone();
+            async move {
+                let frame = &context.top_frame;
+                let sid = context.frames.get(frame).ok_or("getcounts: frame unavailable")?;
+                context.frame_node(frame)?;
+                // Reuse the single-count expression, including open shadow roots and XPath.
+                // All expressions execute in one renderer task inside the validated span.
+                let expressions = selectors.iter().map(|s| super::element::build_count_elements_js(s)).collect::<Vec<_>>().join(",");
+                let result = client.send_command("Runtime.evaluate", Some(json!({
+                    "expression":format!("[{}]", expressions), "returnByValue":true
+                })), Some(sid)).await?;
+                if result.get("exceptionDetails").is_some() { return Err("getcounts: invalid selector".into()); }
+                let counts = result.pointer("/result/value").and_then(Value::as_array)
+                    .ok_or("getcounts: invalid selector result")?;
+                if counts.len() != selectors.len() { return Err("getcounts: incomplete selector result".into()); }
+                counts.iter().map(|v| v.as_u64().ok_or_else(|| "getcounts: invalid count".to_string())).collect::<Result<Vec<_>,_>>()
+            }
+        }).await.map_err(|e| e.into_message())?;
+    Ok(json!({"counts":counts}))
 }
 
 async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

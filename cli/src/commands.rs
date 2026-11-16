@@ -3217,7 +3217,7 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
+        "text", "html", "value", "attr", "url", "title", "count", "counts", "box", "styles", "cdp-url",
     ];
 
     match rest.first().copied() {
@@ -3256,6 +3256,19 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("url") => Ok(json!({ "id": id, "action": "url" })),
         Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
         Some("title") => Ok(json!({ "id": id, "action": "title" })),
+        Some("counts") => {
+            let raw = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "get counts".to_string(), usage: "get counts <json-array-of-css-selectors>",
+            })?;
+            let selectors: Value = serde_json::from_str(raw).map_err(|_| ParseError::InvalidValue {
+                message: "Selectors must be a JSON array of CSS strings".to_string(),
+                usage: "get counts <json-array-of-css-selectors>",
+            })?;
+            if !selectors.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty()))) {
+                return Err(ParseError::InvalidValue { message: "Selectors must be a nonempty JSON array of CSS strings".to_string(), usage: "get counts <json-array-of-css-selectors>" });
+            }
+            Ok(json!({ "id": id, "action": "getcounts", "selectors": selectors }))
+        }
         Some("count") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get count".to_string(),
