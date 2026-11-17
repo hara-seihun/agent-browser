@@ -5619,12 +5619,16 @@ fn inventory_session_retired(
 }
 
 /// This receiver does not consume daemon events; the next drain applies changes.
+/// Start at the current event tail before polling the read. Older notifications
+/// describe documents retired before this inventory began (including setup and
+/// recovery), and must not cancel the new live document reads.
 async fn inventory_until_frame_change<T>(
     events: &mut broadcast::Receiver<CdpEvent>,
     session: &str,
     frames: &HashMap<String, String>,
     operation: impl std::future::Future<Output = Result<T, agent_browser_observation::InventoryError>>,
 ) -> Result<T, agent_browser_observation::InventoryError> {
+    *events = events.resubscribe();
     tokio::pin!(operation);
     loop {
         tokio::select! {
@@ -14692,11 +14696,24 @@ mod tests {
             ),
         ];
         let (tx, mut rx) = broadcast::channel(16);
-        for event in harmless {
-            tx.send(event).unwrap();
+        // Fill past the receiver capacity: old lag, like old retirement, must
+        // not cancel an inventory that has not read any document yet.
+        for _ in 0..32 {
+            tx.send(event("Page.frameNavigated", "top", json!({"frame":{"id":"old-root"}})))
+                .unwrap();
         }
+        tx.send(event(
+            "Target.detachedFromTarget",
+            "top",
+            json!({"sessionId":"child-session"}),
+        ))
+        .unwrap();
         // Biased event handling used to cancel before even polling the live read.
         let output = inventory_until_frame_change(&mut rx, "top", &frames, async {
+            for event in harmless {
+                tx.send(event).unwrap();
+            }
+            tokio::task::yield_now().await;
             Ok::<_, agent_browser_observation::InventoryError>("complete inventory")
         })
         .await
@@ -14717,12 +14734,16 @@ mod tests {
             ),
             event("Target.targetDestroyed", "top", json!({"targetId":"child"})),
         ] {
-            tx.send(event).unwrap();
             let result = inventory_until_frame_change(
                 &mut rx,
                 "top",
                 &frames,
-                std::future::pending::<Result<(), agent_browser_observation::InventoryError>>(),
+                async {
+                    // A retirement after reads begin still cancels immediately.
+                    tx.send(event).unwrap();
+                    std::future::pending::<Result<(), agent_browser_observation::InventoryError>>()
+                        .await
+                },
             )
             .await;
             assert!(matches!(
