@@ -40,15 +40,16 @@ pub async fn click(
     button: &str,
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
+    ax_identity: Option<(&str, &str)>,
 ) -> Result<ClickResult, String> {
-    let result = click_once(client, session_id, ref_map, selector_or_ref, button, click_count, iframe_sessions).await;
+    let result = click_once(client, session_id, ref_map, selector_or_ref, button, click_count, iframe_sessions, ax_identity).await;
     match result {
         Ok(result) => Ok(result),
         // Every click_target_changed exit is before a button press. Never retry
         // transport errors, timeouts, disabled/intercepted controls or a press.
         Err(error) if error.starts_with("click_target_changed:") && super::element::parse_ref(selector_or_ref).is_some() => {
             let fresh = super::element::click_ref_map(client, session_id, ref_map, selector_or_ref, iframe_sessions).await?;
-            let mut result = click_once(client, session_id, fresh.as_ref().unwrap_or(ref_map), selector_or_ref, button, click_count, iframe_sessions).await?;
+            let mut result = click_once(client, session_id, fresh.as_ref().unwrap_or(ref_map), selector_or_ref, button, click_count, iframe_sessions, ax_identity).await?;
             result.ref_refreshed = true;
             Ok(result)
         },
@@ -64,6 +65,7 @@ async fn click_once(
     button: &str,
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
+    ax_identity: Option<(&str, &str)>,
 ) -> Result<ClickResult, String> {
     let (object, object_session, ref_refreshed) = super::element::resolve_click_object_id_report(
         client,
@@ -149,7 +151,7 @@ async fn click_once(
         y,
         button,
         click_count,
-        Some((&object, &preparation, &prepared["result"]["value"])),
+        Some((&object, &preparation, &prepared["result"]["value"], ax_identity)),
     )
     .await;
     let mut result = match result {
@@ -208,6 +210,7 @@ pub async fn dblclick(
         "left",
         2,
         iframe_sessions,
+        None,
     )
     .await
 }
@@ -829,6 +832,7 @@ pub async fn check(
             "left",
             1,
             iframe_sessions,
+            None,
         )
         .await?;
 
@@ -865,6 +869,7 @@ pub async fn uncheck(
             "left",
             1,
             iframe_sessions,
+            None,
         )
         .await?;
 
@@ -1218,7 +1223,7 @@ async fn dispatch_click(
     y: f64,
     button: &str,
     click_count: i32,
-    pinned: Option<(&str, &str, &Value)>,
+    pinned: Option<(&str, &str, &Value, Option<(&str, &str)>)>,
 ) -> Result<ClickResult, String> {
     // Move
     if dispatch_mouse_or_dialog(
@@ -1251,7 +1256,25 @@ async fn dispatch_click(
     // rows. The point was validated before that event, not after it. Return
     // to the bounded point-resolution loop before pressing if geometry moved;
     // never activate a neighbor or replay a dispatched button gesture.
-    if let Some((object, preparation, expected)) = pinned {
+    if let Some((object, preparation, expected, ax_identity)) = pinned {
+        if let Some((role, name)) = ax_identity {
+            // A connected backend node can be reused for a different sidebar
+            // item without changing its rectangle. Hover may trigger that reuse.
+            // Bind the browser-computed meaning too, before any button press.
+            let tree: GetFullAXTreeResult = client.send_command_typed(
+                "Accessibility.getPartialAXTree",
+                &serde_json::json!({"objectId": object, "fetchRelatives": false}),
+                Some(session_id),
+            ).await.map_err(|_| "click_state_unavailable: semantic click identity unavailable before button press")?;
+            if !tree.nodes.first().is_some_and(|node| {
+                !node.ignored.unwrap_or(false)
+                    && super::actions::normalize_ax_role(&super::element::extract_ax_string(&node.role))
+                        == super::actions::normalize_ax_role(role)
+                    && super::element::extract_ax_string(&node.name) == name
+            }) {
+                return Err("click_target_changed: pinned semantic role/name changed before button press; no button press dispatched".into());
+            }
+        }
         let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
             "objectId": object, "functionDeclaration": preparation,
             "arguments": [{"value": expected}], "returnByValue": true

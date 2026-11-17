@@ -7351,6 +7351,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         button,
         click_count,
         &state.iframe_sessions,
+        None,
     )
     .await?;
 
@@ -9003,6 +9004,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         "left",
         1,
         &state.iframe_sessions,
+        None,
     )
     .await?;
     download.finish(mgr, state.timeout_ms(cmd)).await
@@ -11192,6 +11194,7 @@ async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
     selector: &str,
+    ax_identity: Option<(&str, &str)>,
 ) -> Result<Value, String> {
     let subaction = cmd
         .get("subaction")
@@ -11222,6 +11225,7 @@ async fn execute_subaction(
                 "left",
                 1,
                 &state.iframe_sessions,
+                ax_identity,
             )
             .await?;
             if result.dialog_opened {
@@ -11395,7 +11399,7 @@ async fn handle_presentational_getbyrole(
     }
 
     let selector = "[data-agent-browser-located='true']";
-    let action_result = execute_subaction(cmd, state, selector).await;
+    let action_result = execute_subaction(cmd, state, selector, None).await;
 
     // Clean up the marker in whichever document it was set in.
     if let Some(mgr) = state.browser.as_ref() {
@@ -11521,7 +11525,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     );
     state.ref_map.set_next_ref_num(ref_num + 1);
 
-    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
+    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref), Some((role, &actual_name))).await;
     state.ref_map.remove(&temp_ref);
     result
 }
@@ -11531,7 +11535,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 /// `img` and `document`); queries pass through the same table so both spellings
 /// match. `directory` is not mapped here (Chrome collapses it into `list`); it is
 /// matched on the DOM attribute instead, see handle_getbyrole.
-fn normalize_ax_role(role: &str) -> String {
+pub(super) fn normalize_ax_role(role: &str) -> String {
     let lower = role.to_ascii_lowercase();
     match lower.as_str() {
         "image" => "img".to_string(),
@@ -11784,7 +11788,7 @@ async fn handle_semantic_locator(
     }
 
     let selector = "[data-agent-browser-located='true']";
-    let action_result = execute_subaction(cmd, state, selector).await;
+    let action_result = execute_subaction(cmd, state, selector, None).await;
 
     if let Some(ref browser) = state.browser {
         let _ = browser
@@ -11873,7 +11877,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     }
 
     let located = "[data-agent-browser-located='true']";
-    let action_result = execute_subaction(cmd, state, located).await;
+    let action_result = execute_subaction(cmd, state, located, None).await;
 
     if let Some(ref browser) = state.browser {
         let _ = browser
@@ -13907,6 +13911,7 @@ async fn handle_auth_login(
         "left",
         1,
         &state.iframe_sessions,
+        None,
     )
     .await?;
 
@@ -14993,7 +14998,7 @@ mod tests {
                 "test fixture '{bogus}' must not overlap the real accepted set"
             );
             let cmd = json!({ "subaction": bogus });
-            let err = execute_subaction(&cmd, &mut state, "@e1")
+            let err = execute_subaction(&cmd, &mut state, "@e1", None)
                 .await
                 .expect_err(&format!(
                     "'{bogus}' is not a find action and must be rejected"
@@ -15092,6 +15097,29 @@ mod tests {
                 "action '{action}' must dispatch to a working handler: {error}"
             );
         }
+
+        // A screenshot does not make a later semantic click depend on old refs.
+        // Reusing the same connected node and rectangle for a new sidebar item
+        // during hover must not activate that different item.
+        let response = execute_command(&json!({
+            "id":"reuse-nav", "action":"navigate",
+            "url":"data:text/html,<button onpointerover=\"this.textContent='Archived chats'\" onclick=\"window.clicked=(window.clicked||0)+1\">Data controls</button>"
+        }), &mut state).await;
+        assert!(response["success"] == true, "{response}");
+        let screenshot = tempfile::tempdir().unwrap();
+        let response = execute_command(&json!({
+            "id":"reuse-shot", "action":"screenshot", "path":screenshot.path().join("before.png")
+        }), &mut state).await;
+        assert!(response["success"] == true, "{response}");
+        let response = execute_command(&json!({
+            "id":"reuse-click", "action":"getbyrole", "role":"button", "name":"Data controls", "subaction":"click"
+        }), &mut state).await;
+        assert!(response["success"] == false, "wrong semantic target clicked: {response}");
+        assert!(response["error"].as_str().unwrap().starts_with("ref_refresh_missing:"), "{response}");
+        let response = execute_command(&json!({
+            "id":"reuse-count", "action":"evaluate", "script":"window.clicked||0"
+        }), &mut state).await;
+        assert_eq!(response["data"]["result"], json!(0));
 
         let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     }
