@@ -5585,10 +5585,40 @@ async fn observe_sensitive_tab_until(
     protected_inventory_before(deadline, &progress, reconcile_sensitive_tab(state, session)).await
 }
 
-/// A loading payment widget can replace or attach frames while a DOM read is
-/// pending. Reconcile that event immediately instead of waiting on a retired
-/// renderer until the command deadline. This receiver does not consume the
-/// daemon's events; the next drain applies the attachments and removals.
+/// Interrupt only when a document session being read is retired. Child-frame
+/// additions and same-process child navigations do not retire that renderer;
+/// cancelling on them starves complete inventories on loading widget pages.
+/// New/mutated children still pass mandatory coverage and final identity checks.
+fn inventory_session_retired(
+    event: &CdpEvent,
+    session: &str,
+    frames: &HashMap<String, String>,
+) -> bool {
+    let known_session = |sid: &str| sid == session || frames.values().any(|known| known == sid);
+    match event.method.as_str() {
+        "Target.detachedFromTarget" => event.params["sessionId"]
+            .as_str()
+            .is_some_and(known_session),
+        "Target.targetDestroyed" => event.params["targetId"]
+            .as_str()
+            .is_some_and(|frame| frames.contains_key(frame)),
+        "Page.frameDetached" => event.params["frameId"]
+            .as_str()
+            .is_some_and(|frame| frames.contains_key(frame)),
+        "Page.frameNavigated" => {
+            let frame = &event.params["frame"];
+            event.session_id.as_deref().is_some_and(|sid| {
+                (sid == session && frame["parentId"].as_str().is_none())
+                    || frame["id"]
+                        .as_str()
+                        .is_some_and(|id| frames.get(id).is_some_and(|owner| owner == sid))
+            })
+        }
+        _ => false,
+    }
+}
+
+/// This receiver does not consume daemon events; the next drain applies changes.
 async fn inventory_until_frame_change<T>(
     events: &mut broadcast::Receiver<CdpEvent>,
     session: &str,
@@ -5601,19 +5631,7 @@ async fn inventory_until_frame_change<T>(
             biased;
             event = events.recv() => {
                 let changed = match event {
-                    Ok(event) => match event.method.as_str() {
-                        "Target.attachedToTarget" | "Target.detachedFromTarget"
-                        | "Page.frameAttached" | "Page.frameDetached" | "Page.frameNavigated" => {
-                            event.session_id.as_deref().is_some_and(|sid| {
-                                sid == session || frames.values().any(|known| known == sid)
-                            }) || event.params["sessionId"].as_str().is_some_and(|sid| {
-                                frames.values().any(|known| known == sid)
-                            })
-                        }
-                        "Target.targetDestroyed" => event.params["targetId"]
-                            .as_str().is_some_and(|frame| frames.contains_key(frame)),
-                        _ => false,
-                    },
+                    Ok(event) => inventory_session_retired(&event, session, frames),
                     Err(broadcast::error::RecvError::Lagged(_)) => true,
                     Err(broadcast::error::RecvError::Closed) => return operation.await,
                 };
@@ -14637,6 +14655,82 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_inventory_frame_churn_does_not_cancel_live_documents() {
+        let frames = HashMap::from([("child".to_owned(), "child-session".to_owned())]);
+        let event = |method: &str, sid: &str, params: Value| CdpEvent {
+            method: method.into(),
+            params,
+            session_id: Some(sid.into()),
+        };
+        let harmless = [
+            event(
+                "Target.attachedToTarget",
+                "top",
+                json!({"sessionId":"new-session"}),
+            ),
+            event(
+                "Page.frameAttached",
+                "top",
+                json!({"frameId":"new-child","parentFrameId":"root"}),
+            ),
+            event(
+                "Page.frameNavigated",
+                "top",
+                json!({"frame":{"id":"same-process-child","parentId":"root"}}),
+            ),
+            event(
+                "Page.frameDetached",
+                "top",
+                json!({"frameId":"same-process-child"}),
+            ),
+            event(
+                "Page.frameNavigated",
+                "unrelated",
+                json!({"frame":{"id":"other-root"}}),
+            ),
+        ];
+        let (tx, mut rx) = broadcast::channel(16);
+        for event in harmless {
+            tx.send(event).unwrap();
+        }
+        // Biased event handling used to cancel before even polling the live read.
+        let output = inventory_until_frame_change(&mut rx, "top", &frames, async {
+            Ok::<_, agent_browser_observation::InventoryError>("complete inventory")
+        })
+        .await
+        .unwrap();
+        assert_eq!(output, "complete inventory");
+        for event in [
+            event("Page.frameNavigated", "top", json!({"frame":{"id":"root"}})),
+            event(
+                "Page.frameNavigated",
+                "child-session",
+                json!({"frame":{"id":"child","parentId":"root"}}),
+            ),
+            event("Page.frameDetached", "top", json!({"frameId":"child"})),
+            event(
+                "Target.detachedFromTarget",
+                "top",
+                json!({"sessionId":"child-session"}),
+            ),
+            event("Target.targetDestroyed", "top", json!({"targetId":"child"})),
+        ] {
+            tx.send(event).unwrap();
+            let result = inventory_until_frame_change(
+                &mut rx,
+                "top",
+                &frames,
+                std::future::pending::<Result<(), agent_browser_observation::InventoryError>>(),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(agent_browser_observation::InventoryError::Changed(_))
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn lifecycle_session_info_is_metadata_only_with_stalled_cdp() {
