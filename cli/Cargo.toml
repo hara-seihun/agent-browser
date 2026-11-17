@@ -18,6 +18,7 @@ members = ["crates/browser-cdp", "crates/browser-observation"]
 iteration-profile = "edit"
 test-profile = "ftest"
 iteration-backend = "cranelift"
+consumer-profiles = { agent-browser = "ci" }
 
 [dependencies]
 agent-browser-cdp = { path = "crates/browser-cdp" }
