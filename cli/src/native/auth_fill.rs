@@ -917,7 +917,7 @@ where
     let mut segment_group = None;
     let mut backends = vec![backend];
     let count = value.chars().count();
-    if (is_segment || (req.field == "totp" && (4..=12).contains(&count)))
+    if (is_segment || (4..=12).contains(&count))
         && (2..=32).contains(&count)
     {
         let group = client
@@ -1093,11 +1093,11 @@ where
 
 }
 
-const SEGMENT_GROUP: &str = r#"function(count, field) {
+const SEGMENT_GROUP: &str = concat!(r#"function(count, field) {"#, include_str!("code_segment.js"), r#"
     // Number inputs ignore maxlength. A code-only common container and exact
     // count identify their group without inferring code digits from page text.
     const eligible = el => el.tagName === 'INPUT' &&
-        (el.maxLength === 1 || (field === 'totp' && el.type === 'number' && count >= 4 && count <= 12)) &&
+        (el.maxLength === 1 || semanticSegmentIndex(el, count) !== null || (field === 'totp' && el.type === 'number' && count >= 4 && count <= 12)) &&
         el.type === this.type && el.form === this.form && el.isConnected &&
         !el.matches(':disabled') && !el.readOnly && el.getClientRects().length;
     for (let parent = this.parentElement; parent; parent = parent.parentElement) {
@@ -1106,6 +1106,8 @@ const SEGMENT_GROUP: &str = r#"function(count, field) {
         // Keep walking until the complete value fits, not just the first subgroup.
         if (fields.length < count) continue;
         if (fields.length !== count || fields[0] !== this) return null;
+        if (fields.some(el => semanticSegmentIndex(el, count) !== null) &&
+            !fields.every((el, i) => semanticSegmentIndex(el, count) === i + 1)) return null;
         const editables = Array.from(parent.querySelectorAll('input,textarea,select')).filter(el =>
             el.getClientRects().length && !el.matches(':disabled') && !el.readOnly);
         if (editables.length !== fields.length) return null;
@@ -1113,7 +1115,7 @@ const SEGMENT_GROUP: &str = r#"function(count, field) {
         return fields;
     }
     return null;
-}"#;
+}"#);
 
 const WORK_PASSWORD_PROBE: &str = r##"function(){return (function(){
  const doc=this.ownerDocument;
@@ -1237,7 +1239,7 @@ const EXPIRY_LAYOUT: &str = r#"function() {
     return 'mm/yy';
 }"#;
 
-const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
+const PRIVATE_FILL: &str = concat!(r#"async function(value, document, field, segments) {"#, include_str!("code_segment.js"), r#"
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached'};
     if (this.matches(':disabled') || this.readOnly) return {status:'not_editable'};
     const view = document.defaultView;
@@ -1273,8 +1275,10 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
         return segments[0] === this && segments.length === Array.from(expected).length &&
             current.length === segments.length && current.every((el, i) => el === segments[i]) &&
             segments.every(el => el.isConnected && el.ownerDocument === document &&
-                el.tagName === 'INPUT' && (el.maxLength === 1 || (field === 'totp' && el.type === 'number')) &&
-                el.type === this.type && el.form === this.form);
+                el.tagName === 'INPUT' && (el.maxLength === 1 || semanticSegmentIndex(el, segments.length) !== null || (field === 'totp' && el.type === 'number')) &&
+                el.type === this.type && el.form === this.form) &&
+            (!segments.some(el => semanticSegmentIndex(el, segments.length) !== null) ||
+                segments.every((el, i) => semanticSegmentIndex(el, segments.length) === i + 1));
     };
     if (!validSegments()) return {status:'detached'};
     const nativeText = !input || ['text','password','email','tel','url','search'].includes(this.type);
@@ -1325,7 +1329,7 @@ const PRIVATE_FILL: &str = r#"async function(value, document, field, segments) {
     if (!this.isConnected || this.ownerDocument !== document) return {status:'detached',redactionValue:rendered};
     const complete = !segments || segments.every(el => Array.from(el.value).length === 1);
     return {status:complete && presentation(rendered) === presentation(expected) ? 'filled' : 'not_retained',redactionValue:rendered};
-}"#;
+}"#);
 
 // Read only the original controls after acknowledged code delivery. Losing
 // their execution context is unavailable retention, never proof of rejection.
@@ -2114,6 +2118,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires installed Chrome; run serially"]
     async fn e2e_private_fill_segmented_retention_redaction_and_rejection() {
+        segmented_fill_fixture(false).await;
+        segmented_fill_fixture(true).await;
+    }
+
+    async fn segmented_fill_fixture(semantic: bool) {
         use super::super::actions::{close_current_browser, execute_command};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _env =
@@ -2128,7 +2137,11 @@ mod tests {
                     stream.read(&mut buffer).await.unwrap();
                     let fields = (1..=9)
                         .map(|n| {
-                            format!("<input maxlength='1' aria-label='Code character {n} of 9'>")
+                            if semantic {
+                                format!("<input type='text' id='ci-otpCode-{}' aria-label='Digit {n} of 9'>", n - 1)
+                            } else {
+                                format!("<input maxlength='1' aria-label='Code character {n} of 9'>")
+                            }
                         })
                         .collect::<String>();
                     let body = format!(
@@ -2168,7 +2181,8 @@ mod tests {
         let mgr = state.browser.as_ref().unwrap();
         let target = mgr.active_target_id().unwrap().to_owned();
         let sid = mgr.active_session_id().unwrap().to_owned();
-        let req = request(&json!({"credentialProvider":"fixture","credentialItem":"Synthetic","field":"password","selector":"input[aria-label='Code character 1 of 9']","target":target,"frame":"main"})).unwrap();
+        let selector = if semantic { "#ci-otpCode-0" } else { "input[aria-label='Code character 1 of 9']" };
+        let req = request(&json!({"credentialProvider":"fixture","credentialItem":"Synthetic","field":"password","selector":selector,"target":target,"frame":"main"})).unwrap();
         let secret = "OF29AB8CD";
         let result = fill_with_resolver(
             &mut state,
@@ -2189,7 +2203,7 @@ mod tests {
         assert_eq!(known.protect_text("OpenAI @e12 @e2"), "OpenAI @e12 @e2");
         assert_eq!(known.protect_text(secret), "[redacted: credential]");
         for n in 1..=9 {
-            let getter = execute_command(&json!({"id":"get","action":"inputvalue","selector":format!("input[aria-label='Code character {n} of 9']")}), &mut state).await;
+            let getter = execute_command(&json!({"id":"get","action":"inputvalue","selector":format!("input:nth-of-type({n})")}), &mut state).await;
             assert_eq!(getter["success"], true, "{getter}");
             assert_eq!(
                 getter["data"]["value"], "[redacted: credential]",
@@ -2203,7 +2217,7 @@ mod tests {
         .await;
         assert_eq!(snapshot["success"], true, "{snapshot}");
         assert!(!snapshot.to_string().contains(secret));
-        assert!(snapshot.to_string().contains("Code character 2 of 9"));
+        assert!(snapshot.to_string().contains(if semantic { "Digit 2 of 9" } else { "Code character 2 of 9" }));
         assert!(
             snapshot["data"]["snapshot"]
                 .as_str()
