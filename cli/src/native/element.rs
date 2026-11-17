@@ -710,7 +710,7 @@ async fn is_connected(client: &CdpClient, session_id: &str, object_id: &str) -> 
         .is_ok_and(|r| r["result"]["value"] == true)
 }
 
-/// Refresh only a known ref in its original frame, before any click dispatch.
+/// Refresh only a known ref in its original frame, before any button press.
 /// A vanished role/name or duplicate match is a refusal, never an ordinal guess.
 pub(super) async fn click_ref_map(
     client: &CdpClient, session: &str, refs: &RefMap, selector: &str,
@@ -719,7 +719,7 @@ pub(super) async fn click_ref_map(
     let Some(id) = parse_ref(selector) else { return Ok(None) };
     let entry = refs.get(&id).ok_or_else(|| format!("Unknown ref: {}", id))?;
     if entry.name.is_empty() || entry.selector.is_some() {
-        return Err("ref_refresh_ambiguous: this detached ref has no unique accessibility name; run snapshot -i and choose a fresh ref; no pointer events dispatched".into());
+        return Err("ref_refresh_ambiguous: this changed ref has no unique accessibility name; run snapshot -i and choose a fresh ref; no button press dispatched".into());
     }
     let node = find_node_id_by_role_name(client, session, &entry.role, &entry.name, None, entry.frame_id.as_deref(), frames).await?;
     let mut fresh = refs.clone();
@@ -928,9 +928,9 @@ async fn find_node_id_by_role_name(
         !node.ignored.unwrap_or(false) && extract_ax_string(&node.role) == role && extract_ax_string(&node.name) == name
     ).collect();
     match matches.as_slice() {
-        [node] => node.backend_d_o_m_node_id.ok_or_else(|| "ref_refresh_unavailable: matching element has no backend node; run snapshot -i; no pointer events dispatched".into()),
-        [] => Err("ref_refresh_missing: the old role/name is absent in a fresh accessibility snapshot of its original frame; run snapshot -i and choose a new ref; no pointer events dispatched".into()),
-        _ => Err("ref_refresh_ambiguous: multiple elements now have the old role/name; run snapshot -i and choose a specific ref; no pointer events dispatched".into()),
+        [node] => node.backend_d_o_m_node_id.ok_or_else(|| "ref_refresh_unavailable: matching element has no backend node; run snapshot -i; no button press dispatched".into()),
+        [] => Err("ref_refresh_missing: the old role/name is absent in a fresh accessibility snapshot of its original frame; run snapshot -i and choose a new ref; no button press dispatched".into()),
+        _ => Err("ref_refresh_ambiguous: multiple elements now have the old role/name; run snapshot -i and choose a specific ref; no button press dispatched".into()),
     }
 }
 

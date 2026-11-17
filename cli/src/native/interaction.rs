@@ -166,7 +166,7 @@ async fn click_once(
     Err("click_target_unstable: pinned geometry kept changing before button press; no button press dispatched".into())
     }.await;
     outcome.map_err(|error| if ref_refreshed && error.starts_with("click_target_changed:") {
-        "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no pointer events dispatched".into()
+        "ref_refresh_exhausted: target changed again after the one role/name refresh; run snapshot -i; no button press dispatched".into()
     } else { error })
 }
 
