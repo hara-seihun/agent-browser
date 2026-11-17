@@ -2265,10 +2265,7 @@ mod tests {
             metadata["data"]["sensitiveSecretMaintenance"]["removedByCharacterLength"],
             json!({})
         );
-        for (mode, error) in [
-            ("reject", "auth_fill_not_retained:"),
-            ("replace", "auth_fill_input_changed:"),
-        ] {
+        for mode in ["reject", "replace"] {
             state
                 .browser
                 .as_ref()
@@ -2276,15 +2273,23 @@ mod tests {
                 .evaluate_in_session(&sid, &format!("document.body.dataset.mode='{mode}'"), None)
                 .await
                 .unwrap();
-            let failure = fill_with_resolver(
+            let result = fill_with_resolver(
                 &mut state,
                 &req,
                 Instant::now() + std::time::Duration::from_secs(5),
                 |_, _| async { Ok(secret.into()) },
             )
-            .await
-            .unwrap_err();
-            assert!(failure.starts_with(error), "{failure}");
+            .await;
+            if mode == "reject" {
+                assert!(result.unwrap_err().starts_with("auth_fill_not_retained:"));
+            } else {
+                // A widget replacing a member after dispatch can have advanced.
+                // Acknowledge delivery, not retention, acceptance or failure.
+                let result = result.unwrap();
+                assert_eq!(result["dispatched"], true);
+                assert_eq!(result["retention"], "unavailable");
+                assert!(result.get("filled").is_none());
+            }
         }
         let actual = state
             .browser
@@ -2292,7 +2297,7 @@ mod tests {
             .unwrap()
             .evaluate_in_session(
                 &sid,
-                "window.inputCount===3 && window.changeCount===3",
+                "window.inputCount===3 && window.changeCount===2",
                 None,
             )
             .await
