@@ -2896,6 +2896,14 @@ pub fn input_acknowledgement(action: &str, cmd: &Value) -> bool {
     ) && !cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Waits answer with the caller's own wait condition and a static status, never
+/// page text, URLs or control values. Remembered redaction still applies to the
+/// response; reading the renderer before and after would only add round trips
+/// (four or more per wait to a remote browser). Expression waits stay guarded.
+pub fn status_acknowledgement(action: &str, cmd: &Value) -> bool {
+    action == "waitforloadstate" || (action == "wait" && cmd.get("expression").is_none())
+}
+
 /// Plain screenshots paint every identified sensitive control black instead
 /// of refusing. Annotated captures still need a protected snapshot.
 pub fn masked_screenshot(action: &str, cmd: &Value) -> bool {

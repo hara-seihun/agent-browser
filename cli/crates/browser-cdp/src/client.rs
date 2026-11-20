@@ -113,6 +113,56 @@ fn record_dom_event(revisions: &DomRevisions, method: &str, session: Option<&str
     }
 }
 
+/// Live `agent-browser-dom` isolated worlds per session and frame, learned from
+/// Runtime execution-context events. Each entry is Chrome's unique context id,
+/// which can never address a context of a later document or renderer process.
+type DomWorlds = Arc<std::sync::Mutex<HashMap<String, HashMap<String, String>>>>;
+
+const DOM_WORLD: &str = "agent-browser-dom";
+
+fn record_dom_world_event(worlds: &DomWorlds, method: &str, params: &Value, session: Option<&str>) {
+    let mut worlds = worlds.lock().unwrap_or_else(|e| e.into_inner());
+    match method {
+        "Runtime.executionContextCreated" => {
+            let context = &params["context"];
+            if let (Some(session), Some(frame), Some(unique), true) = (
+                session,
+                context["auxData"]["frameId"].as_str(),
+                context["uniqueId"].as_str(),
+                context["name"] == DOM_WORLD,
+            ) {
+                worlds
+                    .entry(session.to_owned())
+                    .or_default()
+                    .insert(frame.to_owned(), unique.to_owned());
+            }
+        }
+        "Runtime.executionContextDestroyed" => match session {
+            Some(session) => {
+                if let Some(frames) = worlds.get_mut(session) {
+                    match params["executionContextUniqueId"].as_str() {
+                        Some(unique) => frames.retain(|_, known| known != unique),
+                        None => frames.clear(),
+                    }
+                }
+            }
+            None => worlds.clear(),
+        },
+        "Runtime.executionContextsCleared" => match session {
+            Some(session) => {
+                worlds.remove(session);
+            }
+            None => worlds.clear(),
+        },
+        "Target.detachedFromTarget" => {
+            if let Some(detached) = params["sessionId"].as_str() {
+                worlds.remove(detached);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn invalidate_dom_revisions(revisions: &DomRevisions) {
     for revision in revisions
         .lock()
@@ -277,6 +327,8 @@ pub struct CdpClient {
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
     dom_revisions: DomRevisions,
+    dom_worlds: DomWorlds,
+    dom_world_sessions: std::sync::Mutex<std::collections::HashSet<String>>,
     object_groups: Mutex<HashMap<u64, ObjectCleanup>>,
     next_object_group: AtomicU64,
     pub observation_progress: crate::observation_progress::ObservationProgress,
@@ -378,6 +430,8 @@ impl CdpClient {
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let dom_revisions: DomRevisions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let dom_worlds: DomWorlds = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let dom_worlds_reader = dom_worlds.clone();
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
@@ -465,6 +519,16 @@ impl CdpClient {
                             method,
                             parsed.session_id.as_deref(),
                         );
+                        if method.starts_with("Runtime.executionContext")
+                            || method == "Target.detachedFromTarget"
+                        {
+                            record_dom_world_event(
+                                &dom_worlds_reader,
+                                method,
+                                parsed.params.as_ref().unwrap_or(&Value::Null),
+                                parsed.session_id.as_deref(),
+                            );
+                        }
                     }
                 }
                 broadcast_raw(&raw_tx_clone, &msg);
@@ -550,6 +614,8 @@ impl CdpClient {
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
             dom_revisions,
+            dom_worlds,
+            dom_world_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
             object_groups: Mutex::new(HashMap::new()),
             next_object_group: AtomicU64::new(1),
             observation_progress: crate::observation_progress::connection_progress(),
@@ -772,7 +838,7 @@ impl CdpClient {
         };
         let world = self.send_command(
             "Page.createIsolatedWorld",
-            Some(json!({ "frameId": frame, "worldName": "agent-browser-dom" })),
+            Some(json!({ "frameId": frame, "worldName": DOM_WORLD })),
             Some(session),
         ).await?;
         world["executionContextId"].as_i64().ok_or_else(|| "DOM world unavailable".into())
@@ -790,7 +856,60 @@ impl CdpClient {
     pub async fn evaluate_dom_in_frame(
         &self, session: &str, frame: Option<&str>, expression: String, return_by_value: bool,
     ) -> Result<super::types::EvaluateResult, String> {
-        let context = self.dom_world(session, frame).await?;
+        // A known live world of this exact frame answers in one round trip.
+        // An unknown unique id is rejected by Chrome before evaluation, so the
+        // expression never runs twice.
+        let known = frame.and_then(|frame| {
+            self.dom_worlds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(session)
+                .and_then(|frames| frames.get(frame).cloned())
+        });
+        if let Some(unique) = known {
+            match self
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &json!({
+                        "expression": &expression, "uniqueContextId": unique,
+                        "returnByValue": return_by_value, "awaitPromise": false,
+                    }),
+                    Some(session),
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) if !error.contains("context") => return Err(error),
+                Err(_) => {}
+            }
+        }
+        // Ask Chrome to create the world in each new document of this session,
+        // so later reads find it already reported instead of creating it again.
+        let register = !self
+            .dom_world_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session);
+        let (context, registered) = tokio::join!(self.dom_world(session, frame), async {
+            if register {
+                self.send_command(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    Some(json!({ "source": "", "worldName": DOM_WORLD })),
+                    Some(session),
+                )
+                .await
+                .is_ok()
+            } else {
+                false
+            }
+        });
+        if registered {
+            self.dom_world_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session.to_owned());
+        }
+        let context = context?;
         self.send_command_typed(
             "Runtime.evaluate",
             &json!({

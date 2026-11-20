@@ -3582,11 +3582,15 @@ async fn execute_command_inner(
     let fill_input = effect_action == "fill";
     let input_acknowledgement =
         agent_browser_observation::input_acknowledgement(effect_action, cmd);
+    let status_acknowledgement = agent_browser_observation::status_acknowledgement(action, cmd);
     // These actions own the full protected inventory and validated projection;
     // getcounts returns only numeric counts, never protected page content.
     let observation_session = if matches!(action, "snapshot" | "dialog" | "getcounts") {
         None
-    } else if (input_acknowledgement && !fill_input && find_subaction.is_none()) || browser_metadata_only {
+    } else if (input_acknowledgement && !fill_input && find_subaction.is_none())
+        || browser_metadata_only
+        || status_acknowledgement
+    {
         // These responses contain no page content. Keep remembered redaction,
         // but do not read the renderer before or after dispatching input.
         // Fill still needs its preflight inventory to refuse protected targets;
@@ -3895,6 +3899,7 @@ async fn execute_command_inner(
     // to protect. Navigation triggered by that script must not replace its
     // completed result with a fresh inventory of the changing destination.
     let response_acknowledgement = input_acknowledgement
+        || status_acknowledgement
         || (action == "evaluate"
             && result.as_ref().is_ok_and(|data| data.get("result").is_some_and(Value::is_null)));
 
@@ -6894,7 +6899,7 @@ async fn protected_snapshot_observation(
     session: &str,
     options: &SnapshotOptions,
     frame: Option<&str>,
-) -> Result<(String, RefMap), agent_browser_observation::InventoryError> {
+) -> Result<(String, RefMap, String), agent_browser_observation::InventoryError> {
     let deadline = state.protected_deadline();
     let progress = state.protected_observation_progress();
     state.ref_map.clear();
@@ -6955,14 +6960,14 @@ async fn protected_snapshot_observation(
                 )
                 .await
                 {
-                    Ok((tree, observation)) => {
+                    Ok((tree, observation, origin)) => {
                         state.active_iframe_sessions = observation.frame_sessions.clone();
                         state
                             .sensitive_observations
                             .entry(session.to_owned())
                             .or_default()
                             .merge(observation);
-                        return Ok((tree, refs));
+                        return Ok((tree, refs, origin));
                     }
                     Err(agent_browser_observation::InventoryError::Coverage(gap)) => {
                         recover_sensitive_frames(state, gap).await?;
@@ -6993,6 +6998,7 @@ async fn protected_snapshot(
 ) -> Result<(String, RefMap), String> {
     protected_snapshot_observation(state, session, options, frame)
         .await
+        .map(|(tree, refs, _)| (tree, refs))
         .map_err(agent_browser_observation::InventoryError::into_message)
 }
 
@@ -7038,7 +7044,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     state.ref_map.clear();
-    let (tree, refs) = loop {
+    let (tree, refs, url) = loop {
         let session_id = state.browser.as_ref().ok_or("Browser not launched")?
             .active_session_id()?.to_string();
         let frame = state.active_frame_id.clone();
@@ -7054,23 +7060,6 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     };
     state.ref_map = refs;
-    let progress = state.protected_observation_progress();
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = match progress
-        .track(
-            agent_browser_cdp::observation_progress::Phase::OriginProjection,
-            mgr.get_url(),
-        )
-        .await
-    {
-        Ok(url) if !url.is_empty() => url,
-        _ => {
-            state.ref_map.clear();
-            return Ok(incomplete_snapshot(
-                agent_browser_observation::InventoryError::Unavailable("Snapshot origin unavailable".into()),
-            ));
-        }
-    };
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -16536,7 +16525,7 @@ mod tests {
             state
                 .iframe_sessions
                 .insert("frame-1".into(), "session-1".into());
-            let (tree, _) = snapshot::take_snapshot_with_observation(
+            let (tree, _, _) = snapshot::take_snapshot_with_observation(
                 &client,
                 &session,
                 &SnapshotOptions::default(),

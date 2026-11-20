@@ -256,7 +256,7 @@ pub async fn take_snapshot(
         &mut agent_browser_observation::InventoryContinuation::default(),
     )
     .await
-    .map(|(output, _)| output)
+    .map(|(output, _, _)| output)
 }
 
 pub(crate) async fn take_snapshot_with_observation(
@@ -268,13 +268,13 @@ pub(crate) async fn take_snapshot_with_observation(
     iframe_sessions: &HashMap<String, String>,
     private_observation: &agent_browser_observation::Observation,
     continuation: &mut agent_browser_observation::InventoryContinuation,
-) -> Result<(String, agent_browser_observation::Observation), agent_browser_observation::InventoryError> {
+) -> Result<(String, agent_browser_observation::Observation, String), agent_browser_observation::InventoryError> {
     let (mut observation, batch) = agent_browser_observation::observe_with_continuation(
         client,
         session_id,
         iframe_sessions,
         continuation,
-        |context| collect_snapshot_batch(client, options, frame_id, context),
+        |context| collect_snapshot_batch(client, session_id, options, frame_id, context),
     )
     .await?;
     observation.inherit_private(private_observation);
@@ -290,7 +290,7 @@ pub(crate) async fn take_snapshot_with_observation(
         &mut std::collections::HashSet::new(),
     )?;
     *ref_map = candidate_refs;
-    Ok((output, observation))
+    Ok((output, observation, batch.origin))
 }
 
 struct SnapshotBatch {
@@ -299,10 +299,12 @@ struct SnapshotBatch {
     projections: HashMap<String, GetFullAXTreeResult>,
     cursor: HashMap<String, HashMap<i64, CursorElementInfo>>,
     selector_backend_ids: Option<std::collections::HashSet<i64>>,
+    origin: String,
 }
 
 async fn collect_snapshot_batch(
     client: &Arc<CdpClient>,
+    top_session: &str,
     options: &SnapshotOptions,
     frame_id: Option<&str>,
     context: agent_browser_observation::InventoryContext,
@@ -406,7 +408,32 @@ async fn collect_snapshot_batch(
             Ok::<_, String>(selector_backend_ids)
         },
     );
-    let (projections, cursor, selector_backend_ids) = tokio::join!(ax, cursor, selector);
+    // The top document's URL is read inside the same identity span as the
+    // projections, so final validation covers it and it costs no extra round trip.
+    let origin = client.observation_progress.track(
+        agent_browser_cdp::observation_progress::Phase::OriginProjection,
+        async {
+            let result: agent_browser_cdp::types::EvaluateResult = client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &agent_browser_cdp::types::EvaluateParams {
+                        expression: "location.href".into(),
+                        return_by_value: Some(true),
+                        await_promise: Some(true),
+                    },
+                    Some(top_session),
+                )
+                .await?;
+            match result.result.value.as_ref().and_then(Value::as_str) {
+                Some(url) if result.exception_details.is_none() && !url.is_empty() => {
+                    Ok(url.to_owned())
+                }
+                _ => Err("Snapshot origin unavailable".to_string()),
+            }
+        },
+    );
+    let (projections, cursor, selector_backend_ids, origin) =
+        tokio::join!(ax, cursor, selector, origin);
     let selected_frame = root.to_owned();
     Ok(SnapshotBatch {
         context,
@@ -414,6 +441,7 @@ async fn collect_snapshot_batch(
         projections: projections?,
         cursor: cursor?,
         selector_backend_ids: selector_backend_ids?,
+        origin: origin?,
     })
 }
 
