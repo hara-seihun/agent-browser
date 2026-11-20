@@ -95,7 +95,33 @@ async fn click_once(
         None if prepared["result"]["value"].is_array() => {},
         None => return Err("click_state_unavailable: click geometry unavailable before dispatch".into()),
     }
-    let fast = super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?;
+    // A backend-node ref pins a Chrome node, not a selector that can start
+    // matching a replacement. Re-resolving that same immutable backend id adds
+    // two remote reads but no identity information. The final synchronous check
+    // below still requires the pinned node to be connected and enabled.
+    let pinned_ref = super::element::parse_ref(selector_or_ref)
+        .and_then(|id| ref_map.get(&id))
+        .is_some_and(|entry| entry.backend_node_id.is_some());
+    let stable_check = |current: String| {
+        client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
+            "objectId": object, "functionDeclaration": &preparation,
+            "arguments": [{"value": prepared["result"]["value"]}, {"objectId": current}], "returnByValue": true
+        })), Some(&object_session))
+    };
+    // For a pinned ref both reads target the same object in the same renderer.
+    // Chrome runs them in the order sent, so the synchronous stability check
+    // still follows point resolution (and any scroll it caused), one remote
+    // round trip sooner. Its answer is used only on the direct-point path.
+    let (fast, early_stable) = if pinned_ref {
+        let (fast, stable) = tokio::join!(
+            super::element::fast_click_point(client, &object_session, &object, selector_or_ref),
+            stable_check(object.clone()),
+        );
+        (fast?, Some(stable))
+    } else {
+        (super::element::fast_click_point(client, &object_session, &object, selector_or_ref).await?, None)
+    };
+    let direct_point = fast.is_some();
     let (x, y, effective_session_id) = if let Some((x,y)) = fast {
         (x, y, object_session.clone())
     } else {
@@ -111,13 +137,6 @@ async fn click_once(
     if effective_session_id != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    // A backend-node ref pins a Chrome node, not a selector that can start
-    // matching a replacement. Re-resolving that same immutable backend id adds
-    // two remote reads but no identity information. The final synchronous check
-    // below still requires the pinned node to be connected and enabled.
-    let pinned_ref = super::element::parse_ref(selector_or_ref)
-        .and_then(|id| ref_map.get(&id))
-        .is_some_and(|entry| entry.backend_node_id.is_some());
     let (current, current_session) = if pinned_ref {
         (object.clone(), object_session.clone())
     } else {
@@ -126,10 +145,10 @@ async fn click_once(
     if current_session != object_session {
         return Err("click_target_changed: pinned click frame changed before dispatch".into());
     }
-    let stable = client.send_command("Runtime.callFunctionOn", Some(serde_json::json!({
-        "objectId": object, "functionDeclaration": &preparation,
-        "arguments": [{"value": prepared["result"]["value"]}, {"objectId": current}], "returnByValue": true
-    })), Some(&object_session)).await?;
+    let stable = match early_stable {
+        Some(stable) if direct_point => stable?,
+        _ => stable_check(current).await?,
+    };
     if stable.get("exceptionDetails").is_some() {
         return Err("click_state_unavailable: click geometry unavailable before dispatch".into());
     }
