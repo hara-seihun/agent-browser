@@ -136,6 +136,10 @@ impl Fixture {
                             assert_eq!(cmd["params"]["worldName"], "agent-browser-dom");
                             json!({"executionContextId":1})
                         }
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            assert_eq!(cmd["params"]["worldName"], "agent-browser-dom");
+                            json!({"identifier":"dom-world"})
+                        }
                         "DOM.getDocument" => {
                             json!({"root":{"nodeId":1,"backendNodeId":100,"nodeType":9,"nodeName":"#document","documentURL":url,"children":[{"nodeId":2,"backendNodeId":7,"nodeType":1,"nodeName":"INPUT","localName":"input","attributes":["type","password","name","Passwd","autocomplete","current-password"]}]}})
                         }

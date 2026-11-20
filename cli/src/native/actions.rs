@@ -16238,10 +16238,12 @@ mod tests {
             assert_eq!((deep, shallow), (26, 26));
             if latency { eprintln!("remote_snapshot_calls={calls:?}"); }
             assert_eq!(calls["Page.getFrameTree"], 52);
-            assert_eq!(calls.values().sum::<usize>(), 416, "unexpected protocol work: {calls:?}");
-            for method in ["Accessibility.getFullAXTree", "Runtime.evaluate"] {
-                assert_eq!(calls[method], 26);
-            }
+            // One origin read per snapshot; each session registers its DOM world once.
+            let registered = if round == 0 { 26 } else { 0 };
+            assert_eq!(calls.values().sum::<usize>(), 417 + registered, "unexpected protocol work: {calls:?}");
+            assert_eq!(calls.get("Page.addScriptToEvaluateOnNewDocument").copied().unwrap_or(0), registered);
+            assert_eq!(calls["Runtime.evaluate"], 27);
+            assert_eq!(calls["Accessibility.getFullAXTree"], 26);
             for method in ["DOM.querySelector", "DOM.describeNode"] {
                 assert_eq!(calls.get(method).copied().unwrap_or(0), 0);
             }
@@ -16319,7 +16321,8 @@ mod tests {
                 )));
             }
         }
-        assert_eq!(projections, 2);
+        // Two cursor projections plus the origin read inside the same span.
+        assert_eq!(projections, 3);
         assert_eq!(reads.len(), 6);
         client.close().await;
         fixture.server.await.unwrap();
@@ -17311,9 +17314,12 @@ mod tests {
                 } else {
                     format!("session-{n}")
                 };
-                for method in ["Accessibility.getFullAXTree", "Runtime.evaluate"] {
-                    assert_eq!(counts[&(sid.clone(), method.into())], 1);
-                }
+                assert_eq!(counts[&(sid.clone(), "Accessibility.getFullAXTree".into())], 1);
+                // The top session also answers the snapshot origin read.
+                assert_eq!(
+                    counts[&(sid.clone(), "Runtime.evaluate".into())],
+                    if n == 0 { 2 } else { 1 }
+                );
                 for method in ["DOM.querySelector", "DOM.describeNode"] {
                     assert_eq!(
                         counts
